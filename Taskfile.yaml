@@ -5,7 +5,8 @@ vars:
   IMAGE_NAME: "ghcr.io/milo-os/openmeter-provider"
   IMAGE_TAG: "dev"
   TEST_INFRA_CLUSTER_NAME: "test-infra"
-  TEST_INFRA_REPO_REF: 'v0.7.1'
+  TEST_INFRA_REPO_REF: 'v0.6.0'
+  WAIT_TIMEOUT: "10m"
   CONTROLLER_TOOLS_VERSION: "v0.18.0"
   DEFAULTER_GEN_VERSION: "v0.32.3"
   GOLANGCI_LINT_VERSION: "v2.12.2"
@@ -15,8 +16,10 @@ includes:
   # Must set TASK_X_REMOTE_TASKFILES=1 to use this feature.
   test-infra:
     taskfile: https://raw.githubusercontent.com/datum-cloud/test-infra/{{.TEST_INFRA_REPO_REF}}/Taskfile.yml
+    checksum: a1cf6063def6ee21ba42f8a0818127c92a9a5c313c293387f2294e42480dd3d5
     vars:
       REPO_REF: "{{.TEST_INFRA_REPO_REF}}"
+      WAIT_TIMEOUT: "{{.WAIT_TIMEOUT}}"
 
 tasks:
   default:
@@ -184,9 +187,10 @@ tasks:
     silent: true
     cmds:
       - task: test-infra:cluster-up
-      - task: dev:build
-      - task: dev:load
-      - task: dev:deploy
+      - task: dev:install-dependencies
+      #- task: dev:build
+      #- task: dev:load
+      #- task: dev:deploy
 
   dev:deploy:
     desc: Deploy controller-template using dev overlay
@@ -223,6 +227,59 @@ tasks:
         echo ""
         echo "controller-template successfully deployed in dev mode!"
         echo "----------------------------------------------------------------------"
+
+  dev:install-dependencies:
+    desc: Install all infrastructure dependencies (OpenMeter)
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "📦 Installing infrastructure dependencies..."
+        echo ""
+
+        # ============================================================
+        # Install OpenMeter
+        # ============================================================
+        echo "📦 Installing OpenMeter..."
+
+        echo "Applying OpenMeter resources..."
+        task test-infra:kubectl -- apply -k config/dependencies/openmeter
+
+        echo "Waiting for OpenMeter namespace to be created..."
+        task test-infra:kubectl -- wait --for=jsonpath='{.status.phase}'=Active namespace/openmeter-system --timeout=1000s 2>/dev/null || echo "⚠️  Namespace not ready yet"
+
+        echo "Waiting for OpenMeter HelmRelease to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/openmeter -n openmeter-system --timeout=1000s 2>/dev/null || echo "⚠️  OpenMeter HelmRelease not ready yet"
+
+        echo "Waiting for OpenMeter app pods to be ready..."
+        # Wait only on the long-running app workload pods. The broad
+        # app.kubernetes.io/name=openmeter label also matches one-shot CronJob
+        # pods (e.g. openmeter-billing-*-invoices) that finish as Completed
+        # 0/1 and never reach Ready, which would hang a plain wait forever.
+        # Exclude the CronJob pods by field selector on owner kind.
+        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=openmeter -n openmeter-system \
+          --field-selector status.phase=Running --timeout=1000s 2>/dev/null || echo "⚠️  OpenMeter pods not ready yet"
+
+        echo "✅ OpenMeter installed"
+        echo ""
+
+        # ============================================================
+        # Summary
+        # ============================================================
+        echo "✅ All infrastructure dependencies installed successfully!"
+        echo ""
+        echo "📊 Check status:"
+        echo "  OpenMeter:  task test-infra:kubectl -- get pods -n openmeter-system"
+        echo ""
+        echo "📋 HelmRelease status:"
+        echo "  task test-infra:kubectl -- get helmrelease -n openmeter-system"
+        echo ""
+
+  dev:pf-openmeter:
+    desc: Port forward OpenMeter API for local development
+    cmds:
+      - echo "Port forwarding OpenMeter API to localhost:8888..."
+      - task test-infra:kubectl -- port-forward -n openmeter-system svc/openmeter-api 8888:80
 
   dev:redeploy:
     desc: Quick rebuild and redeploy for dev environment
