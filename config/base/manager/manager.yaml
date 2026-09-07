@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-template-manager
+  labels:
+    control-plane: controller-template
+    app.kubernetes.io/name: controller-template
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-template
+  replicas: 2
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        control-plane: controller-template
+        app.kubernetes.io/name: controller-template
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    control-plane: controller-template
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              control-plane: controller-template
+      containers:
+      - command:
+        - /controller-template
+        args:
+          - operator
+          - --leader-elect
+          - --leader-elect-namespace=kube-system
+          - --health-probe-bind-address=:8081
+          - --server-config=/config/config.yaml
+        image: ghcr.io/milo-os/controller-template:dev
+        name: manager
+        ports:
+        - containerPort: 9443
+          name: webhook-server
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - "ALL"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        volumeMounts:
+        - name: config
+          mountPath: /config
+        - name: webhook-cert
+          mountPath: /tmp/k8s-webhook-server/serving-certs
+          readOnly: true
+      serviceAccountName: controller-template-manager
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: controller-template-config
+      # Optional so the manager can run without admission webhooks: when
+      # `webhookServer:` is omitted from the server config, the binary
+      # skips the webhook server entirely and the missing Secret is fine.
+      - name: webhook-cert
+        secret:
+          secretName: controller-template-webhook-cert
+          defaultMode: 420
+          optional: true

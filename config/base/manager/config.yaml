@@ -1,0 +1,8 @@
+apiVersion: apiserver.config.miloapis.com/v1alpha1
+kind: ControllerTemplateOperator
+metricsServer:
+  bindAddress: "0"
+webhookServer: {}
+# kubeconfigPath points at the Milo control plane API server.
+# Leave empty to use in-cluster config (default when deployed alongside the API server).
+# kubeconfigPath: /etc/milo/kubeconfig

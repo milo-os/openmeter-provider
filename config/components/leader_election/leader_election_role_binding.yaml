@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: controller-template
+    app.kubernetes.io/managed-by: kustomize
+  name: controller-template-leader-election
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: controller-template-leader-election
+subjects:
+- kind: ServiceAccount
+  name: controller-template-manager

@@ -1,0 +1,29 @@
+# Binaries and tools
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+cover.out
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Test infrastructure
+.test-infra/
+
+# Task remote cache
+.task/
+
+# Claude AI
+.claude/.initialized

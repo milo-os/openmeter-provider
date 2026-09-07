@@ -1,0 +1,75 @@
+@import "tailwindcss";
+@import "@datum-cloud/datum-ui/styles";
+
+@theme {
+  --color-midnight-fjord: #0C1D31;
+  --color-aurora-moss: #E6F59F;
+  --color-blush-quartz: #ECD0D0;
+  --color-canyon-clay: #BF9595;
+  --color-pine-forge: #4D6356;
+  --color-glacier-mist-600: #F6F6F5;
+  --color-glacier-mist-700: #EFEFED;
+  --color-glacier-mist-800: #E8E7E4;
+
+  --color-chart-1: hsl(146 21% 38%);
+  --color-chart-2: hsl(67 89% 79%);
+  --color-chart-3: hsl(0 18% 66%);
+  --color-chart-4: hsl(213 59% 12%);
+  --color-chart-5: hsl(0 28% 87%);
+
+  --color-background: hsl(40 10% 93%);
+  --color-foreground: hsl(213 59% 12%);
+  --color-card: hsl(0 0% 100%);
+  --color-card-foreground: hsl(213 59% 12%);
+  --color-popover: hsl(0 0% 100%);
+  --color-popover-foreground: hsl(213 59% 12%);
+  --color-primary: hsl(146 21% 32%);
+  --color-primary-foreground: hsl(0 0% 100%);
+  --color-secondary: hsl(67 70% 70%);
+  --color-secondary-foreground: hsl(213 59% 12%);
+  --color-muted: hsl(40 10% 90%);
+  --color-muted-foreground: hsl(213 30% 30%);
+  --color-accent: hsl(67 70% 70%);
+  --color-accent-foreground: hsl(213 59% 12%);
+  --color-destructive: hsl(0 50% 55%);
+  --color-destructive-foreground: hsl(0 0% 100%);
+  --color-border: hsl(213 15% 75%);
+  --color-input: hsl(213 15% 75%);
+  --color-ring: hsl(146 21% 32%);
+
+  --radius-lg: 0.5rem;
+  --radius-md: calc(0.5rem - 2px);
+  --radius-sm: calc(0.5rem - 4px);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+  }
+
+  .dark {
+    --color-background: hsl(213 30% 8%);
+    --color-foreground: hsl(0 0% 95%);
+    --color-card: hsl(213 25% 14%);
+    --color-card-foreground: hsl(0 0% 95%);
+    --color-popover: hsl(213 25% 14%);
+    --color-popover-foreground: hsl(0 0% 95%);
+    --color-primary: hsl(146 25% 50%);
+    --color-primary-foreground: hsl(0 0% 98%);
+    --color-secondary: hsl(67 50% 50%);
+    --color-secondary-foreground: hsl(213 59% 12%);
+    --color-muted: hsl(213 25% 18%);
+    --color-muted-foreground: hsl(213 15% 70%);
+    --color-accent: hsl(67 50% 50%);
+    --color-accent-foreground: hsl(213 59% 12%);
+    --color-destructive: hsl(0 60% 55%);
+    --color-destructive-foreground: hsl(0 0% 98%);
+    --color-border: hsl(213 20% 30%);
+    --color-input: hsl(213 20% 30%);
+    --color-ring: hsl(146 25% 50%);
+  }
+}

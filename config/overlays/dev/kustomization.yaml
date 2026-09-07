@@ -1,0 +1,91 @@
+namespace: controller-template-system
+
+images:
+  - name: ghcr.io/milo-os/controller-template
+    newTag: dev
+
+resources:
+  - ../../base/crd
+  - ../../base/manager
+  - ../../base/certmanager
+
+components:
+  - ../../components/namespace
+  - ../../base/webhook
+  - ../../components/controller_rbac
+
+configMapGenerator:
+  - name: controller-template-config
+    behavior: replace
+    files:
+      - config.yaml
+    options:
+      disableNameSuffixHash: true
+
+patches:
+  - path: dev_patch.yaml
+  - target:
+      kind: Deployment
+      name: controller-template-manager
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/containers/0/volumeMounts/1
+      - op: remove
+        path: /spec/template/spec/volumes/1
+  - target:
+      kind: Certificate
+      name: controller-template-serving-cert
+    patch: |-
+      - op: replace
+        path: /spec/dnsNames
+        value:
+          - controller-template-webhook.controller-template-system.svc
+          - controller-template-webhook.controller-template-system.svc.cluster.local
+
+replacements:
+  - source:
+      kind: Certificate
+      group: cert-manager.io
+      version: v1
+      name: controller-template-serving-cert
+      fieldPath: .metadata.namespace
+    targets:
+      - select:
+          kind: ValidatingWebhookConfiguration
+        fieldPaths:
+          - .metadata.annotations.[cert-manager.io/inject-ca-from]
+        options:
+          delimiter: '/'
+          index: 0
+          create: true
+      - select:
+          kind: MutatingWebhookConfiguration
+        fieldPaths:
+          - .metadata.annotations.[cert-manager.io/inject-ca-from]
+        options:
+          delimiter: '/'
+          index: 0
+          create: true
+  - source:
+      kind: Certificate
+      group: cert-manager.io
+      version: v1
+      name: controller-template-serving-cert
+      fieldPath: .metadata.name
+    targets:
+      - select:
+          kind: ValidatingWebhookConfiguration
+        fieldPaths:
+          - .metadata.annotations.[cert-manager.io/inject-ca-from]
+        options:
+          delimiter: '/'
+          index: 1
+          create: true
+      - select:
+          kind: MutatingWebhookConfiguration
+        fieldPaths:
+          - .metadata.annotations.[cert-manager.io/inject-ca-from]
+        options:
+          delimiter: '/'
+          index: 1
+          create: true

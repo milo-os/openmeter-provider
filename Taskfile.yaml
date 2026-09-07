@@ -1,0 +1,344 @@
+version: '3'
+
+vars:
+  TOOL_DIR: "{{.USER_WORKING_DIR}}/bin"
+  IMAGE_NAME: "ghcr.io/milo-os/controller-template"
+  IMAGE_TAG: "dev"
+  TEST_INFRA_CLUSTER_NAME: "test-infra"
+  TEST_INFRA_REPO_REF: 'v0.6.0'
+  CONTROLLER_TOOLS_VERSION: "v0.16.4"
+  DEFAULTER_GEN_VERSION: "v0.32.3"
+  GOLANGCI_LINT_VERSION: "v2.12.2"
+  CHAINSAW_VERSION: "v0.2.13"
+
+includes:
+  # Must set TASK_X_REMOTE_TASKFILES=1 to use this feature.
+  test-infra:
+    taskfile: https://raw.githubusercontent.com/datum-cloud/test-infra/{{.TEST_INFRA_REPO_REF}}/Taskfile.yml
+    vars:
+      REPO_REF: "{{.TEST_INFRA_REPO_REF}}"
+
+tasks:
+  default:
+    desc: List all available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  # Code generation
+  generate:
+    desc: Run code generation (deepcopy, defaults)
+    cmds:
+      - |
+        set -e
+        echo "Running code generation..."
+        {{.TOOL_DIR}}/controller-gen object:headerFile="hack/boilerplate.go.txt" paths="./..."
+        {{.TOOL_DIR}}/defaulter-gen ./internal/config --output-file=zz_generated.defaults.go
+        echo "Code generation complete!"
+    deps:
+      - install-tools
+    silent: true
+
+  manifests:
+    desc: Generate CRD, RBAC, and webhook manifests
+    cmds:
+      - |
+        set -e
+        echo "Generating manifests..."
+        {{.TOOL_DIR}}/controller-gen rbac:roleName=controller-template-manager \
+          crd:generateEmbeddedObjectMeta=true \
+          webhook \
+          paths="./..." \
+          output:crd:artifacts:config=config/base/crd/bases \
+          output:rbac:artifacts:config=config/components/controller_rbac \
+          output:webhook:artifacts:config=config/base/webhook
+        echo "Manifests generated!"
+    deps:
+      - install-tools
+    silent: true
+
+  build:
+    desc: Build the controller-template binary
+    cmds:
+      - |
+        set -e
+        echo "Building controller-template..."
+        mkdir -p {{.TOOL_DIR}}
+
+        GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
+        GIT_TREE_STATE="clean"
+        if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+          GIT_TREE_STATE="dirty"
+        fi
+        BUILD_DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown")
+
+        echo "Version: ${VERSION}, Commit: ${GIT_COMMIT:0:7}, Tree: ${GIT_TREE_STATE}"
+
+        go build \
+          -ldflags="-X 'main.version=${VERSION}' \
+                    -X 'main.gitCommit=${GIT_COMMIT}' \
+                    -X 'main.gitTreeState=${GIT_TREE_STATE}' \
+                    -X 'main.buildDate=${BUILD_DATE}'" \
+          -o {{.TOOL_DIR}}/controller-template ./cmd/controller-template
+        echo "Binary built: {{.TOOL_DIR}}/controller-template"
+    silent: true
+
+  test:
+    desc: Run Go tests
+    cmds:
+      - go test -timeout 5m ./... -count=1
+    silent: false
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - "{{.TOOL_DIR}}/golangci-lint run ./..."
+    deps:
+      - install-tools
+    silent: false
+
+  # Tool installation
+  install-tools:
+    desc: Install required development tools
+    cmds:
+      - |
+        set -e
+        mkdir -p {{.TOOL_DIR}}
+
+        # controller-gen
+        if [ ! -f "{{.TOOL_DIR}}/controller-gen-{{.CONTROLLER_TOOLS_VERSION}}" ]; then
+          echo "Installing controller-gen {{.CONTROLLER_TOOLS_VERSION}}..."
+          GOBIN={{.TOOL_DIR}} go install sigs.k8s.io/controller-tools/cmd/controller-gen@{{.CONTROLLER_TOOLS_VERSION}}
+          mv {{.TOOL_DIR}}/controller-gen {{.TOOL_DIR}}/controller-gen-{{.CONTROLLER_TOOLS_VERSION}}
+        fi
+        ln -sf {{.TOOL_DIR}}/controller-gen-{{.CONTROLLER_TOOLS_VERSION}} {{.TOOL_DIR}}/controller-gen
+
+        # defaulter-gen
+        if [ ! -f "{{.TOOL_DIR}}/defaulter-gen-{{.DEFAULTER_GEN_VERSION}}" ]; then
+          echo "Installing defaulter-gen {{.DEFAULTER_GEN_VERSION}}..."
+          GOBIN={{.TOOL_DIR}} go install k8s.io/code-generator/cmd/defaulter-gen@{{.DEFAULTER_GEN_VERSION}}
+          mv {{.TOOL_DIR}}/defaulter-gen {{.TOOL_DIR}}/defaulter-gen-{{.DEFAULTER_GEN_VERSION}}
+        fi
+        ln -sf {{.TOOL_DIR}}/defaulter-gen-{{.DEFAULTER_GEN_VERSION}} {{.TOOL_DIR}}/defaulter-gen
+
+        # golangci-lint
+        if [ ! -f "{{.TOOL_DIR}}/golangci-lint-{{.GOLANGCI_LINT_VERSION}}" ]; then
+          echo "Installing golangci-lint {{.GOLANGCI_LINT_VERSION}}..."
+          GOBIN={{.TOOL_DIR}} go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLANGCI_LINT_VERSION}}
+          mv {{.TOOL_DIR}}/golangci-lint {{.TOOL_DIR}}/golangci-lint-{{.GOLANGCI_LINT_VERSION}}
+        fi
+        ln -sf {{.TOOL_DIR}}/golangci-lint-{{.GOLANGCI_LINT_VERSION}} {{.TOOL_DIR}}/golangci-lint
+
+        # chainsaw
+        if [ ! -f "{{.TOOL_DIR}}/chainsaw-{{.CHAINSAW_VERSION}}" ]; then
+          echo "Installing chainsaw {{.CHAINSAW_VERSION}}..."
+          GOBIN={{.TOOL_DIR}} go install github.com/kyverno/chainsaw@{{.CHAINSAW_VERSION}}
+          mv {{.TOOL_DIR}}/chainsaw {{.TOOL_DIR}}/chainsaw-{{.CHAINSAW_VERSION}}
+        fi
+        ln -sf {{.TOOL_DIR}}/chainsaw-{{.CHAINSAW_VERSION}} {{.TOOL_DIR}}/chainsaw
+    silent: true
+    status:
+      - test -f {{.TOOL_DIR}}/controller-gen-{{.CONTROLLER_TOOLS_VERSION}}
+      - test -f {{.TOOL_DIR}}/defaulter-gen-{{.DEFAULTER_GEN_VERSION}}
+      - test -f {{.TOOL_DIR}}/golangci-lint-{{.GOLANGCI_LINT_VERSION}}
+      - test -f {{.TOOL_DIR}}/chainsaw-{{.CHAINSAW_VERSION}}
+
+  # Development tasks
+  dev:build:
+    desc: Build the controller-template container image for development
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Building controller-template container image: {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
+
+        GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
+        GIT_TREE_STATE="clean"
+        if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+          GIT_TREE_STATE="dirty"
+        fi
+        BUILD_DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "unknown")
+
+        docker build \
+          --build-arg VERSION="${VERSION}" \
+          --build-arg GIT_COMMIT="${GIT_COMMIT}" \
+          --build-arg GIT_TREE_STATE="${GIT_TREE_STATE}" \
+          --build-arg BUILD_DATE="${BUILD_DATE}" \
+          -t "{{.IMAGE_NAME}}:{{.IMAGE_TAG}}" .
+        echo "Successfully built {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
+
+  dev:load:
+    desc: Load the controller-template container image into the kind cluster
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Loading image {{.IMAGE_NAME}}:{{.IMAGE_TAG}} into kind cluster '{{.TEST_INFRA_CLUSTER_NAME}}'..."
+        kind load docker-image "{{.IMAGE_NAME}}:{{.IMAGE_TAG}}" --name "{{.TEST_INFRA_CLUSTER_NAME}}"
+        echo "Successfully loaded image into kind cluster"
+
+  dev:setup:
+    desc: Setup lightweight dev environment
+    silent: true
+    cmds:
+      - task: test-infra:cluster-up
+      - task: dev:build
+      - task: dev:load
+      - task: dev:deploy
+
+  dev:deploy:
+    desc: Deploy controller-template using dev overlay
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "----------------------------------------------------------------------"
+        echo "Stage 1: Waiting for Cert-Manager"
+        echo "----------------------------------------------------------------------"
+        task test-infra:kubectl -- rollout status -n cert-manager deployment/cert-manager --timeout=120s
+        task test-infra:kubectl -- rollout status -n cert-manager deployment/cert-manager-webhook --timeout=120s
+        until task test-infra:kubectl -- get crd certificates.cert-manager.io issuers.cert-manager.io >/dev/null 2>&1; do
+          echo "  - CRD not found yet, retrying..."
+          sleep 5
+        done
+        task test-infra:kubectl -- wait --for=condition=established crd/certificates.cert-manager.io crd/issuers.cert-manager.io --timeout=120s
+
+        echo ""
+        echo "----------------------------------------------------------------------"
+        echo "Stage 2: Deploying controller-template (Dev Overlay)"
+        echo "----------------------------------------------------------------------"
+        until task test-infra:kubectl -- apply -k config/overlays/dev; do
+          echo "  - Apply failed (likely webhook propagation), retrying in 5s..."
+          sleep 5
+        done
+
+        echo ""
+        echo "----------------------------------------------------------------------"
+        echo "Stage 3: Verification"
+        echo "----------------------------------------------------------------------"
+        task test-infra:kubectl -- rollout status -n controller-template-system deployment/controller-template-manager --timeout=120s || echo "  - Controller not ready yet"
+
+        echo ""
+        echo "controller-template successfully deployed in dev mode!"
+        echo "----------------------------------------------------------------------"
+
+  dev:redeploy:
+    desc: Quick rebuild and redeploy for dev environment
+    deps:
+      - dev:build
+      - dev:load
+    cmds:
+      - |
+        set -e
+        echo "Redeploying controller-template (dev)..."
+        task test-infra:kubectl -- delete pod -n controller-template-system -l app.kubernetes.io/name=controller-template --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
+        task test-infra:kubectl -- rollout status -n controller-template-system deployment/controller-template-manager --timeout=120s || true
+        echo "Redeployment complete!"
+    silent: true
+
+  install-go-tool:
+    desc: Install a Go tool to {{.TOOL_DIR}}/{{.NAME}} (symlinked from {{.TOOL_DIR}}/{{.NAME}}-{{.VERSION}})
+    silent: true
+    internal: true
+    cmds:
+      - mkdir -p {{.TOOL_DIR}}
+      - |
+        set -e
+        _NAME="{{.NAME}}"
+        _PACKAGE="{{.PACKAGE}}"
+        _VERSION="{{.VERSION}}"
+        _TOOL_DIR="{{.TOOL_DIR}}"
+
+        _VERSIONED_TOOL_PATH="$_TOOL_DIR/$_NAME-$_VERSION"
+        _SYMLINK_PATH="$_TOOL_DIR/$_NAME"
+
+        if [ ! -f "$_VERSIONED_TOOL_PATH" ]; then
+          echo "Downloading $_PACKAGE@$_VERSION (binary name: $_NAME) to $_VERSIONED_TOOL_PATH"
+
+          if [ -d "$_SYMLINK_PATH" ]; then
+            echo "Error: Target path $_SYMLINK_PATH for 'go install' is an existing directory. Please remove it manually."
+            exit 1
+          fi
+          echo "Preparing $_SYMLINK_PATH for new installation..."
+          rm -f "$_SYMLINK_PATH" || true
+
+          echo "Installing with GOBIN=$_TOOL_DIR..."
+          if ! GOBIN="$_TOOL_DIR" go install "$_PACKAGE@$_VERSION"; then
+            echo "Failed to 'go install $_PACKAGE@$_VERSION' with GOBIN=$_TOOL_DIR"
+            exit 1
+          fi
+
+          if [ ! -f "$_SYMLINK_PATH" ]; then
+            echo "Error: 'go install' did not produce $_SYMLINK_PATH"
+            _PKG_BASENAME=$(basename "$_PACKAGE")
+            if [ "$_PKG_BASENAME" != "$_NAME" ] && [ -f "$_TOOL_DIR/$_PKG_BASENAME" ]; then
+                echo "Found $_TOOL_DIR/$_PKG_BASENAME instead (package basename). Moving this one."
+                mv "$_TOOL_DIR/$_PKG_BASENAME" "$_VERSIONED_TOOL_PATH"
+            else
+                echo "Please ensure the NAME variable ('$_NAME') accurately matches the binary name produced by 'go install $_PACKAGE'."
+                exit 1
+            fi
+          else
+            echo "Moving installed binary from $_SYMLINK_PATH to $_VERSIONED_TOOL_PATH"
+            mv "$_SYMLINK_PATH" "$_VERSIONED_TOOL_PATH"
+          fi
+
+          echo "Creating/updating symlink: $_SYMLINK_PATH -> $_NAME-$_VERSION (within $_TOOL_DIR)"
+          (cd "$_TOOL_DIR" && ln -sf "$_NAME-$_VERSION" "$_NAME")
+          echo "Tool $_NAME is now available at $_SYMLINK_PATH (points to $_VERSIONED_TOOL_PATH)"
+        fi
+
+  # UI tasks
+  ui:install:
+    desc: Install UI dependencies
+    dir: ui
+    cmds:
+      - pnpm install
+    silent: true
+
+  ui:dev:
+    desc: Start the UI dev server (http://localhost:3000)
+    dir: ui
+    cmds:
+      - pnpm dev
+    silent: false
+
+  ui:build:
+    desc: Build the UI for production
+    dir: ui
+    cmds:
+      - pnpm build
+    silent: true
+
+  ui:type-check:
+    desc: Run TypeScript type-check on the UI
+    dir: ui
+    cmds:
+      - pnpm type-check
+    silent: false
+
+  ui:docker-build:
+    desc: Build the UI container image
+    cmds:
+      - |
+        set -e
+        GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+        VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
+        docker build -t "ghcr.io/milo-os/controller-template-ui:dev" ui/
+        echo "Built ghcr.io/milo-os/controller-template-ui:dev"
+    silent: true
+
+  # E2E Testing
+  e2e:
+    desc: Run chainsaw e2e tests
+    deps:
+      - task: install-go-tool
+        vars:
+          NAME: chainsaw
+          PACKAGE: github.com/kyverno/chainsaw
+          VERSION: "{{.CHAINSAW_VERSION}}"
+    cmds:
+      - "{{.TOOL_DIR}}/chainsaw test {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}test/e2e/{{end}}"
+    silent: false
