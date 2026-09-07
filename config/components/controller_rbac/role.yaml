@@ -2,31 +2,21 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: controller-template-manager
+  name: openmeter-provider-manager
 rules:
 - apiGroups:
-  - example.miloapis.com
+  - billing.miloapis.com
   resources:
-  - resources
+  - meterdefinitions
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
   - update
   - watch
 - apiGroups:
-  - example.miloapis.com
+  - billing.miloapis.com
   resources:
-  - resources/finalizers
+  - meterdefinitions/finalizers
   verbs:
-  - update
-- apiGroups:
-  - example.miloapis.com
-  resources:
-  - resources/status
-  verbs:
-  - get
-  - patch
   - update

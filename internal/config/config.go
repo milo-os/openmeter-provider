@@ -19,79 +19,51 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +k8s:defaulter-gen=true
 
-// ControllerTemplateOperator is the configuration for the controller-template operator.
-type ControllerTemplateOperator struct {
+// OpenMeterProviderOperator is the configuration for the openmeter-provider operator.
+type OpenMeterProviderOperator struct {
 	metav1.TypeMeta
 
 	MetricsServer MetricsServerConfig `json:"metricsServer"`
-
-	// WebhookServer configures the admission webhook server. When unset, the
-	// manager runs without an admission webhook server and no serving cert
-	// is required.
-	WebhookServer *WebhookServerConfig `json:"webhookServer,omitempty"`
 
 	// KubeconfigPath is the path to the kubeconfig file pointing at the Milo
 	// control plane API server where resources are stored. When empty, the
 	// controller falls back to in-cluster config / $KUBECONFIG via
 	// ctrl.GetConfig(), which is useful for local development.
 	KubeconfigPath string `json:"kubeconfigPath,omitempty"`
+
+	// OpenMeter configures the OpenMeter metering backend the controller
+	// reconciles against. When unset, the meter-definition controller is not
+	// registered.
+	OpenMeter *OpenMeterConfig `json:"openMeter,omitempty"`
+}
+
+// OpenMeterConfig configures the connection to the OpenMeter API.
+type OpenMeterConfig struct {
+	// ServerURL is the base URL of the OpenMeter API, e.g.
+	// "http://openmeter-api.openmeter-system.svc.cluster.local". Required
+	// when the meter-definition controller is enabled.
+	ServerURL string `json:"serverUrl,omitempty"`
+
+	// APISecret is the bearer token OpenMeter expects. When empty the client
+	// is constructed without auth — acceptable for the dev install, which
+	// runs with authentication disabled. In production a real token (from
+	// external-secrets) should always be set.
+	APISecret string `json:"apiSecret,omitempty"`
 }
 
 // RestConfig returns the *rest.Config used to connect to the Milo control plane.
 // When KubeconfigPath is empty it falls back to the standard
 // controller-runtime config resolution (in-cluster / $KUBECONFIG).
-func (c *ControllerTemplateOperator) RestConfig() (*rest.Config, error) {
+func (c *OpenMeterProviderOperator) RestConfig() (*rest.Config, error) {
 	if c.KubeconfigPath == "" {
 		return ctrl.GetConfig()
 	}
 	return clientcmd.BuildConfigFromFlags("", c.KubeconfigPath)
-}
-
-// +k8s:deepcopy-gen=true
-
-// WebhookServerConfig configures the admission webhook server.
-type WebhookServerConfig struct {
-	// Host is the address that the server will listen on.
-	// Defaults to "" - all addresses.
-	Host string `json:"host"`
-
-	// Port is the port number that the server will serve.
-	// It will be defaulted to 9443 if unspecified.
-	Port int `json:"port"`
-
-	// TLS is the TLS configuration for the webhook server.
-	TLS TLSConfig `json:"tls"`
-
-	// ClientCAName is the CA certificate name which server used to verify remote(client)'s certificate.
-	ClientCAName string `json:"clientCAName"`
-}
-
-func SetDefaults_WebhookServerConfig(obj *WebhookServerConfig) {
-	if obj.TLS.CertDir == "" {
-		obj.TLS.CertDir = filepath.Join(os.TempDir(), "k8s-webhook-server", "serving-certs")
-	}
-}
-
-func (c *WebhookServerConfig) Options(ctx context.Context, secretsClient client.Client) webhook.Options {
-	opts := webhook.Options{
-		Host:     c.Host,
-		Port:     c.Port,
-		CertDir:  c.TLS.CertDir,
-		CertName: c.TLS.CertName,
-		KeyName:  c.TLS.KeyName,
-	}
-
-	if secretRef := c.TLS.SecretRef; secretRef != nil {
-		opts.TLSOpts = c.TLS.Options(ctx, secretsClient)
-	}
-
-	return opts
 }
 
 // +k8s:deepcopy-gen=true
@@ -202,15 +174,15 @@ func SetDefaults_TLSConfig(obj *TLSConfig) {
 	}
 }
 
-// SetDefaults_ControllerTemplateOperator sets defaults for ControllerTemplateOperator.
-// The generated SetObjectDefaults_ControllerTemplateOperator handles calling nested
-// defaults (MetricsServerConfig, WebhookServerConfig, TLSConfig), so this
+// SetDefaults_OpenMeterProviderOperator sets defaults for OpenMeterProviderOperator.
+// The generated SetObjectDefaults_OpenMeterProviderOperator handles calling nested
+// defaults (MetricsServerConfig, TLSConfig), so this
 // function only sets top-level defaults.
-func SetDefaults_ControllerTemplateOperator(obj *ControllerTemplateOperator) {
+func SetDefaults_OpenMeterProviderOperator(obj *OpenMeterProviderOperator) {
 	// Top-level defaults are handled by nested SetDefaults_* functions
-	// which are called by the generated SetObjectDefaults_ControllerTemplateOperator.
+	// which are called by the generated SetObjectDefaults_OpenMeterProviderOperator.
 }
 
 func init() {
-	SchemeBuilder.Register(&ControllerTemplateOperator{})
+	SchemeBuilder.Register(&OpenMeterProviderOperator{})
 }

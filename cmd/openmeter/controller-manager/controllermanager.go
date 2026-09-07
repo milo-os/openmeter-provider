@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package cmd
+package controllermanager
 
 import (
 	"flag"
@@ -18,12 +18,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	examplev1alpha1 "go.miloapis.com/controller-template/api/v1alpha1"
-	"go.miloapis.com/controller-template/internal/config"
-	"go.miloapis.com/controller-template/internal/controller"
-	webhookv1alpha1 "go.miloapis.com/controller-template/internal/webhook/v1alpha1"
+	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
+	"go.miloapis.com/openmeter-provider/internal/config"
+	"go.miloapis.com/openmeter-provider/internal/controller"
+	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )
 
 var (
@@ -35,10 +34,10 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(config.AddToScheme(scheme))
 	utilruntime.Must(config.RegisterDefaults(scheme))
-	utilruntime.Must(examplev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(billingv1alpha1.AddToScheme(scheme))
 }
 
-func newOperatorCommand(info BuildInfo) *cobra.Command {
+func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 	var (
 		enableLeaderElection    bool
 		leaderElectionNamespace string
@@ -51,20 +50,20 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 	}
 
 	cmd := &cobra.Command{
-		Use:   "operator",
-		Short: "Run the controller-template operator (controller-runtime manager)",
+		Use:   "controller-manager",
+		Short: "Run the openmeter-provider controller manager (controller-runtime manager)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 			setupLog := ctrl.Log.WithName("setup")
-			setupLog.Info("starting controller-template operator",
+			setupLog.Info("starting openmeter-provider operator",
 				"version", info.Version,
 				"gitCommit", info.GitCommit,
 				"gitTreeState", info.GitTreeState,
 				"buildDate", info.BuildDate,
 			)
 
-			var serverConfig config.ControllerTemplateOperator
+			var serverConfig config.OpenMeterProviderOperator
 			var configData []byte
 			if len(serverConfigFile) > 0 {
 				var err error
@@ -94,34 +93,35 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 
 			metricsServerOptions := serverConfig.MetricsServer.Options(ctx, bootstrapClient)
 
-			var webhookServer webhook.Server
-			if serverConfig.WebhookServer != nil {
-				webhookServer = webhook.NewServer(
-					serverConfig.WebhookServer.Options(ctx, bootstrapClient),
-				)
-			} else {
-				setupLog.Info("webhookServer not configured; admission webhook server disabled")
-			}
-
 			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 				Scheme:                  scheme,
 				Metrics:                 metricsServerOptions,
-				WebhookServer:           webhookServer,
 				HealthProbeBindAddress:  probeAddr,
 				LeaderElection:          enableLeaderElection,
-				LeaderElectionID:        "controller-template.miloapis.com",
+				LeaderElectionID:        "openmeter-provider.miloapis.com",
 				LeaderElectionNamespace: leaderElectionNamespace,
 			})
 			if err != nil {
 				return fmt.Errorf("starting manager: %w", err)
 			}
 
-			if err = (&controller.ResourceReconciler{}).SetupWithManager(mgr); err != nil {
-				return fmt.Errorf("creating Resource controller: %w", err)
-			}
-
-			if err = webhookv1alpha1.SetupWebhookWithManager(mgr); err != nil {
-				return fmt.Errorf("creating Resource webhook: %w", err)
+			if serverConfig.OpenMeter != nil {
+				openMeterClient, err := openmeter.NewClient(
+					serverConfig.OpenMeter.ServerURL,
+					serverConfig.OpenMeter.APISecret,
+				)
+				if err != nil {
+					return fmt.Errorf("creating OpenMeter client: %w", err)
+				}
+				if err = (&controller.MeterDefinitionReconciler{
+					OpenMeterClient: openMeterClient,
+				}).SetupWithManager(mgr); err != nil {
+					return fmt.Errorf("creating MeterDefinition controller: %w", err)
+				}
+				setupLog.Info("OpenMeter meter-definition controller registered",
+					"server", serverConfig.OpenMeter.ServerURL)
+			} else {
+				setupLog.Info("openMeter not configured; meter-definition controller disabled")
 			}
 
 			if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
@@ -154,4 +154,3 @@ func newOperatorCommand(info BuildInfo) *cobra.Command {
 
 	return cmd
 }
-

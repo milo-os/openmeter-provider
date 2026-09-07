@@ -13,7 +13,7 @@ jobs:
       packages: write
     uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.14.0
     with:
-      image-name: controller-template
+      image-name: openmeter-provider
       registry-organization: milo-os
       platforms: linux/amd64,linux/arm64
     secrets: inherit
@@ -25,7 +25,7 @@ jobs:
       packages: write
     uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.14.0
     with:
-      image-name: controller-template-ui
+      image-name: openmeter-provider-ui
       registry-organization: milo-os
       platforms: linux/amd64,linux/arm64
       dockerfile: ui/Dockerfile
@@ -39,8 +39,8 @@ jobs:
       packages: write
     uses: datum-cloud/actions/.github/workflows/publish-kustomize-bundle.yaml@v1.14.0
     with:
-      bundle-name: ghcr.io/milo-os/controller-template-kustomize
+      bundle-name: ghcr.io/milo-os/openmeter-provider-kustomize
       bundle-path: config
       image-overlays: config/base/manager
-      image-name: ghcr.io/milo-os/controller-template
+      image-name: ghcr.io/milo-os/openmeter-provider
     secrets: inherit

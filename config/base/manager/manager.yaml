@@ -1,23 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: controller-template-manager
+  name: openmeter-provider-manager
   labels:
-    control-plane: controller-template
-    app.kubernetes.io/name: controller-template
+    control-plane: openmeter-provider
+    app.kubernetes.io/name: openmeter-provider
     app.kubernetes.io/managed-by: kustomize
 spec:
   selector:
     matchLabels:
-      control-plane: controller-template
+      control-plane: openmeter-provider
   replicas: 2
   template:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: manager
       labels:
-        control-plane: controller-template
-        app.kubernetes.io/name: controller-template
+        control-plane: openmeter-provider
+        app.kubernetes.io/name: openmeter-provider
     spec:
       securityContext:
         runAsNonRoot: true
@@ -29,29 +29,25 @@ spec:
                 topologyKey: kubernetes.io/hostname
                 labelSelector:
                   matchLabels:
-                    control-plane: controller-template
+                    control-plane: openmeter-provider
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: topology.kubernetes.io/zone
           whenUnsatisfiable: ScheduleAnyway
           labelSelector:
             matchLabels:
-              control-plane: controller-template
+              control-plane: openmeter-provider
       containers:
       - command:
-        - /controller-template
+        - /openmeter-provider
         args:
-          - operator
+          - controller-manager
           - --leader-elect
           - --leader-elect-namespace=kube-system
           - --health-probe-bind-address=:8081
           - --server-config=/config/config.yaml
-        image: ghcr.io/milo-os/controller-template:dev
+        image: ghcr.io/milo-os/openmeter-provider:dev
         name: manager
-        ports:
-        - containerPort: 9443
-          name: webhook-server
-          protocol: TCP
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -79,20 +75,9 @@ spec:
         volumeMounts:
         - name: config
           mountPath: /config
-        - name: webhook-cert
-          mountPath: /tmp/k8s-webhook-server/serving-certs
-          readOnly: true
-      serviceAccountName: controller-template-manager
+      serviceAccountName: openmeter-provider-manager
       terminationGracePeriodSeconds: 10
       volumes:
       - name: config
         configMap:
-          name: controller-template-config
-      # Optional so the manager can run without admission webhooks: when
-      # `webhookServer:` is omitted from the server config, the binary
-      # skips the webhook server entirely and the missing Secret is fine.
-      - name: webhook-cert
-        secret:
-          secretName: controller-template-webhook-cert
-          defaultMode: 420
-          optional: true
+          name: openmeter-provider-config

@@ -43,29 +43,26 @@ tasks:
     silent: true
 
   manifests:
-    desc: Generate CRD, RBAC, and webhook manifests
+    desc: Generate RBAC manifests
     cmds:
       - |
         set -e
         echo "Generating manifests..."
-        {{.TOOL_DIR}}/controller-gen rbac:roleName=controller-template-manager \
+        {{.TOOL_DIR}}/controller-gen rbac:roleName=openmeter-provider-manager \
           crd:generateEmbeddedObjectMeta=true \
-          webhook \
           paths="./..." \
-          output:crd:artifacts:config=config/base/crd/bases \
-          output:rbac:artifacts:config=config/components/controller_rbac \
-          output:webhook:artifacts:config=config/base/webhook
+          output:rbac:artifacts:config=config/components/controller_rbac
         echo "Manifests generated!"
     deps:
       - install-tools
     silent: true
 
   build:
-    desc: Build the controller-template binary
+    desc: Build the openmeter-provider binary
     cmds:
       - |
         set -e
-        echo "Building controller-template..."
+        echo "Building openmeter-provider..."
         mkdir -p {{.TOOL_DIR}}
 
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -83,8 +80,8 @@ tasks:
                     -X 'main.gitCommit=${GIT_COMMIT}' \
                     -X 'main.gitTreeState=${GIT_TREE_STATE}' \
                     -X 'main.buildDate=${BUILD_DATE}'" \
-          -o {{.TOOL_DIR}}/controller-template ./cmd/controller-template
-        echo "Binary built: {{.TOOL_DIR}}/controller-template"
+          -o {{.TOOL_DIR}}/openmeter-provider ./cmd/openmeter
+        echo "Binary built: {{.TOOL_DIR}}/openmeter-provider"
     silent: true
 
   test:
@@ -149,12 +146,12 @@ tasks:
 
   # Development tasks
   dev:build:
-    desc: Build the controller-template container image for development
+    desc: Build the openmeter-provider container image for development
     silent: true
     cmds:
       - |
         set -e
-        echo "Building controller-template container image: {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
+        echo "Building openmeter-provider container image: {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
 
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
         VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
@@ -173,7 +170,7 @@ tasks:
         echo "Successfully built {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
 
   dev:load:
-    desc: Load the controller-template container image into the kind cluster
+    desc: Load the openmeter-provider container image into the kind cluster
     silent: true
     cmds:
       - |
@@ -193,7 +190,7 @@ tasks:
       #- task: dev:deploy
 
   dev:deploy:
-    desc: Deploy controller-template using dev overlay
+    desc: Deploy openmeter-provider using dev overlay
     silent: true
     cmds:
       - |
@@ -211,7 +208,7 @@ tasks:
 
         echo ""
         echo "----------------------------------------------------------------------"
-        echo "Stage 2: Deploying controller-template (Dev Overlay)"
+        echo "Stage 2: Deploying openmeter-provider (Dev Overlay)"
         echo "----------------------------------------------------------------------"
         until task test-infra:kubectl -- apply -k config/overlays/dev; do
           echo "  - Apply failed (likely webhook propagation), retrying in 5s..."
@@ -222,10 +219,10 @@ tasks:
         echo "----------------------------------------------------------------------"
         echo "Stage 3: Verification"
         echo "----------------------------------------------------------------------"
-        task test-infra:kubectl -- rollout status -n controller-template-system deployment/controller-template-manager --timeout=120s || echo "  - Controller not ready yet"
+        task test-infra:kubectl -- rollout status -n openmeter-provider-system deployment/openmeter-provider-manager --timeout=120s || echo "  - Controller not ready yet"
 
         echo ""
-        echo "controller-template successfully deployed in dev mode!"
+        echo "openmeter-provider successfully deployed in dev mode!"
         echo "----------------------------------------------------------------------"
 
   dev:install-dependencies:
@@ -289,9 +286,9 @@ tasks:
     cmds:
       - |
         set -e
-        echo "Redeploying controller-template (dev)..."
-        task test-infra:kubectl -- delete pod -n controller-template-system -l app.kubernetes.io/name=controller-template --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
-        task test-infra:kubectl -- rollout status -n controller-template-system deployment/controller-template-manager --timeout=120s || true
+        echo "Redeploying openmeter-provider (dev)..."
+        task test-infra:kubectl -- delete pod -n openmeter-provider-system -l app.kubernetes.io/name=openmeter-provider --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
+        task test-infra:kubectl -- rollout status -n openmeter-provider-system deployment/openmeter-provider-manager --timeout=120s || true
         echo "Redeployment complete!"
     silent: true
 
@@ -383,8 +380,8 @@ tasks:
         set -e
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
         VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
-        docker build -t "ghcr.io/milo-os/controller-template-ui:dev" ui/
-        echo "Built ghcr.io/milo-os/controller-template-ui:dev"
+        docker build -t "ghcr.io/milo-os/openmeter-provider-ui:dev" ui/
+        echo "Built ghcr.io/milo-os/openmeter-provider-ui:dev"
     silent: true
 
   # E2E Testing
