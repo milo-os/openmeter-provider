@@ -1,0 +1,20 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-agg-sum
+spec:
+  # meterName avoids '-' so openmeter.MeterSlug's '.'/'/' -> '_' mapping
+  # yields a slug OpenMeter's `^[a-z0-9]+(?:_[a-z0-9]+)*$` will accept.
+  meterName: e2e.miloapis.com/agg/sum
+  phase: Published
+  displayName: E2E Sum Aggregation
+  measurement:
+    aggregation: Sum
+    unit: "By"
+    dimensions:
+      - region
+  billing:
+    consumedUnit: "By"
+    pricingUnit: "By"
+  monitoredResourceTypes:
+    - ri2.miloapis.com/hosted-api

@@ -1,0 +1,21 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-update-requests
+spec:
+  # No '-' in the path segments so openmeter.MeterSlug's '.'/'/' -> '_'
+  # mapping yields a slug OpenMeter's `^[a-z0-9]+(?:_[a-z0-9]+)*$` accepts.
+  meterName: e2e.miloapis.com/update/requests
+  phase: Published
+  # No spec.description: the controller falls back to displayName.
+  displayName: Initial Display Name
+  measurement:
+    aggregation: Sum
+    unit: "{request}"
+    dimensions:
+      - region
+  billing:
+    consumedUnit: "{request}"
+    pricingUnit: "{request}"
+  monitoredResourceTypes:
+    - ri2.miloapis.com/hosted-api

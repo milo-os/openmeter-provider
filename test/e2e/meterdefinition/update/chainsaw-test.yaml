@@ -1,0 +1,101 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: update
+spec:
+  description: |
+    Exercises EnsureMeter's drift-convergence path end to end against a real
+    OpenMeter instance: create, mutate the MeterDefinition's mutable fields
+    (displayName, description, dimensions), confirm OpenMeter actually
+    converges to the new values, then delete and confirm the meter is
+    removed.
+
+    This is the behavior that regressed silently before EnsureMeter did real
+    drift detection: it used to return the first-created meter forever and
+    never call UpdateMeter, so a displayName/description/dimensions edit
+    would never have reached OpenMeter even though the reconciler reported
+    success.
+
+    MeterDefinition is cluster-scoped (scope=Cluster); the namespace bound
+    below only applies to the query pod used to verify OpenMeter's state.
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      description: |
+        Start a long-lived helper pod so later steps can reach the
+        openmeter-api ClusterIP service via `kubectl exec` — the app pods
+        themselves are distroless and offer no shell/curl of their own.
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query
+              status:
+                phase: Running
+
+    - name: create the MeterDefinition and confirm the initial meter
+      description: |
+        Apply meterdefinition.yaml (displayName "Initial Display Name", no
+        explicit description, dimensions=[region]). Confirm the finalizer is
+        attached, then poll OpenMeter and confirm description falls back to
+        the displayName, and groupBy has "region" (declared) and
+        "project_name" (the always-injected system dimension) — but not yet
+        "tier", which only appears after the next step's update.
+      try:
+        - apply:
+            file: meterdefinition.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-update-requests
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - script:
+            timeout: 35s
+            content: sh verify-meter.sh e2e_miloapis_com_update_requests "Initial Display Name" region project_name
+
+    - name: update displayName, description, and dimensions; confirm the meter converges
+      description: |
+        Re-apply the same MeterDefinition with displayName changed to
+        "Updated Display Name", an explicit description set ("Explicit
+        updated description", which takes priority over displayName), and
+        "tier" added to measurement.dimensions (additive; aggregation/unit
+        are left untouched since those are immutable). Poll OpenMeter and
+        confirm both the new description and the new "tier" groupBy key
+        actually landed — proving EnsureMeter issued a real UpdateMeter
+        rather than treating the existing meter as already converged.
+      try:
+        - apply:
+            file: meterdefinition-updated.yaml
+        - script:
+            timeout: 35s
+            content: sh verify-meter.sh e2e_miloapis_com_update_requests "Explicit updated description" region tier project_name
+
+    - name: delete the MeterDefinition and confirm the meter is removed
+      description: |
+        Delete the MeterDefinition, confirm the object itself is gone (the
+        finalizer released), and poll OpenMeter to confirm DeleteMeter
+        actually reached it rather than the finalizer being dropped for some
+        other reason.
+      try:
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              name: e2e-update-requests
+        - error:
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-update-requests
+        - script:
+            timeout: 25s
+            content: sh verify-deleted.sh e2e_miloapis_com_update_requests
