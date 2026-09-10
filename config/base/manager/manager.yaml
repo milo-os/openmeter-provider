@@ -43,7 +43,6 @@ spec:
         args:
           - controller-manager
           - --leader-elect
-          - --leader-elect-namespace=kube-system
           - --health-probe-bind-address=:8081
           - --server-config=/config/config.yaml
         image: ghcr.io/milo-os/openmeter-provider:dev

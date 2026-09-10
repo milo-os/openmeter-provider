@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: openmeter-provider-system
+  name: openmeter-system
   labels:
     app.kubernetes.io/name: openmeter-provider
     app.kubernetes.io/managed-by: kustomize

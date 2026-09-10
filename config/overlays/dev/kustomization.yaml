@@ -1,4 +1,4 @@
-namespace: openmeter-provider-system
+namespace: openmeter-system
 
 images:
   - name: ghcr.io/milo-os/openmeter-provider
@@ -10,6 +10,7 @@ resources:
 components:
   - ../../components/namespace
   - ../../components/controller_rbac
+  - ../../components/leader_election
 
 configMapGenerator:
   - name: openmeter-provider-config

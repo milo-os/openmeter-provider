@@ -23,6 +23,7 @@ import (
 	"go.miloapis.com/openmeter-provider/internal/config"
 	"go.miloapis.com/openmeter-provider/internal/controller"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
+	stripev1alpha1 "go.miloapis.com/stripe-provider/api/v1alpha1"
 )
 
 var (
@@ -35,6 +36,7 @@ func init() {
 	utilruntime.Must(config.AddToScheme(scheme))
 	utilruntime.Must(config.RegisterDefaults(scheme))
 	utilruntime.Must(billingv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(stripev1alpha1.AddToScheme(scheme))
 }
 
 func newControllerManagerCommand(info BuildInfo) *cobra.Command {
@@ -118,10 +120,18 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 				}).SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("creating MeterDefinition controller: %w", err)
 				}
-				setupLog.Info("OpenMeter meter-definition controller registered",
+				if err = (&controller.BillingAccountReconciler{
+					OpenMeterClient: openMeterClient,
+				}).SetupWithManager(mgr); err != nil {
+					return fmt.Errorf("creating BillingAccount controller: %w", err)
+				}
+				if err := controller.AddIndexers(ctx, mgr.GetFieldIndexer()); err != nil {
+					return fmt.Errorf("adding indexers: %w", err)
+				}
+				setupLog.Info("OpenMeter meter-definition and billing-account controllers registered",
 					"server", serverConfig.OpenMeter.ServerURL)
 			} else {
-				setupLog.Info("openMeter not configured; meter-definition controller disabled")
+				setupLog.Info("openMeter not configured; meter-definition and billing-account controllers disabled")
 			}
 
 			if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
