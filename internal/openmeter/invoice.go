@@ -36,7 +36,7 @@ const invoiceListPageSize = 100
 // Results are filtered client-side against Invoice.Customer.Id (not .Key,
 // since callers now supply the internal id) in addition to the server-side
 // Customers query param, on the same "don't trust it blindly" principle.
-func (c *client) ListInvoices(ctx context.Context, customerID string) ([]om.Invoice, error) {
+func (c *client) ListInvoices(ctx context.Context, customerID CustomerID) ([]om.Invoice, error) {
 	if customerID == "" {
 		return nil, &PermanentError{Err: errors.New("customerID is required")}
 	}
@@ -46,7 +46,7 @@ func (c *client) ListInvoices(ctx context.Context, customerID string) ([]om.Invo
 	for page := 1; ; page++ {
 		pageNum := om.PaginationPage(page)
 		params := &om.ListInvoicesParams{
-			Customers: &om.InvoiceListParamsCustomers{customerID},
+			Customers: &om.InvoiceListParamsCustomers{string(customerID)},
 			Page:      &pageNum,
 			PageSize:  &pageSize,
 			Order:     ptr(om.SortOrderDESC),
@@ -65,7 +65,7 @@ func (c *client) ListInvoices(ctx context.Context, customerID string) ([]om.Invo
 		}
 
 		for _, inv := range resp.JSON200.Items {
-			if inv.Customer.Id == nil || *inv.Customer.Id != customerID {
+			if inv.Customer.Id == nil || *inv.Customer.Id != string(customerID) {
 				continue
 			}
 			out = append(out, inv)

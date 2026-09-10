@@ -15,12 +15,14 @@ import (
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 	stripev1alpha1 "go.miloapis.com/stripe-provider/api/v1alpha1"
+
+	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )
 
 // stripeCustomer is the resolved Stripe identity for a BillingAccount's
 // default payment method.
 type stripeCustomer struct {
-	CustomerID      string
+	CustomerID      openmeter.StripeCustomerID
 	PaymentMethodID string
 }
 
@@ -86,7 +88,7 @@ func (r *BillingAccountReconciler) resolveStripeCustomer(
 		return stripeCustomer{}, nil
 	}
 	return stripeCustomer{
-		CustomerID:      spm.Status.StripeCustomerID,
+		CustomerID:      openmeter.StripeCustomerID(spm.Status.StripeCustomerID),
 		PaymentMethodID: spm.Status.StripePaymentMethodID,
 	}, nil
 }

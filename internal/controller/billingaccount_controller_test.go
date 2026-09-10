@@ -9,6 +9,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
+
+	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )
 
 func baseBillingAccount() *billingv1alpha1.BillingAccount {
@@ -87,8 +89,8 @@ func TestDesiredCustomerFromAccount_NamespaceDisambiguatesIdenticalNames(t *test
 	orgB.Namespace = "org-b"
 	orgB.UID = types.UID("uid-b")
 
-	nameA := desiredCustomerFromAccount(orgA, string(orgA.UID), nil).Name
-	nameB := desiredCustomerFromAccount(orgB, string(orgB.UID), nil).Name
+	nameA := desiredCustomerFromAccount(orgA, openmeter.CustomerKey(orgA.UID), nil).Name
+	nameB := desiredCustomerFromAccount(orgB, openmeter.CustomerKey(orgB.UID), nil).Name
 	if nameA == nameB {
 		t.Errorf("identically-named accounts in different namespaces produced the same customer Name %q", nameA)
 	}

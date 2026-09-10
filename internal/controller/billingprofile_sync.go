@@ -70,7 +70,7 @@ var defaultPaymentTerms = billingv1alpha1.PaymentTerms{
 // customerKey (the account's UID) becomes AccountKey, which
 // EnsureBillingProfile uses to recognize a profile it already created for
 // this account even if BillingProfileIDAnnotation never got persisted.
-func desiredBillingProfileFromAccount(account *billingv1alpha1.BillingAccount, customerKey string) openmeter.DesiredBillingProfile {
+func desiredBillingProfileFromAccount(account *billingv1alpha1.BillingAccount, customerKey openmeter.CustomerKey) openmeter.DesiredBillingProfile {
 	terms := defaultPaymentTerms
 	if account.Spec.PaymentTerms != nil {
 		terms = *account.Spec.PaymentTerms
@@ -99,8 +99,8 @@ func desiredBillingProfileFromAccount(account *billingv1alpha1.BillingAccount, c
 func (r *BillingAccountReconciler) reconcileBillingProfile(
 	ctx context.Context,
 	account *billingv1alpha1.BillingAccount,
-	customerKey string,
-	openMeterCustomerID string,
+	customerKey openmeter.CustomerKey,
+	openMeterCustomerID openmeter.CustomerID,
 ) error {
 	desired := desiredBillingProfileFromAccount(account, customerKey)
 	existingID := account.Annotations[BillingProfileIDAnnotation]
@@ -110,13 +110,13 @@ func (r *BillingAccountReconciler) reconcileBillingProfile(
 		return fmt.Errorf("ensure billing profile: %w", err)
 	}
 
-	if profile.Id != existingID || account.Annotations[OpenMeterCustomerIDAnnotation] != openMeterCustomerID {
+	if profile.Id != existingID || account.Annotations[OpenMeterCustomerIDAnnotation] != string(openMeterCustomerID) {
 		base := account.DeepCopy()
 		if account.Annotations == nil {
 			account.Annotations = map[string]string{}
 		}
 		account.Annotations[BillingProfileIDAnnotation] = profile.Id
-		account.Annotations[OpenMeterCustomerIDAnnotation] = openMeterCustomerID
+		account.Annotations[OpenMeterCustomerIDAnnotation] = string(openMeterCustomerID)
 		if err := r.Patch(ctx, account, client.MergeFrom(base)); err != nil {
 			return fmt.Errorf("annotate billing profile id: %w", err)
 		}
@@ -156,7 +156,7 @@ func (f *billingProfileFinalizer) Finalize(ctx context.Context, obj client.Objec
 		return finalizer.Result{}, fmt.Errorf("billingProfileFinalizer: object is not a BillingAccount (%T)", obj)
 	}
 
-	if customerID := account.Annotations[OpenMeterCustomerIDAnnotation]; customerID != "" {
+	if customerID := openmeter.CustomerID(account.Annotations[OpenMeterCustomerIDAnnotation]); customerID != "" {
 		if err := f.OpenMeterClient.DeleteBillingProfileCustomerOverride(ctx, customerID); err != nil {
 			return finalizer.Result{}, fmt.Errorf("delete billing profile customer override: %w", err)
 		}

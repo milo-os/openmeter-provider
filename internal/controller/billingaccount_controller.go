@@ -101,7 +101,7 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		return ctrl.Result{}, err
 	}
 
-	customerKey := string(account.UID)
+	customerKey := openmeter.CustomerKey(account.UID)
 	logger = logger.WithValues("uid", account.UID, "customerKey", customerKey)
 
 	// Run finalizers: adds the finalizers if absent (and not being deleted),
@@ -153,6 +153,15 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	if err != nil {
 		return r.handleOpenMeterCustomerError(logger, &account, "EnsureCustomer", err)
 	}
+	// Resolved once and reused below: every call past this point needs
+	// OpenMeter's internal id, not customerKey — several endpoints
+	// (UpsertBillingProfileCustomerOverride, EnsureCustomerStripeAppData,
+	// ListInvoices) only accept the internal id and reject the external key
+	// (see CustomerKey/CustomerID's doc comments in client.go for why both
+	// exist). customerKey itself is still needed below, but only for
+	// reconcileBillingProfile's own AccountKey dedup tag — an unrelated use
+	// that predates and isn't replaceable by this id.
+	customerID := openmeter.CustomerID(customer.Id)
 
 	// The customer must exist before anything below can reference it, so
 	// that one failure aborts. The three syncs that follow are independent
@@ -164,11 +173,7 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	// several.
 	var syncErrs []error
 
-	// reconcileBillingProfile needs OpenMeter's internal customer.Id (a
-	// ULID), not customerKey — the customer override endpoint doesn't
-	// accept the external key the way EnsureCustomer/GetCustomer do (see
-	// UpsertBillingProfileCustomerOverride's doc comment).
-	if err := r.reconcileBillingProfile(ctx, &account, customerKey, customer.Id); err != nil {
+	if err := r.reconcileBillingProfile(ctx, &account, customerKey, customerID); err != nil {
 		syncErrs = append(syncErrs, fmt.Errorf("reconcile billing profile: %w", err))
 	}
 
@@ -177,7 +182,7 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	case err != nil:
 		syncErrs = append(syncErrs, fmt.Errorf("resolve stripe customer: %w", err))
 	case stripe.CustomerID != "":
-		if err := r.OpenMeterClient.EnsureCustomerStripeAppData(ctx, customerKey, stripe.CustomerID, stripe.PaymentMethodID); err != nil {
+		if err := r.OpenMeterClient.EnsureCustomerStripeAppData(ctx, customerID, stripe.CustomerID, stripe.PaymentMethodID); err != nil {
 			syncErrs = append(syncErrs, fmt.Errorf("ensure customer stripe app data: %w", err))
 		}
 	}
@@ -188,7 +193,7 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	// "preserve previously synced traits" behavior across a transient
 	// DefaultPaymentMethodReady flap.
 
-	if err := r.reconcileInvoices(ctx, &account, customer.Id); err != nil {
+	if err := r.reconcileInvoices(ctx, &account, customerID); err != nil {
 		syncErrs = append(syncErrs, fmt.Errorf("reconcile invoices: %w", err))
 	}
 
@@ -321,7 +326,7 @@ func projectsFromActiveBindings(items []billingv1alpha1.BillingAccountBinding) [
 // on their own.
 func desiredCustomerFromAccount(
 	account *billingv1alpha1.BillingAccount,
-	customerKey string,
+	customerKey openmeter.CustomerKey,
 	projects []string,
 ) openmeter.DesiredCustomer {
 	desired := openmeter.DesiredCustomer{
@@ -461,7 +466,7 @@ func (f *customerLinkFinalizer) Finalize(ctx context.Context, obj client.Object)
 		return finalizer.Result{}, fmt.Errorf("customerLinkFinalizer: object is not a BillingAccount (%T)", obj)
 	}
 	logger := log.FromContext(ctx)
-	customerKey := string(account.UID)
+	customerKey := openmeter.CustomerKey(account.UID)
 
 	if err := f.OpenMeterClient.DeleteCustomer(ctx, customerKey); err != nil {
 		if openmeter.IsTransient(err) {

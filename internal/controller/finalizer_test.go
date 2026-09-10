@@ -30,12 +30,12 @@ type partialFailureOpenMeterClient struct {
 	deleteCustomerCalls int
 }
 
-func (f *partialFailureOpenMeterClient) DeleteCustomer(_ context.Context, _ string) error {
+func (f *partialFailureOpenMeterClient) DeleteCustomer(_ context.Context, _ openmeter.CustomerKey) error {
 	f.deleteCustomerCalls++
 	return nil
 }
 
-func (f *partialFailureOpenMeterClient) DeleteBillingProfileCustomerOverride(_ context.Context, _ string) error {
+func (f *partialFailureOpenMeterClient) DeleteBillingProfileCustomerOverride(_ context.Context, _ openmeter.CustomerID) error {
 	return nil
 }
 
@@ -170,8 +170,10 @@ type allSucceedOpenMeterClient struct {
 	openmeter.Client
 }
 
-func (f *allSucceedOpenMeterClient) DeleteCustomer(_ context.Context, _ string) error { return nil }
-func (f *allSucceedOpenMeterClient) DeleteBillingProfileCustomerOverride(_ context.Context, _ string) error {
+func (f *allSucceedOpenMeterClient) DeleteCustomer(_ context.Context, _ openmeter.CustomerKey) error {
+	return nil
+}
+func (f *allSucceedOpenMeterClient) DeleteBillingProfileCustomerOverride(_ context.Context, _ openmeter.CustomerID) error {
 	return nil
 }
 func (f *allSucceedOpenMeterClient) DeleteBillingProfile(_ context.Context, _ string) error {

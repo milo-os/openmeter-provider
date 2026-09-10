@@ -177,7 +177,7 @@ func TestEnsureCustomer_CreatesWhenAbsent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureCustomer: %v", err)
 	}
-	if got.Key == nil || *got.Key != desired.Key {
+	if got.Key == nil || *got.Key != string(desired.Key) {
 		t.Errorf("Key = %v, want %q", got.Key, desired.Key)
 	}
 	if got.Name != desired.Name {
@@ -189,7 +189,7 @@ func TestEnsureCustomer_CreatesWhenAbsent(t *testing.T) {
 	if got.UsageAttribution == nil || len(got.UsageAttribution.SubjectKeys) != 2 {
 		t.Errorf("UsageAttribution = %v, want SubjectKeys=%v", got.UsageAttribution, desired.SubjectKeys)
 	}
-	if _, ok := f.customers[desired.Key]; !ok {
+	if _, ok := f.customers[string(desired.Key)]; !ok {
 		t.Errorf("customer %q not stored", desired.Key)
 	}
 }
@@ -228,7 +228,7 @@ func TestEnsureCustomer_UpdatesMutableFields(t *testing.T) {
 	if got.Name != desired.Name {
 		t.Errorf("Name = %q, want %q", got.Name, desired.Name)
 	}
-	if stored := f.customers[desired.Key]; stored.UsageAttribution == nil || len(stored.UsageAttribution.SubjectKeys) != 1 {
+	if stored := f.customers[string(desired.Key)]; stored.UsageAttribution == nil || len(stored.UsageAttribution.SubjectKeys) != 1 {
 		t.Errorf("SubjectKeys not updated: %v", stored.UsageAttribution)
 	}
 }
@@ -255,11 +255,11 @@ func TestEnsureCustomer_SetsAddress(t *testing.T) {
 	// A second EnsureCustomer with the same Address must be a no-op — the
 	// wire round-trip (Address -> om.Address -> back via addressFromWire)
 	// has to compare equal to itself, not spuriously trigger an update.
-	before := f.customers[desired.Key].UpdatedAt
+	before := f.customers[string(desired.Key)].UpdatedAt
 	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
 		t.Fatalf("second EnsureCustomer: %v", err)
 	}
-	if after := f.customers[desired.Key].UpdatedAt; !before.Equal(after) {
+	if after := f.customers[string(desired.Key)].UpdatedAt; !before.Equal(after) {
 		t.Errorf("UpdateCustomer was called on a no-drift EnsureCustomer with an Address set")
 	}
 }
@@ -281,7 +281,7 @@ func TestEnsureCustomer_ClearsAddressWhenUnset(t *testing.T) {
 	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
 		t.Fatalf("second EnsureCustomer: %v", err)
 	}
-	stored := f.customers[desired.Key]
+	stored := f.customers[string(desired.Key)]
 	if stored.BillingAddress != nil && (stored.BillingAddress.Country != nil || stored.BillingAddress.City != nil) {
 		t.Errorf("BillingAddress = %+v, want cleared", stored.BillingAddress)
 	}
@@ -303,7 +303,7 @@ func TestEnsureCustomer_ClearsSubjectKeysWhenUnbound(t *testing.T) {
 	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
 		t.Fatalf("second EnsureCustomer: %v", err)
 	}
-	stored := f.customers[desired.Key]
+	stored := f.customers[string(desired.Key)]
 	if stored.UsageAttribution == nil {
 		t.Fatal("UsageAttribution is nil, want an explicit empty SubjectKeys")
 	}
@@ -330,7 +330,7 @@ func TestEnsureCustomer_CreateWithNilSubjectKeys(t *testing.T) {
 	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
 		t.Fatalf("EnsureCustomer: %v", err)
 	}
-	stored := f.customers[desired.Key]
+	stored := f.customers[string(desired.Key)]
 	if stored.UsageAttribution == nil || stored.UsageAttribution.SubjectKeys == nil {
 		t.Errorf("UsageAttribution = %+v, want a non-nil empty SubjectKeys", stored.UsageAttribution)
 	}
@@ -347,7 +347,7 @@ func TestEnsureCustomer_CreateFallsBackToGetOnEmptyBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureCustomer: %v", err)
 	}
-	if got.Key == nil || *got.Key != desired.Key {
+	if got.Key == nil || *got.Key != string(desired.Key) {
 		t.Errorf("Key = %v, want %q", got.Key, desired.Key)
 	}
 }
@@ -397,7 +397,7 @@ func TestDeleteCustomer_RemovesExisting(t *testing.T) {
 	if err := c.DeleteCustomer(context.Background(), desired.Key); err != nil {
 		t.Fatalf("DeleteCustomer: %v", err)
 	}
-	if _, ok := f.customers[desired.Key]; ok {
+	if _, ok := f.customers[string(desired.Key)]; ok {
 		t.Errorf("customer %q still present after delete", desired.Key)
 	}
 }
@@ -461,7 +461,7 @@ func TestEnsureCustomer_EmptyDesiredCurrencyDoesNotLoop(t *testing.T) {
 	if f.customerUpdates != 0 {
 		t.Errorf("empty desired currency issued %d update(s) across 3 calls, want 0", f.customerUpdates)
 	}
-	if stored := f.customers[desired.Key]; stored.Currency == nil || *stored.Currency != "USD" {
+	if stored := f.customers[string(desired.Key)]; stored.Currency == nil || *stored.Currency != "USD" {
 		t.Errorf("stored currency = %v, want the original USD left untouched", stored.Currency)
 	}
 }

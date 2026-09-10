@@ -100,11 +100,11 @@ func TestEnsureCustomerStripeAppData_EmptyPaymentMethodIDOmitted(t *testing.T) {
 	}
 }
 
-func TestEnsureCustomerStripeAppData_RequiresKeyAndCustomerID(t *testing.T) {
+func TestEnsureCustomerStripeAppData_RequiresCustomerIDAndStripeCustomerID(t *testing.T) {
 	c, _ := newTestClient(t)
 
 	if err := c.EnsureCustomerStripeAppData(context.Background(), "", "cus_x", ""); !IsPermanent(err) {
-		t.Errorf("empty key: expected a PermanentError, got %T: %v", err, err)
+		t.Errorf("empty customerID: expected a PermanentError, got %T: %v", err, err)
 	}
 	if err := c.EnsureCustomerStripeAppData(context.Background(), "cust-1", "", ""); !IsPermanent(err) {
 		t.Errorf("empty stripeCustomerID: expected a PermanentError, got %T: %v", err, err)

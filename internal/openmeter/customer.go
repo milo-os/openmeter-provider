@@ -21,7 +21,7 @@ type DesiredCustomer struct {
 	// OpenMeter's customerIdOrKey path parameter matches on either its own
 	// server-assigned id OR this key, so Get/Ensure/Delete all address the
 	// customer by Key alone; the server-assigned id never needs tracking.
-	Key string
+	Key CustomerKey
 	// Name is the customer's display name. Callers should follow
 	// billingv1alpha1.BillingContactInfo's own documented convention:
 	// BusinessName if set, else ContactInfo.Name, else the BillingAccount's
@@ -209,9 +209,10 @@ func customerNeedsUpdate(existing om.Customer, desired DesiredCustomer) bool {
 
 // createCustomer POSTs a new customer.
 func (c *client) createCustomer(ctx context.Context, desired DesiredCustomer) (om.Customer, error) {
+	key := string(desired.Key)
 	body := om.CustomerCreate{
 		Name:             desired.Name,
-		Key:              &desired.Key,
+		Key:              &key,
 		BillingAddress:   wireAddress(desired.Address),
 		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: nonNilStrings(desired.SubjectKeys)},
 	}
@@ -255,9 +256,10 @@ func (c *client) updateCustomer(ctx context.Context, desired DesiredCustomer) (o
 	// Currency gets the opposite treatment: OpenMeter rejects "" with
 	// "minimum string length is 3", so it stays omitted (see
 	// customerNeedsUpdate for how that's kept from looping).
+	key := string(desired.Key)
 	body := om.CustomerReplaceUpdate{
 		Name:             desired.Name,
-		Key:              &desired.Key,
+		Key:              &key,
 		PrimaryEmail:     &desired.Email,
 		BillingAddress:   wireAddress(desired.Address),
 		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: nonNilStrings(desired.SubjectKeys)},
@@ -266,7 +268,7 @@ func (c *client) updateCustomer(ctx context.Context, desired DesiredCustomer) (o
 		body.Currency = &desired.Currency
 	}
 
-	resp, err := c.api.UpdateCustomerWithResponse(ctx, desired.Key, body)
+	resp, err := c.api.UpdateCustomerWithResponse(ctx, key, body)
 	if err != nil {
 		return om.Customer{}, classify(nil, nil, err)
 	}
@@ -288,12 +290,12 @@ func (c *client) updateCustomer(ctx context.Context, desired DesiredCustomer) (o
 // GetCustomer fetches a customer by its key. Returns ErrCustomerNotFound
 // when no such customer exists (including one that was previously deleted —
 // OpenMeter's key lookup excludes soft-deleted records).
-func (c *client) GetCustomer(ctx context.Context, key string) (om.Customer, error) {
+func (c *client) GetCustomer(ctx context.Context, key CustomerKey) (om.Customer, error) {
 	if key == "" {
 		return om.Customer{}, &PermanentError{Err: errors.New("key is required")}
 	}
 
-	resp, err := c.api.GetCustomerWithResponse(ctx, key, nil)
+	resp, err := c.api.GetCustomerWithResponse(ctx, string(key), nil)
 	if err != nil {
 		return om.Customer{}, classify(nil, nil, err)
 	}
@@ -312,12 +314,12 @@ func (c *client) GetCustomer(ctx context.Context, key string) (om.Customer, erro
 // DeleteCustomer removes a customer keyed by key. NotFound is treated as
 // success — the desired end state is "no customer in OpenMeter", and
 // absence satisfies that goal.
-func (c *client) DeleteCustomer(ctx context.Context, key string) error {
+func (c *client) DeleteCustomer(ctx context.Context, key CustomerKey) error {
 	if key == "" {
 		return &PermanentError{Err: errors.New("key is required")}
 	}
 
-	resp, err := c.api.DeleteCustomerWithResponse(ctx, key)
+	resp, err := c.api.DeleteCustomerWithResponse(ctx, string(key))
 	if err != nil {
 		return classify(nil, nil, err)
 	}

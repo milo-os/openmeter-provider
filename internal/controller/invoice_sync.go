@@ -17,6 +17,8 @@ import (
 	om "github.com/openmeterio/openmeter/api/client/go"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
+
+	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )
 
 // InvoiceKeyAnnotation stores the OpenMeter invoice id on the Milo Invoice
@@ -74,7 +76,7 @@ func invoiceName(accountName string, inv om.Invoice) string {
 func (r *BillingAccountReconciler) reconcileInvoices(
 	ctx context.Context,
 	account *billingv1alpha1.BillingAccount,
-	openMeterCustomerID string,
+	openMeterCustomerID openmeter.CustomerID,
 ) error {
 	invoices, err := r.OpenMeterClient.ListInvoices(ctx, openMeterCustomerID)
 	if err != nil {

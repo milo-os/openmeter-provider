@@ -51,8 +51,8 @@ type fakeBillingProfileOpenMeterClient struct {
 	deleteProfileErr    error
 }
 
-func (f *fakeBillingProfileOpenMeterClient) DeleteBillingProfileCustomerOverride(_ context.Context, customerID string) error {
-	f.deleteOverrideCalls = append(f.deleteOverrideCalls, customerID)
+func (f *fakeBillingProfileOpenMeterClient) DeleteBillingProfileCustomerOverride(_ context.Context, customerID openmeter.CustomerID) error {
+	f.deleteOverrideCalls = append(f.deleteOverrideCalls, string(customerID))
 	return f.deleteOverrideErr
 }
 

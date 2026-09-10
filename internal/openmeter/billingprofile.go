@@ -25,7 +25,7 @@ type DesiredBillingProfile struct {
 	// this is what makes profile creation idempotent under retry (see
 	// findBillingProfileByAccountKey). Required; EnsureBillingProfile
 	// returns a PermanentError if empty.
-	AccountKey string
+	AccountKey CustomerKey
 	// Name is a human-readable, not-necessarily-unique label. It is not
 	// used to look up the profile — AccountKey is.
 	Name string
@@ -184,9 +184,9 @@ func (c *client) findBillingProfile(ctx context.Context, match func(om.BillingPr
 // findBillingProfileByAccountKey searches for the billing profile tagged
 // with accountKey in Metadata[billingProfileAccountKeyMetadataKey],
 // returning (nil, nil) when none matches.
-func (c *client) findBillingProfileByAccountKey(ctx context.Context, accountKey string) (*om.BillingProfile, error) {
+func (c *client) findBillingProfileByAccountKey(ctx context.Context, accountKey CustomerKey) (*om.BillingProfile, error) {
 	return c.findBillingProfile(ctx, func(p om.BillingProfile) bool {
-		return p.Metadata != nil && (*p.Metadata)[billingProfileAccountKeyMetadataKey] == accountKey
+		return p.Metadata != nil && (*p.Metadata)[billingProfileAccountKeyMetadataKey] == string(accountKey)
 	})
 }
 
@@ -271,14 +271,14 @@ func (c *client) DeleteBillingProfile(ctx context.Context, id string) error {
 // pattern). Callers get the internal id from the om.Customer EnsureCustomer/
 // GetCustomer already returns — see billingprofile_sync.go's
 // reconcileBillingProfile and billingProfileFinalizer.Finalize.
-func (c *client) UpsertBillingProfileCustomerOverride(ctx context.Context, customerID string, billingProfileID string) error {
+func (c *client) UpsertBillingProfileCustomerOverride(ctx context.Context, customerID CustomerID, billingProfileID string) error {
 	if customerID == "" {
 		return &PermanentError{Err: errors.New("customerID is required")}
 	}
 	if billingProfileID == "" {
 		return &PermanentError{Err: errors.New("billingProfileID is required")}
 	}
-	resp, err := c.api.UpsertBillingProfileCustomerOverrideWithResponse(ctx, customerID, om.BillingProfileCustomerOverrideCreate{
+	resp, err := c.api.UpsertBillingProfileCustomerOverrideWithResponse(ctx, string(customerID), om.BillingProfileCustomerOverrideCreate{
 		BillingProfileId: &billingProfileID,
 	})
 	if err != nil {
@@ -292,11 +292,11 @@ func (c *client) UpsertBillingProfileCustomerOverride(ctx context.Context, custo
 //
 // customerID must be OpenMeter's internal customer id (a ULID), not the
 // external key — see UpsertBillingProfileCustomerOverride's doc comment.
-func (c *client) DeleteBillingProfileCustomerOverride(ctx context.Context, customerID string) error {
+func (c *client) DeleteBillingProfileCustomerOverride(ctx context.Context, customerID CustomerID) error {
 	if customerID == "" {
 		return &PermanentError{Err: errors.New("customerID is required")}
 	}
-	resp, err := c.api.DeleteBillingProfileCustomerOverrideWithResponse(ctx, customerID)
+	resp, err := c.api.DeleteBillingProfileCustomerOverrideWithResponse(ctx, string(customerID))
 	if err != nil {
 		return classify(nil, nil, err)
 	}
@@ -323,7 +323,7 @@ func (c *client) createBillingProfile(ctx context.Context, desired DesiredBillin
 		Name:     desired.Name,
 		Default:  false,
 		Supplier: def.Supplier,
-		Metadata: &om.Metadata{billingProfileAccountKeyMetadataKey: desired.AccountKey},
+		Metadata: &om.Metadata{billingProfileAccountKeyMetadataKey: string(desired.AccountKey)},
 		Workflow: om.BillingWorkflowCreate{
 			Invoicing:  desiredWorkflowInvoicing(desired),
 			Collection: desiredWorkflowCollection(desired),

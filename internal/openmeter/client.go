@@ -26,6 +26,36 @@ import (
 	om "github.com/openmeterio/openmeter/api/client/go"
 )
 
+// CustomerKey is OpenMeter's external customer key. In this codebase it is
+// always the Milo BillingAccount's metadata.uid (see DesiredCustomer.Key).
+// Accepted by EnsureCustomer, GetCustomer, DeleteCustomer, and
+// EnsureCustomerStripeAppData.
+//
+// Distinct from CustomerID: OpenMeter's customerIdOrKey path parameter
+// matches on either its own server-assigned id OR this external key for
+// those endpoints, but several others (UpsertBillingProfileCustomerOverride,
+// DeleteBillingProfileCustomerOverride, ListInvoices' Customers filter, and
+// the meter query endpoint's filterCustomerId) accept ONLY the internal id
+// and 400 if handed this key instead. A single plain `string` parameter
+// used for both was a real source of confusion (and one live bug caught
+// this session, in an e2e test script) — these named types make the two
+// impossible to swap by accident; the compiler rejects it.
+type CustomerKey string
+
+// CustomerID is OpenMeter's own internal customer id — a server-assigned
+// ULID (e.g. "01M25WVCC7N39X1F6MWTQ8SH1H"), found on om.Customer.Id.
+// Required by UpsertBillingProfileCustomerOverride,
+// DeleteBillingProfileCustomerOverride, ListInvoices, and meter queries'
+// filterCustomerId — see CustomerKey's doc comment for why this is a
+// distinct type rather than another plain string.
+type CustomerID string
+
+// StripeCustomerID is Stripe's own customer id (e.g. "cus_..."), a third,
+// unrelated identifier domain that happens to share a bare "customer id"
+// name with CustomerID above. Kept as its own type so the two are never
+// confused at a call site (see stripe.go's EnsureCustomerStripeAppData).
+type StripeCustomerID string
+
 // Client is the typed interface over the OpenMeter API used by the
 // reconcilers. It is the seam the controllers depend on.
 type Client interface {
@@ -48,10 +78,10 @@ type Client interface {
 	EnsureCustomer(ctx context.Context, desired DesiredCustomer) (om.Customer, error)
 	// GetCustomer fetches a customer by key. Returns ErrCustomerNotFound
 	// when absent.
-	GetCustomer(ctx context.Context, key string) (om.Customer, error)
+	GetCustomer(ctx context.Context, key CustomerKey) (om.Customer, error)
 	// DeleteCustomer removes a customer by key. NotFound is treated as
 	// success.
-	DeleteCustomer(ctx context.Context, key string) error
+	DeleteCustomer(ctx context.Context, key CustomerKey) error
 
 	// Invoices (see invoice.go).
 
@@ -60,14 +90,21 @@ type Client interface {
 	// yet. customerID must be OpenMeter's internal customer id (a ULID),
 	// not the external key — same caveat as
 	// UpsertBillingProfileCustomerOverride.
-	ListInvoices(ctx context.Context, customerID string) ([]om.Invoice, error)
+	ListInvoices(ctx context.Context, customerID CustomerID) ([]om.Invoice, error)
 
 	// Stripe app data (see stripe.go).
 
 	// EnsureCustomerStripeAppData upserts the customer's Stripe app data
 	// (customer id and, when known, default payment method id) so
-	// OpenMeter's own billing engine can charge through Stripe.
-	EnsureCustomerStripeAppData(ctx context.Context, key string, stripeCustomerID string, stripeDefaultPaymentMethodID string) error
+	// OpenMeter's own billing engine can charge through Stripe. Takes
+	// CustomerID rather than CustomerKey: the underlying endpoint accepts
+	// either (OpenMeter's customerIdOrKey union), and every caller reaches
+	// this after EnsureCustomer has already resolved the internal id — using
+	// it consistently here, like UpsertBillingProfileCustomerOverride and
+	// ListInvoices, means CustomerKey only appears where it's actually
+	// required (the initial GetCustomer/EnsureCustomer lookup and the
+	// delete finalizer, which has no id to read without persisting one).
+	EnsureCustomerStripeAppData(ctx context.Context, customerID CustomerID, stripeCustomerID StripeCustomerID, stripeDefaultPaymentMethodID string) error
 
 	// Billing profiles (see billingprofile.go).
 
@@ -86,12 +123,12 @@ type Client interface {
 	// internal customer id (a ULID) — unlike EnsureCustomer/GetCustomer/
 	// EnsureCustomerStripeAppData, this endpoint does not accept the
 	// external key (see billingprofile.go for why).
-	UpsertBillingProfileCustomerOverride(ctx context.Context, customerID string, billingProfileID string) error
+	UpsertBillingProfileCustomerOverride(ctx context.Context, customerID CustomerID, billingProfileID string) error
 	// DeleteBillingProfileCustomerOverride removes the customer's
 	// override, reverting it to the org default. NotFound is treated as
 	// success. customerID must be OpenMeter's internal customer id (a
 	// ULID), same caveat as UpsertBillingProfileCustomerOverride.
-	DeleteBillingProfileCustomerOverride(ctx context.Context, customerID string) error
+	DeleteBillingProfileCustomerOverride(ctx context.Context, customerID CustomerID) error
 
 	// Usage ingestion (see ingest.go).
 

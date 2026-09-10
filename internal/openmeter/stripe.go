@@ -19,9 +19,9 @@ import (
 // itself is omitted so OpenMeter uses the instance's default Stripe app
 // (an operator/deployment precondition, not something this reconciler
 // provisions).
-func (c *client) EnsureCustomerStripeAppData(ctx context.Context, key string, stripeCustomerID string, stripeDefaultPaymentMethodID string) error {
-	if key == "" {
-		return &PermanentError{Err: errors.New("key is required")}
+func (c *client) EnsureCustomerStripeAppData(ctx context.Context, customerID CustomerID, stripeCustomerID StripeCustomerID, stripeDefaultPaymentMethodID string) error {
+	if customerID == "" {
+		return &PermanentError{Err: errors.New("customerID is required")}
 	}
 	if stripeCustomerID == "" {
 		return &PermanentError{Err: errors.New("stripeCustomerID is required")}
@@ -35,15 +35,15 @@ func (c *client) EnsureCustomerStripeAppData(ctx context.Context, key string, st
 	// every single reconcile. A NotFound (no app data yet) or any read
 	// failure just falls through to the write — the upsert is the source of
 	// truth, this is only an optimization.
-	if current, err := c.getCustomerStripeAppData(ctx, key); err == nil &&
-		current.StripeCustomerId == stripeCustomerID &&
+	if current, err := c.getCustomerStripeAppData(ctx, customerID); err == nil &&
+		current.StripeCustomerId == string(stripeCustomerID) &&
 		derefOrEmpty(current.StripeDefaultPaymentMethodId) == stripeDefaultPaymentMethodID {
 		return nil
 	}
 
 	item := om.StripeCustomerAppDataCreateOrUpdateItem{
 		Type:             om.StripeCustomerAppDataCreateOrUpdateItemTypeStripe,
-		StripeCustomerId: stripeCustomerID,
+		StripeCustomerId: string(stripeCustomerID),
 	}
 	if stripeDefaultPaymentMethodID != "" {
 		item.StripeDefaultPaymentMethodId = &stripeDefaultPaymentMethodID
@@ -53,7 +53,7 @@ func (c *client) EnsureCustomerStripeAppData(ctx context.Context, key string, st
 		return &PermanentError{Err: err}
 	}
 
-	resp, err := c.api.UpsertCustomerAppDataWithResponse(ctx, key, []om.CustomerAppDataCreateOrUpdateItem{entry})
+	resp, err := c.api.UpsertCustomerAppDataWithResponse(ctx, string(customerID), []om.CustomerAppDataCreateOrUpdateItem{entry})
 	if err != nil {
 		return classify(nil, nil, err)
 	}
@@ -64,8 +64,8 @@ func (c *client) EnsureCustomerStripeAppData(ctx context.Context, key string, st
 // data. Only used as a drift check by EnsureCustomerStripeAppData, so any
 // error (including "no app data yet") simply means "cannot prove it already
 // matches" and the caller proceeds with the write.
-func (c *client) getCustomerStripeAppData(ctx context.Context, key string) (om.StripeCustomerAppData, error) {
-	resp, err := c.api.GetCustomerStripeAppDataWithResponse(ctx, key)
+func (c *client) getCustomerStripeAppData(ctx context.Context, customerID CustomerID) (om.StripeCustomerAppData, error) {
+	resp, err := c.api.GetCustomerStripeAppDataWithResponse(ctx, string(customerID))
 	if err != nil {
 		return om.StripeCustomerAppData{}, classify(nil, nil, err)
 	}
