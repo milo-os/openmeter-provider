@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -14,6 +16,12 @@ import (
 // errors.Is to decide whether to create or update the meter; DeleteMeter
 // treats it as success.
 var ErrMeterNotFound = errors.New("openmeter: meter not found")
+
+// ErrCustomerNotFound is the sentinel returned by GetCustomer when OpenMeter
+// responds with a 404 for the requested customer key. Callers compare with
+// errors.Is to decide whether to create or update the customer; DeleteCustomer
+// treats it as success.
+var ErrCustomerNotFound = errors.New("openmeter: customer not found")
 
 // TransientError wraps a failure that the caller should retry with backoff.
 // Network errors, 429s, and 5xx responses all surface as TransientError.
@@ -91,14 +99,32 @@ func IsPermanent(err error) bool {
 	return errors.As(err, &p)
 }
 
-// classify inspects an HTTP status and the SDK's parsed error body and
-// returns the correct provider error. It is the single place that turns an
-// OpenMeter HTTP response status into a retriable-vs-permanent decision.
+// classify inspects an HTTP response and body and returns the correct
+// provider error. resp may be nil, which is treated as a transient
+// network-level failure; in that case networkErr must be non-nil and is
+// used as the underlying error.
 //
-// A status of 0 is treated as an unknown non-HTTP failure (the SDK returned
-// no usable response); in that case err must be non-nil and is used as the
-// underlying error.
-func classify(status int, body string, err error) error {
+// Call sites pass the already-read body bytes (generated *WithResponse
+// clients populate Body/HTTPResponse eagerly) so the response body is
+// captured for surfacing in PermanentError.ResponseBody and so the body
+// text is available as part of the TransientError message.
+func classify(resp *http.Response, bodyBytes []byte, networkErr error) error {
+	if resp == nil {
+		// Network-level failure (DNS, connection refused, TLS, etc.).
+		if networkErr == nil {
+			networkErr = errors.New("nil response and nil network error")
+		}
+		return &TransientError{Err: networkErr}
+	}
+
+	status := resp.StatusCode
+	bodySnippet := strings.TrimSpace(string(bodyBytes))
+	// Cap body snippet to avoid pathological sizes leaking into logs.
+	const maxBody = 4096
+	if len(bodySnippet) > maxBody {
+		bodySnippet = bodySnippet[:maxBody] + "...(truncated)"
+	}
+
 	switch {
 	case status >= 200 && status < 300:
 		// Not an error.
@@ -106,41 +132,70 @@ func classify(status int, body string, err error) error {
 
 	case status == http.StatusTooManyRequests:
 		return &TransientError{
-			Err:        fmt.Errorf("rate limited by openmeter: %s", body),
+			Err:        fmt.Errorf("rate limited by openmeter: %s", bodySnippet),
 			StatusCode: status,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
 		}
 
 	case status == http.StatusUnauthorized, status == http.StatusForbidden:
 		return &PermanentError{
-			Err:          fmt.Errorf("openmeter rejected authentication (status=%d); verify bearer token is set and valid: %s", status, body),
+			Err:          fmt.Errorf("openmeter rejected authentication (status=%d); verify the bearer token is set and valid: %s", status, bodySnippet),
 			StatusCode:   status,
-			ResponseBody: body,
+			ResponseBody: bodySnippet,
+		}
+
+	case status == http.StatusRequestTimeout, status == http.StatusTooEarly:
+		// 4xx by number, retryable by meaning. Without this they fall into
+		// the >=400 permanent branch below, which costs a 5-minute backoff
+		// and a Warning event for what is really a blip.
+		return &TransientError{
+			Err:        fmt.Errorf("openmeter transient client-side status %d: %s", status, bodySnippet),
+			StatusCode: status,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
 		}
 
 	case status >= 500:
 		return &TransientError{
-			Err:        fmt.Errorf("openmeter server error: %s", body),
+			Err:        fmt.Errorf("openmeter server error: %s", bodySnippet),
 			StatusCode: status,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
 		}
 
 	case status >= 400:
 		return &PermanentError{
-			Err:          fmt.Errorf("openmeter rejected request: %s", body),
+			Err:          fmt.Errorf("openmeter rejected request: %s", bodySnippet),
 			StatusCode:   status,
-			ResponseBody: body,
+			ResponseBody: bodySnippet,
 		}
-
-	case status == 0 && err != nil:
-		// Network-level failure (DNS, connection refused, TLS, etc.).
-		return &TransientError{Err: err}
 
 	default:
 		// 1xx / 3xx unexpected at this layer; Go's http client follows
 		// redirects so we should not see 3xx here. Treat as permanent so
 		// the reconciler surfaces the surprise rather than looping.
 		return &PermanentError{
-			Err:        fmt.Errorf("unexpected status from openmeter (status=%d): %s", status, body),
-			StatusCode: status,
+			Err:          fmt.Errorf("unexpected status from openmeter (status=%d): %s", status, bodySnippet),
+			StatusCode:   status,
+			ResponseBody: bodySnippet,
 		}
 	}
+}
+
+// parseRetryAfter parses a Retry-After header value. Per HTTP spec this may
+// be either a delta-seconds integer or an HTTP-date; both are supported.
+func parseRetryAfter(h string) time.Duration {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(h); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(h); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	return 0
 }
