@@ -7,6 +7,7 @@ require (
 	github.com/openmeterio/openmeter v1.0.0-beta.232
 	github.com/spf13/cobra v1.10.2
 	go.miloapis.com/billing v0.3.1
+	go.miloapis.com/stripe-provider v0.0.0-00010101000000-000000000000
 	k8s.io/api v0.35.0
 	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.35.0
@@ -109,3 +110,7 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2-0.20260122202528-d9cc6641c482 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+// go.miloapis.com/stripe-provider is not yet published to the Go module
+// proxy — mirrors the same replace amberflo-provider uses.
+replace go.miloapis.com/stripe-provider => github.com/milo-os/stripe-provider v0.1.7-0.20260603154949-84bd6a63a51a
