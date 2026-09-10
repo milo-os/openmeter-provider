@@ -1,0 +1,22 @@
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  name: billing-usage
+  namespace: openmeter-system
+  labels:
+    app.kubernetes.io/name: openmeter-provider
+    app.kubernetes.io/component: nats-streams
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  name: billing-usage
+  subjects:
+    - "billing.usage.>"
+  retention: limits
+  maxAge: 720h    # 30-day replay window, matching billing's own stream config
+  maxMsgs: -1     # unlimited
+  maxBytes: -1    # unlimited
+  replicas: 1     # single-node for dev/CI; production operators manage their own cluster
+  storage: file
+  discard: old    # drop oldest messages when limits are reached
+  noAck: false    # require publisher ack
+  duplicateWindow: 72h  # NATS-level dedup on Nats-Msg-Id header (CloudEvent ID)

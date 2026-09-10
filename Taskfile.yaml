@@ -241,6 +241,12 @@ tasks:
 
         echo ""
         echo "----------------------------------------------------------------------"
+        echo "Stage 1c: Deploying NATS JetStream (submission-consumer dependency)"
+        echo "----------------------------------------------------------------------"
+        task dev:install-nats
+
+        echo ""
+        echo "----------------------------------------------------------------------"
         echo "Stage 2: Deploying openmeter-provider (Dev Overlay)"
         echo "----------------------------------------------------------------------"
         until task test-infra:kubectl -- apply -k config/overlays/dev; do
@@ -258,6 +264,37 @@ tasks:
         echo ""
         echo "openmeter-provider successfully deployed in dev mode!"
         echo "----------------------------------------------------------------------"
+
+  dev:install-nats:
+    desc: Install NATS JetStream (via Flux HelmRelease) and the billing-usage stream the submission-consumer reads from — so submission-consumer e2e tests can publish real CloudEvents onto NATS and verify they reach OpenMeter.
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Installing NATS + nack (JetStream controller)..."
+        task test-infra:kubectl -- apply -k config/dependencies/nats-ci
+
+        echo "Waiting for NATS JetStream CRDs (installed by nack)..."
+        until task test-infra:kubectl -- get crd streams.jetstream.nats.io >/dev/null 2>&1; do
+          echo "  - CRD not found yet, retrying..."
+          sleep 5
+        done
+        task test-infra:kubectl -- wait --for=condition=established crd/streams.jetstream.nats.io --timeout=120s
+
+        echo "Waiting for the NATS HelmRelease to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/nats -n nats-system --timeout={{.WAIT_TIMEOUT}}
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/nack -n nats-system --timeout={{.WAIT_TIMEOUT}}
+
+        echo "Waiting for the nats-box pod (used by e2e tests to publish/inspect JetStream messages)..."
+        task test-infra:kubectl -- wait --for=condition=ready pod/nats-box -n nats-system --timeout={{.WAIT_TIMEOUT}}
+
+        echo "Applying the billing-usage JetStream stream..."
+        until task test-infra:kubectl -- apply -k config/components/nats-streams; do
+          echo "  - Apply failed (nack webhook/controller may still be starting), retrying in 5s..."
+          sleep 5
+        done
+
+        echo "NATS JetStream ready."
 
   dev:install-external-crds:
     desc: Install all external CRDs (billing + stripe-provider) this controller watches
