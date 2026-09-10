@@ -93,7 +93,17 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 				return fmt.Errorf("creating bootstrap client: %w", err)
 			}
 
-			metricsServerOptions := serverConfig.MetricsServer.Options(ctx, bootstrapClient)
+			// The metrics endpoint's authn/authz filter must validate scrape
+			// requests against the LOCAL cluster (where the scraper and this
+			// pod live), not the Milo control plane that `cfg` may point at
+			// via KubeconfigPath. Resolve the local config via the standard
+			// in-cluster / KUBECONFIG resolution.
+			metricsAuthConfig, err := ctrl.GetConfig()
+			if err != nil {
+				return fmt.Errorf("loading local rest config for metrics auth: %w", err)
+			}
+
+			metricsServerOptions := serverConfig.MetricsServer.Options(ctx, bootstrapClient, metricsAuthConfig)
 
 			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 				Scheme:                  scheme,

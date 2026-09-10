@@ -29,12 +29,20 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
       -X main.gitCommit=${GIT_COMMIT} \
       -X main.gitTreeState=${GIT_TREE_STATE} \
       -X main.buildDate=${BUILD_DATE}" \
-    -o openmeter-provider ./cmd/openmeter
+    -o openmeter-provider ./cmd/openmeter && \
+  CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+    -ldflags "-s -w \
+      -X main.version=${VERSION} \
+      -X main.gitCommit=${GIT_COMMIT} \
+      -X main.gitTreeState=${GIT_TREE_STATE} \
+      -X main.buildDate=${BUILD_DATE}" \
+    -o submission-consumer ./cmd/openmeter/submission-consumer
 
-# Use distroless as minimal base image to package the openmeter-provider binary
+# Use distroless as minimal base image to package the binaries
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 COPY --from=builder /workspace/openmeter-provider .
+COPY --from=builder /workspace/submission-consumer .
 USER 65532:65532
 
 ENTRYPOINT ["/openmeter-provider"]

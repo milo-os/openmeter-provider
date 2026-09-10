@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	om "github.com/openmeterio/openmeter/api/client/go"
 )
 
@@ -91,6 +92,11 @@ type Client interface {
 	// success. customerID must be OpenMeter's internal customer id (a
 	// ULID), same caveat as UpsertBillingProfileCustomerOverride.
 	DeleteBillingProfileCustomerOverride(ctx context.Context, customerID string) error
+
+	// Usage ingestion (see ingest.go).
+
+	// SubmitUsageBatch ingests already-validated CloudEvents into OpenMeter.
+	SubmitUsageBatch(ctx context.Context, events []cloudevents.Event) error
 }
 
 // client is the concrete implementation of Client. Its methods are spread

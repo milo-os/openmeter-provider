@@ -142,3 +142,41 @@ func TestDesiredCustomerFromAccount_Address(t *testing.T) {
 		}
 	})
 }
+
+func bindingFor(projectName string, phase billingv1alpha1.BillingAccountBindingPhase) billingv1alpha1.BillingAccountBinding {
+	return billingv1alpha1.BillingAccountBinding{
+		Spec:   billingv1alpha1.BillingAccountBindingSpec{ProjectRef: billingv1alpha1.ProjectRef{Name: projectName}},
+		Status: billingv1alpha1.BillingAccountBindingStatus{Phase: phase},
+	}
+}
+
+// TestProjectsFromActiveBindings_PrefixesProjectSubjectKey is the
+// regression test for a bug that would have silently broken usage
+// attribution end to end: billing/emission/cloudevents.go's toCloudEvent
+// sets a validated usage CloudEvent's subject to "projects/<name>", and
+// OpenMeter attributes usage to a customer by exact string match against
+// Customer.UsageAttribution.SubjectKeys (no normalization — confirmed in
+// OpenMeter's own source). Syncing bare project names here would mean
+// every usage event silently fails to attribute to any customer, with
+// nothing erroring anywhere to surface it.
+func TestProjectsFromActiveBindings_PrefixesProjectSubjectKey(t *testing.T) {
+	got := projectsFromActiveBindings([]billingv1alpha1.BillingAccountBinding{
+		bindingFor("project-alpha", billingv1alpha1.BillingAccountBindingPhaseActive),
+	})
+	want := []string{"projects/project-alpha"}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Errorf("projectsFromActiveBindings() = %v, want %v (must match billing/emission/cloudevents.go's ce.SetSubject(\"projects/\" + name) exactly)", got, want)
+	}
+}
+
+func TestProjectsFromActiveBindings_IgnoresInactiveAndEmpty(t *testing.T) {
+	got := projectsFromActiveBindings([]billingv1alpha1.BillingAccountBinding{
+		bindingFor("project-superseded", billingv1alpha1.BillingAccountBindingPhaseSuperseded),
+		bindingFor("", billingv1alpha1.BillingAccountBindingPhaseActive),
+		bindingFor("project-active", billingv1alpha1.BillingAccountBindingPhaseActive),
+	})
+	want := []string{"projects/project-active"}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Errorf("projectsFromActiveBindings() = %v, want %v", got, want)
+	}
+}

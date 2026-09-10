@@ -113,7 +113,11 @@ spec:
         Create a BillingAccountBinding for project-alpha, then patch its
         status.phase to Active (simulating billing's own controller — see
         the test-level description). Poll OpenMeter and confirm
-        usageAttribution.subjectKeys now includes "project-alpha".
+        usageAttribution.subjectKeys now includes "projects/project-alpha"
+        — prefixed, matching billing/emission/cloudevents.go's
+        ce.SetSubject("projects/" + ev.Project.Name) exactly, since that's
+        what the submission consumer forwards as a CloudEvent's subject for
+        OpenMeter to attribute against.
       try:
         - script:
             content: |
@@ -132,7 +136,7 @@ spec:
               - name: CUSTOMER_KEY
                 value: ($customerKey)
             content: |
-              sh verify-customer.sh "$CUSTOMER_KEY" openmeter-system/e2e-billingaccount initial@example.com USD project-alpha
+              sh verify-customer.sh "$CUSTOMER_KEY" openmeter-system/e2e-billingaccount initial@example.com USD projects/project-alpha
 
     - name: unbind the project and confirm the attribution clears
       description: |

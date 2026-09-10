@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	om "github.com/openmeterio/openmeter/api/client/go"
 )
 
@@ -49,6 +50,10 @@ type fakeServer struct {
 	customerUpdates       int
 	billingProfileUpdates int
 	stripeAppDataWrites   int
+
+	// ingestedEvents accumulates every CloudEvent ever POSTed to the
+	// ingest route, in submission order, across all calls.
+	ingestedEvents []cloudevents.Event
 }
 
 func newTestClient(t *testing.T) (Client, *fakeServer) {
@@ -94,6 +99,9 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if f.serveBillingProfiles(w, r) {
+		return
+	}
+	if f.serveIngest(w, r) {
 		return
 	}
 	w.WriteHeader(http.StatusNotFound)

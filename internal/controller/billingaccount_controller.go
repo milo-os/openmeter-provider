@@ -271,8 +271,20 @@ func (r *BillingAccountReconciler) aggregateActiveBindingProjects(
 	return projectsFromActiveBindings(bindings.Items), nil
 }
 
-// projectsFromActiveBindings extracts the project names from bindings whose
-// status.phase is Active, drops empty entries, de-duplicates, and sorts.
+// projectSubjectKeyPrefix must match billing/emission/cloudevents.go's
+// toCloudEvent exactly: ce.SetSubject("projects/" + ev.Project.Name). The
+// submission consumer forwards that CloudEvent's subject to OpenMeter
+// unmodified, and OpenMeter attributes usage to a customer by exact string
+// match against Customer.UsageAttribution.SubjectKeys (confirmed in
+// OpenMeter's own source — CustomerUsageAttribution.GetValues does no
+// normalization). A bare project name here would never match, so every
+// usage event would silently fail to attribute to any customer.
+const projectSubjectKeyPrefix = "projects/"
+
+// projectsFromActiveBindings extracts the project subject keys from
+// bindings whose status.phase is Active, drops empty entries,
+// de-duplicates, and sorts. See projectSubjectKeyPrefix for why these are
+// prefixed rather than bare project names.
 func projectsFromActiveBindings(items []billingv1alpha1.BillingAccountBinding) []string {
 	projects := make([]string, 0, len(items))
 	for i := range items {
@@ -283,7 +295,7 @@ func projectsFromActiveBindings(items []billingv1alpha1.BillingAccountBinding) [
 		if b.Spec.ProjectRef.Name == "" {
 			continue
 		}
-		projects = append(projects, b.Spec.ProjectRef.Name)
+		projects = append(projects, projectSubjectKeyPrefix+b.Spec.ProjectRef.Name)
 	}
 	return sortedCopy(projects)
 }

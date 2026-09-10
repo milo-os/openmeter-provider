@@ -6,6 +6,7 @@ images:
 
 resources:
   - ../../base/manager
+  - ../../base/submission-consumer
 
 components:
   - ../../components/namespace
@@ -22,3 +23,7 @@ configMapGenerator:
 
 patches:
   - path: dev_patch.yaml
+  - target:
+      kind: Deployment
+      name: submission-consumer
+    path: submission_consumer_patch.yaml

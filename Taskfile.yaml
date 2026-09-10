@@ -77,11 +77,11 @@ tasks:
     silent: true
 
   build:
-    desc: Build the openmeter-provider binary
+    desc: Build the openmeter-provider and submission-consumer binaries
     cmds:
       - |
         set -e
-        echo "Building openmeter-provider..."
+        echo "Building binaries..."
         mkdir -p {{.TOOL_DIR}}
 
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -101,6 +101,14 @@ tasks:
                     -X 'main.buildDate=${BUILD_DATE}'" \
           -o {{.TOOL_DIR}}/openmeter-provider ./cmd/openmeter
         echo "Binary built: {{.TOOL_DIR}}/openmeter-provider"
+
+        go build \
+          -ldflags="-X 'main.version=${VERSION}' \
+                    -X 'main.gitCommit=${GIT_COMMIT}' \
+                    -X 'main.gitTreeState=${GIT_TREE_STATE}' \
+                    -X 'main.buildDate=${BUILD_DATE}'" \
+          -o {{.TOOL_DIR}}/submission-consumer ./cmd/openmeter/submission-consumer
+        echo "Binary built: {{.TOOL_DIR}}/submission-consumer"
     silent: true
 
   test:
@@ -245,6 +253,7 @@ tasks:
         echo "Stage 3: Verification"
         echo "----------------------------------------------------------------------"
         task test-infra:kubectl -- rollout status -n openmeter-system deployment/openmeter-provider-manager --timeout=120s || echo "  - Controller not ready yet"
+        task test-infra:kubectl -- rollout status -n openmeter-system deployment/submission-consumer --timeout=120s || echo "  - submission-consumer not ready yet"
 
         echo ""
         echo "openmeter-provider successfully deployed in dev mode!"
@@ -508,6 +517,11 @@ tasks:
         echo "Redeploying openmeter-provider (dev)..."
         task test-infra:kubectl -- delete pod -n openmeter-system -l app.kubernetes.io/name=openmeter-provider --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
         task test-infra:kubectl -- rollout status -n openmeter-system deployment/openmeter-provider-manager --timeout=120s || true
+
+        echo "Redeploying submission-consumer (dev)..."
+        task test-infra:kubectl -- delete pod -n openmeter-system -l app.kubernetes.io/name=submission-consumer --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
+        task test-infra:kubectl -- rollout status -n openmeter-system deployment/submission-consumer --timeout=120s || true
+
         echo "Redeployment complete!"
     silent: true
 

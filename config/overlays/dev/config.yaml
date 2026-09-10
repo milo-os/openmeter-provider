@@ -9,3 +9,10 @@ openMeter:
 # Uncomment and set kubeconfigPath to point at Milo's control plane API server
 # when running against a remote cluster.
 # kubeconfigPath: /etc/milo/kubeconfig
+# nats configures the submission-consumer's connection to the billing
+# pipeline's NATS JetStream cluster. Only read by the submission-consumer
+# binary. Plaintext (no TLS) here since the dev/test-infra cluster has no
+# cert-manager NATS issuer; see config/base/submission-consumer/deployment.yaml
+# for the mTLS volume mounts used in production.
+nats:
+  url: nats://nats.nats-system.svc:4222
