@@ -1,0 +1,10 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-billingaccount
+spec:
+  # currencyCode is left unchanged (immutable past Provisioning per the CRD
+  # doc comment); contactInfo.email is the mutable field this case exercises.
+  currencyCode: USD
+  contactInfo:
+    email: updated@example.com

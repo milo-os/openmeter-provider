@@ -1,0 +1,374 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: billingaccount
+spec:
+  description: |
+    Exercises BillingAccountReconciler end to end against a real OpenMeter
+    instance: create (customer + per-account BillingProfile), confirm the
+    customer converges, bind and unbind a project (usageAttribution.subjectKeys),
+    update a mutable field (contactInfo.email), attach a default payment method
+    and confirm Stripe app data syncs, then delete and confirm the customer,
+    BillingProfile, and BillingProfile-customer override are all removed.
+
+    This cluster runs only openmeter-provider + OpenMeter, not billing's own
+    controllers or stripe-provider — so several things this reconciler reads
+    (BillingAccountBinding.status.phase, PaymentMethod/StripePaymentMethod
+    status, BillingAccount's own DefaultPaymentMethodReady condition) are
+    fabricated directly via `patch` steps rather than produced by a real
+    upstream controller. Each fixture file that does this says so.
+
+    Per-account BillingProfile creation additionally requires an org-wide
+    default BillingProfile (with Apps installed) to already exist on this
+    OpenMeter instance — an ops/deployment precondition this reconciler does
+    not provision (see TODO.md). Nothing in this e2e setup provisions one
+    either (installing an App is its own non-trivial flow), so
+    verify-billing-profile.sh checks for that precondition and SKIPS (not
+    fails) the BillingProfile-specific assertions when it's absent, logging
+    why. Everything else in this test does not depend on it.
+
+    BillingAccount is namespaced (unlike the cluster-scoped MeterDefinition);
+    the namespace bound below applies to every resource in this test.
+
+    The customer key (the BillingAccount's UID) is captured via a `kubectl get
+    -o jsonpath` script + `outputs` in every step that needs it, rather than
+    once up front: chainsaw's script `outputs` are scoped to the step (`try:`
+    block) they're produced in and do not carry over to later steps.
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      description: |
+        Start a long-lived helper pod so later steps can reach the
+        openmeter-api ClusterIP service via `kubectl exec` — the app pods
+        themselves are distroless and offer no shell/curl of their own.
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query
+              status:
+                phase: Running
+
+    - name: create the BillingAccount and confirm the initial customer
+      description: |
+        Apply billingaccount.yaml (currencyCode=USD,
+        contactInfo.email=initial@example.com, no bindings yet). Confirm the
+        finalizer is attached, capture the BillingAccount's UID (OpenMeter's
+        customer key), then poll OpenMeter and confirm name (falls back to
+        "namespace/name" since contactInfo carries neither businessName nor
+        name), primaryEmail, currency, with no projects attributed yet.
+        Also confirm a Synced event was emitted — proof the whole Reconcile
+        (customer + BillingProfile + Stripe app data + invoice sync) ran to
+        completion without error on at least one pass, not just the customer
+        sync in isolation — and check the per-account BillingProfile (see
+        verify-billing-profile.sh for why this step can legitimately skip).
+      try:
+        - apply:
+            file: billingaccount.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-billingaccount
+                (finalizers[?@ == 'openmeter.miloapis.com/customer-link']): ['openmeter.miloapis.com/customer-link']
+                (finalizers[?@ == 'openmeter.miloapis.com/billing-profile']): ['openmeter.miloapis.com/billing-profile']
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Event
+              involvedObject:
+                apiVersion: billing.miloapis.com/v1alpha1
+                kind: BillingAccount
+                name: e2e-billingaccount
+              reason: Synced
+              type: Normal
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-customer.sh "$CUSTOMER_KEY" openmeter-system/e2e-billingaccount initial@example.com USD
+        - script:
+            timeout: 35s
+            content: |
+              sh verify-billing-profile.sh e2e-billingaccount "$NAMESPACE"
+
+    - name: bind a project and confirm it is attributed to the customer
+      description: |
+        Create a BillingAccountBinding for project-alpha, then patch its
+        status.phase to Active (simulating billing's own controller — see
+        the test-level description). Poll OpenMeter and confirm
+        usageAttribution.subjectKeys now includes "project-alpha".
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - apply:
+            file: billingaccountbinding.yaml
+        - patch:
+            file: billingaccountbinding-active.yaml
+            subresource: status
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-customer.sh "$CUSTOMER_KEY" openmeter-system/e2e-billingaccount initial@example.com USD project-alpha
+
+    - name: unbind the project and confirm the attribution clears
+      description: |
+        Delete the BillingAccountBinding and poll OpenMeter to confirm
+        usageAttribution.subjectKeys goes back to an explicit empty array —
+        proof that DesiredCustomer.SubjectKeys is sent as an explicit list
+        rather than omitted when empty.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccountBinding
+              name: e2e-binding
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-empty-subjects.sh "$CUSTOMER_KEY"
+
+    - name: update contactInfo.email and confirm the customer converges
+      description: |
+        Re-apply the BillingAccount with contactInfo.email changed to
+        updated@example.com (currencyCode left unchanged — immutable past
+        Provisioning per the CRD doc comment). Poll OpenMeter and confirm
+        the new email actually landed, proving EnsureCustomer issued a real
+        update rather than treating the existing customer as already
+        converged.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - apply:
+            file: billingaccount-updated.yaml
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-customer.sh "$CUSTOMER_KEY" openmeter-system/e2e-billingaccount updated@example.com USD
+
+    - name: clear contactInfo.email and confirm the customer converges
+      description: |
+        Re-apply the BillingAccount with contactInfo.email removed entirely
+        and confirm OpenMeter's primaryEmail actually clears.
+
+        Regression coverage: a replace-PUT that simply omitted primaryEmail
+        left the previous address in place (OpenMeter preserves omitted
+        fields), so clearing never propagated AND the drift check compared
+        stale-vs-empty forever — an update on every single reconcile. Every
+        existing assertion here still passed, because they only ever checked
+        that a value we DID set was present.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - apply:
+            file: billingaccount-no-email.yaml
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-email-cleared.sh "$CUSTOMER_KEY"
+        # Restore the email so later steps keep asserting a known value.
+        - apply:
+            file: billingaccount-updated.yaml
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-customer.sh "$CUSTOMER_KEY" openmeter-system/e2e-billingaccount updated@example.com USD
+
+    - name: confirm the reconcile loop has actually settled
+      description: |
+        Sample the customer's and the per-account BillingProfile's updatedAt,
+        wait out several reconciles, and fail if either moved.
+
+        This is the assertion that was missing when two never-converging
+        drift checks shipped — the BillingProfile one comparing against a
+        collection alignment OpenMeter silently rewrites, and the customer
+        one comparing against an email a replace-PUT never cleared. Both
+        rewrote remote state on every single reconcile forever while every
+        other assertion in this suite stayed green, because the end state
+        still looked right. Only quiescence catches that class of bug.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.openmeter\.miloapis\.com/billing-profile-id}'
+            outputs:
+              - name: billingProfileId
+                value: ($stdout)
+        - script:
+            timeout: 40s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+              - name: BILLING_PROFILE_ID
+                value: ($billingProfileId)
+            content: |
+              sh verify-converged.sh "$CUSTOMER_KEY" "$BILLING_PROFILE_ID"
+
+    - name: attach a default payment method and confirm Stripe app data syncs
+      description: |
+        Fabricate an Active PaymentMethod + StripePaymentMethod (see their
+        files for why), point spec.defaultPaymentMethodRef at the
+        PaymentMethod, and patch BillingAccount.status.conditions with
+        DefaultPaymentMethodReady=True (simulating billing's own
+        controller). Poll OpenMeter and confirm the customer's Stripe app
+        data now carries the resolved stripeCustomerId/
+        stripeDefaultPaymentMethodId — proof resolveStripeCustomer's
+        PaymentMethod → StripePaymentMethod resolution chain and
+        EnsureCustomerStripeAppData both work end to end.
+
+        The ids themselves come from resolve-stripe-customer.sh, not a
+        fixed placeholder: OpenMeter validates them against whatever app
+        actually backs the org's default BillingProfile. Against Sandbox
+        (no real validation) a placeholder is fine; against a real Stripe
+        app (see `task dev:install-stripe-app`) OpenMeter genuinely checks
+        the customer/payment-method exist in Stripe, so the script creates
+        a real test-mode customer + attaches Stripe's built-in pm_card_visa
+        test token in that case.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - script:
+            content: |
+              sh resolve-stripe-customer.sh "$NAMESPACE" customerId
+            outputs:
+              - name: stripeCustomerId
+                value: ($stdout)
+        - script:
+            content: |
+              sh resolve-stripe-customer.sh "$NAMESPACE" paymentMethodId
+            outputs:
+              - name: stripePaymentMethodId
+                value: ($stdout)
+        - apply:
+            file: paymentmethod.yaml
+        - patch:
+            file: paymentmethod-active.yaml
+            subresource: status
+        - apply:
+            file: stripepaymentmethod.yaml
+        - patch:
+            file: stripepaymentmethod-active.yaml
+            subresource: status
+        - apply:
+            file: billingaccount-with-payment-method.yaml
+        - patch:
+            file: billingaccount-payment-method-ready.yaml
+            subresource: status
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+              - name: STRIPE_CUSTOMER_ID
+                value: ($stripeCustomerId)
+              - name: STRIPE_PAYMENT_METHOD_ID
+                value: ($stripePaymentMethodId)
+            content: |
+              sh verify-stripe-app-data.sh "$CUSTOMER_KEY" "$STRIPE_CUSTOMER_ID" "$STRIPE_PAYMENT_METHOD_ID"
+
+    - name: delete the BillingAccount and confirm everything is removed
+      description: |
+        Capture the customer key and billing-profile-id annotation before
+        deleting (a deleted BillingAccount can't be `kubectl get` afterward),
+        delete the BillingAccount, confirm the object itself is gone (both
+        finalizers released), and poll OpenMeter to confirm DeleteCustomer
+        and the billing-profile cleanup (override + BillingProfile) actually
+        reached it rather than the finalizers being dropped for some other
+        reason. verify-billing-profile-deleted.sh no-ops if no BillingProfile
+        was ever created (see the earlier skip note).
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.openmeter\.miloapis\.com/billing-profile-id}'
+            outputs:
+              - name: billingProfileId
+                value: ($stdout)
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              name: e2e-billingaccount
+        - error:
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-billingaccount
+        - script:
+            timeout: 25s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-deleted.sh "$CUSTOMER_KEY"
+        - script:
+            timeout: 25s
+            env:
+              - name: BILLING_PROFILE_ID
+                value: ($billingProfileId)
+            content: |
+              sh verify-billing-profile-deleted.sh "$BILLING_PROFILE_ID"

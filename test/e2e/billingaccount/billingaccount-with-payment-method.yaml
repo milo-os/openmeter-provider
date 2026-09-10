@@ -1,0 +1,13 @@
+# Adds spec.defaultPaymentMethodRef on top of the "updated" fixture's
+# fields (currencyCode/contactInfo.email carried forward unchanged —
+# currencyCode is immutable, and this step isn't exercising email again).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-billingaccount
+spec:
+  currencyCode: USD
+  contactInfo:
+    email: updated@example.com
+  defaultPaymentMethodRef:
+    name: e2e-payment-method
