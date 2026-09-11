@@ -56,14 +56,14 @@ resolve() {
   fi
 
   if [ "$app_type" = "stripe" ]; then
-    if [ -z "${STRIPE_API_KEY:-}" ]; then
-      echo "ERROR: the default BillingProfile's payment app is real Stripe, but STRIPE_API_KEY is not set locally (see .env.example) — cannot create a real test customer to verify against." >&2
+    if [ -z "${STRIPE_TEST_API_KEY:-}" ]; then
+      echo "ERROR: the default BillingProfile's payment app is real Stripe, but STRIPE_TEST_API_KEY is not set locally (see .env.example) — cannot create a real test customer to verify against." >&2
       exit 1
     fi
-    customer_id="$(command curl -s -u "${STRIPE_API_KEY}:" https://api.stripe.com/v1/customers \
+    customer_id="$(command curl -s -u "${STRIPE_TEST_API_KEY}:" https://api.stripe.com/v1/customers \
       -d description="openmeter-provider e2e (${ns})" | jq -r '.id')"
     if [ -z "$customer_id" ] || [ "$customer_id" = "null" ]; then
-      echo "ERROR: failed to create a real Stripe test customer (check STRIPE_API_KEY)." >&2
+      echo "ERROR: failed to create a real Stripe test customer (check STRIPE_TEST_API_KEY)." >&2
       exit 1
     fi
     # pm_card_visa is a *shared template token*, not a PaymentMethod that
@@ -73,7 +73,7 @@ resolve() {
     # instead 412s with "stripe payment method pm_card_visa does not belong
     # to stripe customer ..." (confirmed live), since OpenMeter verifies
     # ownership against the real Stripe account.
-    payment_method_id="$(command curl -s -u "${STRIPE_API_KEY}:" \
+    payment_method_id="$(command curl -s -u "${STRIPE_TEST_API_KEY}:" \
       "https://api.stripe.com/v1/payment_methods/pm_card_visa/attach" \
       -d "customer=${customer_id}" | jq -r '.id')"
     if [ -z "$payment_method_id" ] || [ "$payment_method_id" = "null" ]; then

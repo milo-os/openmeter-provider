@@ -1,8 +1,8 @@
 version: '3'
 
-# Loads STRIPE_API_KEY (see .env.example) into the environment of every
+# Loads STRIPE_TEST_API_KEY (see .env.example) into the environment of every
 # task's cmds, if a .env file is present. .env is gitignored — never commit
-# real secrets there.
+# real secrets there. Test-mode (sandbox) Stripe key only — never a live key.
 dotenv: ['.env']
 
 vars:
@@ -216,6 +216,12 @@ tasks:
       - task: dev:load
       - task: dev:deploy
 
+  ci:setup:
+    desc: Setup CI test environment
+    silent: true
+    cmds:
+      - task: dev:setup
+
   dev:deploy:
     desc: Deploy openmeter-provider using dev overlay
     silent: true
@@ -321,14 +327,14 @@ tasks:
         echo "stripe-provider CRDs installed."
 
   dev:install-stripe-app:
-    desc: Install a real Stripe app on the dev OpenMeter instance from STRIPE_API_KEY (.env) and make it the org's default BillingProfile — see .env.example. Skips gracefully if unset; idempotent.
+    desc: Install a Stripe TEST-MODE (sandbox) app on the dev OpenMeter instance from STRIPE_TEST_API_KEY (.env) and make it the org's default BillingProfile — see .env.example. Skips gracefully if unset; idempotent.
     silent: true
     cmds:
       - |
         set -eu
 
-        if [ -z "${STRIPE_API_KEY:-}" ]; then
-          echo "⚠️  STRIPE_API_KEY not set (see .env.example) — skipping Stripe app install."
+        if [ -z "${STRIPE_TEST_API_KEY:-}" ]; then
+          echo "⚠️  STRIPE_TEST_API_KEY not set (see .env.example) — skipping Stripe app install."
           echo "   BillingAccountReconciler's Stripe app-data sync will 412 with"
           echo "   \"no stripe app found in billing profile\" until this is set."
           exit 0
@@ -348,9 +354,9 @@ tasks:
         if [ -n "$stripe_app_id" ]; then
           echo "✅ A Stripe app is already installed (id=${stripe_app_id})."
         else
-          echo "Installing a Stripe app from STRIPE_API_KEY (test-mode key expected, sk_test_...)..."
+          echo "Installing a Stripe app from STRIPE_TEST_API_KEY (test-mode/sandbox key expected, sk_test_...)..."
           resp="$(command curl -s -X POST -H "Content-Type: application/json" \
-            -d "{\"apiKey\": \"${STRIPE_API_KEY}\", \"name\": \"stripe\"}" \
+            -d "{\"apiKey\": \"${STRIPE_TEST_API_KEY}\", \"name\": \"stripe\"}" \
             "${base}/marketplace/listings/stripe/install/apikey")"
           # OpenMeter's own response already masks the key (maskedAPIKey), so
           # it's safe to print in full.
@@ -459,7 +465,7 @@ tasks:
         echo ""
 
         # ============================================================
-        # Install a Stripe app (skips gracefully if STRIPE_API_KEY unset)
+        # Install a Stripe test-mode app (skips gracefully if STRIPE_TEST_API_KEY unset)
         # ============================================================
         task dev:install-stripe-app
 
