@@ -56,7 +56,23 @@ echo "querying: ${url}"
 body=""
 last_err=""
 
-for i in $(seq 1 20); do
+# OpenMeter's dev/CI install runs the full production pipeline (raw ingest
+# -> Kafka -> sink-worker -> ClickHouse materialized view), not a synchronous
+# write — a meter query only sees usage once that pipeline has flushed, which
+# can lag noticeably under CI's shared, resource-constrained runners (the
+# HelmRelease caps the whole OpenMeter stack at 500m CPU / 512Mi memory;
+# see config/dependencies/openmeter/helmrelease.yaml). Confirmed live: a CI
+# run's submission-consumer logged "successfully submitted batch of usage
+# events to OpenMeter" immediately, but the meter query still returned
+# {"data":[]} 60s later — the ingest succeeded, materialization just hadn't
+# caught up yet. 90 attempts * 5s = 7.5 minutes gives that pipeline generous
+# room without masking a genuine regression (a real bug fails fast: either a
+# malformed query 400s immediately, or the value is simply wrong once data
+# appears — both exit long before the retry budget is exhausted).
+attempts=90
+interval=5
+
+for i in $(seq 1 "$attempts"); do
   err_file=$(mktemp)
   # `if` is one of the shell constructs POSIX exempts from `set -e`'s
   # exit-on-failure — needed since a non-2xx response makes wget exit
@@ -70,7 +86,7 @@ for i in $(seq 1 20); do
 
   if [ -n "$last_err" ]; then
     echo "meter ${slug}: request failed (${last_err}) — waiting..."
-    sleep 3
+    sleep "$interval"
     continue
   fi
 
@@ -84,9 +100,9 @@ for i in $(seq 1 20); do
     fi
     echo "meter ${slug} customer ${customer_id}: value=${got_value} so far, want ${want_total} — waiting..."
   else
-    echo "meter ${slug} customer ${customer_id}: request OK, no matching row yet (body: ${body}) — waiting..."
+    echo "meter ${slug} customer ${customer_id}: request OK, no matching row yet (body: ${body}) — waiting... (attempt ${i}/${attempts})"
   fi
-  sleep 3
+  sleep "$interval"
 done
 
 echo "meter ${slug} customer ${customer_id} did not converge to value=${want_total}"

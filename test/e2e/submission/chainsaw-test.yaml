@@ -202,7 +202,12 @@ spec:
               - name: totalPublished
                 value: ($stdout)
         - script:
-            timeout: 90s
+            # Comfortably above verify-usage.sh's own internal retry budget
+            # (90 attempts * 5s = 7.5min) — that budget, not this timeout, is
+            # what should trip first and print a real diagnostic. See its own
+            # comment for why the raw-ingest-to-queryable pipeline can lag
+            # this much under CI's resource-constrained OpenMeter install.
+            timeout: 480s
             env:
               - name: OPENMETER_CUSTOMER_ID
                 value: ($openMeterCustomerId)
