@@ -7,8 +7,9 @@ spec:
     Exercises EnsureMeter's drift-convergence path end to end against a real
     OpenMeter instance: create, mutate the MeterDefinition's mutable fields
     (displayName, description, dimensions), confirm OpenMeter actually
-    converges to the new values, then delete and confirm the meter is
-    removed.
+    converges to the new values, confirm the reconcile loop actually
+    settles (re-applying the converged spec must not keep rewriting the
+    meter), then delete and confirm the meter is removed.
 
     This is the behavior that regressed silently before EnsureMeter did real
     drift detection: it used to return the first-created meter forever and
@@ -77,6 +78,27 @@ spec:
         - script:
             timeout: 35s
             content: sh verify-meter.sh e2e_miloapis_com_update_requests "Explicit updated description" region tier project_name
+
+    - name: confirm the reconcile loop has actually settled
+      description: |
+        Re-apply the already-updated MeterDefinition unchanged (a genuine
+        no-op from the caller's perspective, but a real watch event that
+        triggers a fresh Reconcile pass — MeterDefinitionReconciler has no
+        periodic resync of its own), sample the meter's updatedAt, wait out
+        several reconciles, and fail if it moved.
+
+        This is the same class of gap billingaccount's own quiescence check
+        was added to close: two real drift-check bugs shipped there that
+        every "is the right value present" assertion missed, because the
+        end state still looked correct while the reconciler kept reissuing
+        an update forever. Nothing in this suite previously checked for
+        that here.
+      try:
+        - apply:
+            file: meterdefinition-updated.yaml
+        - script:
+            timeout: 25s
+            content: sh verify-meter-converged.sh e2e_miloapis_com_update_requests
 
     - name: delete the MeterDefinition and confirm the meter is removed
       description: |

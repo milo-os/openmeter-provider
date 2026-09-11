@@ -7,9 +7,12 @@ spec:
     Exercises BillingAccountReconciler end to end against a real OpenMeter
     instance: create (customer + per-account BillingProfile), confirm the
     customer converges, bind and unbind a project (usageAttribution.subjectKeys),
-    update a mutable field (contactInfo.email), attach a default payment method
-    and confirm Stripe app data syncs, then delete and confirm the customer,
-    BillingProfile, and BillingProfile-customer override are all removed.
+    bind two projects at once and then supersede one without deleting it
+    (both attribution paths — object deletion and a Superseded phase
+    transition — must drop a project the same way), update a mutable field
+    (contactInfo.email), attach a default payment method and confirm Stripe
+    app data syncs, then delete and confirm the customer, BillingProfile, and
+    BillingProfile-customer override are all removed.
 
     This cluster runs only openmeter-provider + OpenMeter, not billing's own
     controllers or stripe-provider — so several things this reconciler reads
@@ -163,6 +166,91 @@ spec:
                 value: ($customerKey)
             content: |
               sh verify-empty-subjects.sh "$CUSTOMER_KEY"
+
+    - name: bind two projects and confirm both are attributed to the customer
+      description: |
+        Create two BillingAccountBindings — e2e-binding for project-alpha
+        (re-created; the previous step deleted it) and e2e-binding-beta for
+        project-beta — both patched Active. Poll OpenMeter and confirm
+        usageAttribution.subjectKeys is EXACTLY both projects, no more and
+        no less (verify-subjects-exact.sh, not the superset-only
+        verify-customer.sh check used elsewhere): every prior test in this
+        suite only ever bound one project at a time, so nothing previously
+        caught a bug in how multiple Active bindings' projects get merged
+        into a single customer's subjectKeys list.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - apply:
+            file: billingaccountbinding.yaml
+        - patch:
+            file: billingaccountbinding-active.yaml
+            subresource: status
+        - apply:
+            file: billingaccountbinding-beta.yaml
+        - patch:
+            file: billingaccountbinding-beta-active.yaml
+            subresource: status
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-subjects-exact.sh "$CUSTOMER_KEY" projects/project-alpha projects/project-beta
+
+    - name: supersede one binding without deleting it, confirm only the other project remains attributed
+      description: |
+        Patch e2e-binding's status.phase to Superseded — "replaced by a
+        newer binding" per the CRD's own doc comment — WITHOUT deleting the
+        object. aggregateActiveBindingProjects only counts phase==Active, so
+        this must drop project-alpha from the customer's subjectKeys just
+        like a deletion would, even though the BillingAccountBinding object
+        still exists in the cluster. This is a real, reachable, forward-only
+        transition the CRD's enum allows (Active -> Superseded is the only
+        non-Active phase) that nothing in this suite previously exercised —
+        every other test only ever unbinds via object deletion.
+
+        Cleans up both bindings at the end so later steps start from a
+        known-empty attribution state, same as before this step ran.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - patch:
+            file: billingaccountbinding-superseded.yaml
+            subresource: status
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-subjects-exact.sh "$CUSTOMER_KEY" projects/project-beta
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccountBinding
+              name: e2e-binding
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccountBinding
+              name: e2e-binding-beta
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-subjects-exact.sh "$CUSTOMER_KEY"
 
     - name: update contactInfo.email and confirm the customer converges
       description: |

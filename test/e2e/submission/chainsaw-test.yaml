@@ -12,7 +12,11 @@ spec:
     SubmissionConsumer's durable pull consumer filters on — see
     filterSubject in internal/submission/submission.go), and polls OpenMeter's
     meter query endpoint (scoped to that customer's own internal id) to
-    confirm the usage actually landed against that customer.
+    confirm the usage actually landed against that customer. Also publishes
+    a duplicate event (same CloudEvent id, different value) to confirm
+    OpenMeter's native (source, id) ingestion dedup actually protects
+    against double-billing on a NATS redelivery, not just that a single
+    publish works once.
 
     This is the one path openmeter-provider's other e2e suites (billingaccount,
     meterdefinition) don't cover: they exercise the CRD reconcilers, but never
@@ -217,6 +221,79 @@ spec:
                 value: ($totalPublished)
             content: |
               sh verify-usage.sh e2e_miloapis_com_submission_requests "$OPENMETER_CUSTOMER_ID" projects/e2e-submission "$TOTAL_PUBLISHED" "$START_TIME"
+
+    - name: publish a duplicate event and confirm OpenMeter deduplicates by (source, id)
+      description: |
+        Publishes the SAME CloudEvent id twice — once with value 777, then
+        again with a different value (333) — simulating a real NATS
+        redelivery of an already-processed message (e.g. a nack before ack,
+        or a pod restart between fetch and ack; JetStream is at-least-once,
+        so this is a normal, expected occurrence, not a contrived edge
+        case). Polls OpenMeter and confirms the summed usage is exactly 777,
+        not 1110 (both counted) and not 333 (second write replacing the
+        first) — the end-to-end proof that OpenMeter's documented (source,
+        id) ingestion dedup (see internal/submission/submission.go's own
+        comment on why SubmissionConsumer needs no derived idempotency key)
+        actually holds, not just that it's documented. If this ever broke,
+        every redelivered usage event would double-bill a customer —
+        exactly the class of "OpenMeter must always reflect correct state"
+        failure worth catching here rather than in production.
+
+        Uses a fresh startTime (not the previous step's) so this step's
+        query window only covers its own two publishes, isolating the
+        assertion from the 500 already accumulated above.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-submission-account -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh resolve-customer-id.sh "$CUSTOMER_KEY"
+            outputs:
+              - name: openMeterCustomerId
+                value: ($stdout)
+        - script:
+            content: |
+              printf '%s' "$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+            outputs:
+              - name: startTime
+                value: ($stdout)
+        - script:
+            content: |
+              printf '%s' "e2e-dedup-$$-$(date +%s)"
+            outputs:
+              - name: dedupEventId
+                value: ($stdout)
+        - script:
+            timeout: 15s
+            env:
+              - name: DEDUP_EVENT_ID
+                value: ($dedupEventId)
+            content: |
+              sh publish-usage-with-id.sh e2e-submission e2e.miloapis.com/submission/requests "$DEDUP_EVENT_ID" 777
+        - script:
+            timeout: 15s
+            env:
+              - name: DEDUP_EVENT_ID
+                value: ($dedupEventId)
+            content: |
+              sh publish-usage-with-id.sh e2e-submission e2e.miloapis.com/submission/requests "$DEDUP_EVENT_ID" 333
+        - script:
+            timeout: 480s
+            env:
+              - name: OPENMETER_CUSTOMER_ID
+                value: ($openMeterCustomerId)
+              - name: START_TIME
+                value: ($startTime)
+            content: |
+              sh verify-usage.sh e2e_miloapis_com_submission_requests "$OPENMETER_CUSTOMER_ID" projects/e2e-submission 777 "$START_TIME"
 
     - name: clean up the BillingAccount, binding, and MeterDefinition
       description: |

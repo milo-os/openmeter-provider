@@ -1,0 +1,16 @@
+# Status patch simulating billing's own controller marking a binding
+# Superseded — "replaced by a newer binding" (BillingAccountBindingPhase's
+# own doc comment) — WITHOUT deleting the BillingAccountBinding object
+# itself. This is a real, reachable, forward-only phase transition
+# (Active -> Superseded is the only non-Active state the CRD's enum allows —
+# see billingaccountbinding_types.go), distinct from and untested by the
+# unbind-via-delete path exercised elsewhere in this suite:
+# aggregateActiveBindingProjects (billingaccount_controller.go) only counts
+# phase==Active, so a binding that is Superseded but still exists must drop
+# out of usageAttribution.subjectKeys just as surely as a deleted one does.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccountBinding
+metadata:
+  name: e2e-binding
+status:
+  phase: Superseded
