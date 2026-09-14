@@ -1,0 +1,27 @@
+# contactInfo removed entirely (not contactInfo: {}), to prove a cleared
+# email actually propagates to OpenMeter's primaryEmail.
+#
+# `apply` in chainsaw is NOT server-side apply — it JSON-marshals this whole
+# file and sends it as a JSON Merge Patch (RFC 7386; confirmed by reading
+# chainsaw's own apply operation, which literally does
+# `json.Marshal(patched)` then `client.RawPatch(types.MergePatchType, ...)`).
+# Under merge-patch semantics an empty object `{}` for a nested field means
+# "no changes within this subtree", NOT "clear it" — only an explicit `null`
+# deletes a field. Confirmed live: `kubectl patch --type=merge -p
+# '{"spec":{"contactInfo":{}}}'` reports "patched (no change)" and leaves
+# the previous email in place, while `contactInfo: null` genuinely clears
+# it. An earlier version of this fixture used `contactInfo: {}` and
+# consequently never exercised the clear path at all — the step still
+# "passed" in the sense that nothing errored, it just never tested what it
+# claimed to (also note `contactInfo: {}` wouldn't even be valid on its own:
+# BillingContactInfo.Email is +kubebuilder:validation:Required, so a
+# same-object patch that actually tried to set contactInfo present-but-
+# email-empty would be rejected by the API server; removing the whole
+# object is the only valid way to represent "no email" here).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-billingaccount
+spec:
+  currencyCode: USD
+  contactInfo: null

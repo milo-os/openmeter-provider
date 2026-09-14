@@ -1,0 +1,157 @@
+name: Test Environment Setup and Validation
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: 'Test suite to run (e.g., billingaccount, meterdefinition, submission, or empty for all)'
+        required: false
+        default: ''
+        type: string
+  pull_request: {}
+
+env:
+  TASK_X_REMOTE_TASKFILES: 1
+  TASK_ASSUME_YES: 'true'
+  TEST_INFRA_CLUSTER_NAME: test-infra
+  IMAGE_NAME: ghcr.io/milo-os/openmeter-provider
+  IMAGE_TAG: dev
+  # TEST-MODE (sandbox) Stripe key ONLY — must be an sk_test_... key, never
+  # a live/production key. Lets `task dev:install-stripe-app` (part of
+  # `task ci:setup` / dev:install-dependencies) install a Stripe test-mode
+  # app on the dev OpenMeter instance, so the billingaccount e2e suite's
+  # Stripe-app-data assertions run for real instead of skipping. Gracefully
+  # skips itself if this secret isn't configured on the repo (see
+  # Taskfile.yaml's dev:install-stripe-app).
+  STRIPE_TEST_API_KEY: ${{ secrets.STRIPE_TEST_API_KEY }}
+
+jobs:
+  test-environment-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install Task CLI
+        run: |
+          sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
+
+      - name: Verify Task installation
+        run: |
+          task --version
+          echo "Available tasks:"
+          task --list
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 4
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.0'
+
+      - name: Install KinD
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+          version: v0.24.0
+
+      - name: Verify prerequisites
+        run: |
+          echo "=== Checking prerequisites ==="
+          docker version
+          kubectl version --client
+          kind version
+          echo "Go version: $(go version)"
+
+      - name: Set up test environment
+        run: |
+          echo "=== Setting up test environment ==="
+          task ci:setup
+
+      - name: Verify openmeter-provider components
+        run: |
+          echo "=== Verifying openmeter-provider components ==="
+
+          echo "Checking openmeter-system namespace pods:"
+          task test-infra:kubectl -- get pods -n openmeter-system
+
+          # Wait for the controller manager to be ready
+          echo "⏳ Waiting for controller manager to be ready..."
+          task test-infra:kubectl -- wait --for=condition=Ready pod -l control-plane=openmeter-provider -n openmeter-system --timeout=300s
+
+          # Wait for the submission consumer to be ready
+          echo "⏳ Waiting for submission-consumer to be ready..."
+          task test-infra:kubectl -- wait --for=condition=Ready pod -l control-plane=submission-consumer -n openmeter-system --timeout=300s
+
+          echo "✓ openmeter-provider components verification complete"
+
+      - name: Run end-to-end tests
+        run: |
+          echo "=== Running end-to-end tests ==="
+
+          # Determine which tests to run based on input
+          if [ -n "${{ github.event.inputs.test_suite }}" ]; then
+            echo "Running specified test suite: ${{ github.event.inputs.test_suite }}"
+            task e2e -- ${{ github.event.inputs.test_suite }}
+          else
+            echo "Running all end-to-end tests..."
+            task e2e
+          fi
+
+      - name: Collect e2e/pipeline diagnostics on failure
+        if: failure()
+        uses: ./.github/actions/e2e-diagnostics
+
+      - name: Collect runner/KinD diagnostics on failure
+        if: failure()
+        run: |
+          set +e
+
+          echo "=== Docker Containers ==="
+          docker ps -a
+
+          echo "=== KinD cluster info ==="
+          kind get clusters
+          kind export logs /tmp/kind-logs --name "$TEST_INFRA_CLUSTER_NAME"
+
+          true
+
+      - name: Upload debug artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: debug-logs
+          path: |
+            /tmp/kind-logs/
+          if-no-files-found: ignore
+
+      - name: Cleanup test infrastructure
+        if: always()
+        run: |
+          echo "=== Cleaning up test infrastructure ==="
+
+          # Clean up test infrastructure cluster
+          task test-infra:cluster-down || true
+
+          # Verify cleanup
+          echo "Remaining KinD clusters:"
+          kind get clusters || true
+
+          echo "Remaining Docker containers:"
+          docker ps -a --filter "name=test-infra" || true

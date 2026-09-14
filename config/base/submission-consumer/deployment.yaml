@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: submission-consumer
+  labels:
+    control-plane: submission-consumer
+    app.kubernetes.io/name: submission-consumer
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      control-plane: submission-consumer
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: submission-consumer
+      labels:
+        control-plane: submission-consumer
+        app.kubernetes.io/name: submission-consumer
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    control-plane: submission-consumer
+      containers:
+        - command:
+            - /submission-consumer
+          args:
+            - --health-probe-bind-address=:8081
+            - --server-config=/config/config.yaml
+          image: ghcr.io/milo-os/openmeter-provider:dev
+          name: submission-consumer
+          ports:
+            - containerPort: 8443
+              name: https
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - "ALL"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: 500m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: nats-certs
+              mountPath: /etc/nats-certs
+              readOnly: true
+      serviceAccountName: submission-consumer
+      terminationGracePeriodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: openmeter-provider-config
+        - name: nats-certs
+          csi:
+            driver: csi.cert-manager.io
+            readOnly: true
+            volumeAttributes:
+              csi.cert-manager.io/issuer-name: nats
+              csi.cert-manager.io/issuer-kind: ClusterIssuer
+              csi.cert-manager.io/common-name: openmeter-provider.nats.client
+              csi.cert-manager.io/subject-organizations: datum
+              csi.cert-manager.io/fs-group: "65532"

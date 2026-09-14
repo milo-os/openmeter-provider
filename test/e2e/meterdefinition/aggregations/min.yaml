@@ -1,0 +1,18 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-agg-min
+spec:
+  meterName: e2e.miloapis.com/agg/min
+  phase: Published
+  displayName: E2E Min Aggregation
+  measurement:
+    aggregation: Min
+    unit: "By"
+    dimensions:
+      - region
+  billing:
+    consumedUnit: "By"
+    pricingUnit: "By"
+  monitoredResourceTypes:
+    - ri2.miloapis.com/hosted-api

@@ -1,0 +1,20 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Configuration
+metadata:
+  name: openmeter-provider-e2e
+spec:
+  # Reconciliation itself takes seconds, not minutes — these are fallback
+  # ceilings for any step without its own explicit `timeout:` override, so a
+  # genuinely broken reconcile fails fast rather than a full test run
+  # burning minutes waiting out a generous default. Explicit per-step
+  # timeouts (see each chainsaw-test.yaml) are sized the same way, matched
+  # to their script's own internal poll loop.
+  timeouts:
+    apply: 30s
+    assert: 30s
+    cleanup: 60s
+    delete: 30s
+    error: 30s
+    exec: 40s
+  parallel: 1
+  skipDelete: false

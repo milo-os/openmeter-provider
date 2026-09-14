@@ -1,0 +1,19 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-agg-unique-count
+spec:
+  # "uniquecount" (no '-') for the same reason as sum.yaml's meterName note.
+  meterName: e2e.miloapis.com/agg/uniquecount
+  phase: Published
+  displayName: E2E UniqueCount Aggregation
+  measurement:
+    aggregation: UniqueCount
+    unit: "{project}"
+    dimensions:
+      - project_id
+  billing:
+    consumedUnit: "{project}"
+    pricingUnit: "{project}"
+  monitoredResourceTypes:
+    - ri2.miloapis.com/hosted-api

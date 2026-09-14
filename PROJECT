@@ -5,20 +5,6 @@
 domain: miloapis.com
 layout:
 - go.kubebuilder.io/v4
-projectName: controller-template
-repo: go.miloapis.com/controller-template
-resources:
-- api:
-    crdVersion: v1
-    namespaced: true
-  controller: true
-  domain: miloapis.com
-  group: example
-  kind: Resource
-  path: go.miloapis.com/controller-template/api/v1alpha1
-  version: v1alpha1
-  webhooks:
-    defaulting: true
-    validation: true
-    webhookVersion: v1
+projectName: openmeter-provider
+repo: go.miloapis.com/openmeter-provider
 version: "3"

@@ -1,0 +1,18 @@
+# Status patch simulating stripe-provider confirming the SetupIntent and
+# recording the Stripe-side identifiers resolveStripeCustomer reads.
+#
+# stripeCustomerId/stripePaymentMethodId come from resolve-stripe-customer.sh
+# (see the test step) rather than being hardcoded: a fixed placeholder only
+# works when the org's default BillingProfile's payment app is Sandbox
+# (no real validation). Once it's a real Stripe app, OpenMeter validates
+# these against the real Stripe account, so the values must be either the
+# same placeholder (Sandbox) or a real Stripe test customer/payment method
+# id (real Stripe) depending on which is actually wired up.
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripePaymentMethod
+metadata:
+  name: e2e-payment-method
+status:
+  phase: Active
+  stripeCustomerId: ($stripeCustomerId)
+  stripePaymentMethodId: ($stripePaymentMethodId)

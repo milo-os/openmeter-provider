@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Extends the production NATS dependency, patches out PodMonitor for CI/kind
+# dev environments where Prometheus CRDs are absent, and adds a nats-box pod
+# (CLI client) e2e tests use to publish/inspect JetStream messages directly.
+resources:
+  - ../nats
+  - nats-box.yaml
+
+patches:
+  - patch: |-
+      - op: replace
+        path: /spec/values/podMonitor/enabled
+        value: false
+    target:
+      kind: HelmRelease
+      name: nats

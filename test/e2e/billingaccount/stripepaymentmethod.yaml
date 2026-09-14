@@ -1,0 +1,11 @@
+# stripe-provider's child resource of the PaymentMethod above. Named
+# identically to it: resolveStripeCustomer looks up the StripePaymentMethod
+# by the *same name* as the parent PaymentMethod, mirroring
+# amberflo-provider's resolveStripeCustomerID convention.
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripePaymentMethod
+metadata:
+  name: e2e-payment-method
+spec:
+  paymentMethodRef:
+    name: e2e-payment-method
