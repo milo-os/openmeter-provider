@@ -114,41 +114,23 @@ jobs:
             task e2e
           fi
 
-      - name: Collect debug information on failure
+      - name: Collect e2e/pipeline diagnostics on failure
+        if: failure()
+        uses: ./.github/actions/e2e-diagnostics
+
+      - name: Collect runner/KinD diagnostics on failure
         if: failure()
         run: |
-          echo "=== Collecting debug information ==="
+          set +e
 
-          # Cluster status
-          echo "=== Infrastructure Cluster Status ==="
-          task test-infra:kubectl -- get pods -A || true
-          task test-infra:kubectl -- get nodes -o wide || true
-
-          # openmeter-provider control plane status
-          echo "=== openmeter-provider Control Plane Status ==="
-          task test-infra:kubectl -- describe pods -n openmeter-system || true
-
-          # Controller manager logs
-          echo "=== Controller Manager Logs ==="
-          task test-infra:kubectl -- logs -n openmeter-system -l control-plane=openmeter-provider --tail=100 || true
-
-          # Submission consumer logs
-          echo "=== Submission Consumer Logs ==="
-          task test-infra:kubectl -- logs -n openmeter-system -l control-plane=submission-consumer --tail=100 || true
-
-          # NATS status (submission-consumer's JetStream dependency)
-          echo "=== NATS Status ==="
-          task test-infra:kubectl -- get pods -n nats-system || true
-          task test-infra:kubectl -- logs -n nats-system -l app.kubernetes.io/name=nats --tail=100 || true
-
-          # Docker container status
           echo "=== Docker Containers ==="
-          docker ps -a || true
+          docker ps -a
 
-          # KinD cluster info
           echo "=== KinD cluster info ==="
-          kind get clusters || true
-          kind export logs /tmp/kind-logs --name $TEST_INFRA_CLUSTER_NAME || true
+          kind get clusters
+          kind export logs /tmp/kind-logs --name "$TEST_INFRA_CLUSTER_NAME"
+
+          true
 
       - name: Upload debug artifacts
         if: failure()
