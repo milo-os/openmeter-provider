@@ -1,0 +1,75 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# milo-integration wires both openmeter-provider workloads (the manager and
+# the submission-consumer) into a Milo control plane. It mounts a discovery
+# kubeconfig ConfigMap (consumer responsibility) and the datum control-plane
+# trust bundle. Matches the pattern used by amberflo-provider/stripe-provider.
+# Consumers are expected to:
+#
+#   1. Provide a ConfigMap named openmeter-provider-discovery-kubeconfig
+#      containing a kubeconfig pointing at the Milo API server, with
+#      kubeconfigPath in the OpenMeterProviderOperator config set to
+#      /etc/kubernetes/project-discovery/auth/milo-kubeconfig.yaml.
+#   2. Label the namespace with
+#      infra.datum.net/inject-datum-control-plane-trust-bundle: "" so
+#      trust-manager populates the datum-control-plane-trust-bundle
+#      ConfigMap.
+#   3. Provide a client certificate (e.g. via the cert-manager CSI driver)
+#      for the kubeconfig referenced above to actually authenticate.
+
+patches:
+  - target:
+      kind: Deployment
+      name: openmeter-provider-manager
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: openmeter-provider-manager
+      spec:
+        template:
+          spec:
+            containers:
+              - name: manager
+                volumeMounts:
+                  - mountPath: /etc/kubernetes/pki/trust
+                    name: trust-bundle
+                    readOnly: true
+                  - mountPath: /etc/kubernetes/project-discovery/auth
+                    name: discovery-kubeconfig
+                    readOnly: true
+            volumes:
+              - name: trust-bundle
+                configMap:
+                  name: datum-control-plane-trust-bundle
+              - name: discovery-kubeconfig
+                configMap:
+                  name: openmeter-provider-discovery-kubeconfig
+  - target:
+      kind: Deployment
+      name: submission-consumer
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: submission-consumer
+      spec:
+        template:
+          spec:
+            containers:
+              - name: submission-consumer
+                volumeMounts:
+                  - mountPath: /etc/kubernetes/pki/trust
+                    name: trust-bundle
+                    readOnly: true
+                  - mountPath: /etc/kubernetes/project-discovery/auth
+                    name: discovery-kubeconfig
+                    readOnly: true
+            volumes:
+              - name: trust-bundle
+                configMap:
+                  name: datum-control-plane-trust-bundle
+              - name: discovery-kubeconfig
+                configMap:
+                  name: openmeter-provider-discovery-kubeconfig
