@@ -1,0 +1,11 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: nats-io
+  namespace: nats-system
+  labels:
+    app.kubernetes.io/name: nats
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  interval: 1h
+  url: https://nats-io.github.io/k8s/helm/charts/

@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package config
+
+import (
+	runtime "k8s.io/apimachinery/pkg/runtime"
+)
+
+// RegisterDefaults adds defaulters functions to the given scheme.
+// Public to allow building arbitrary schemes and plugins.
+func RegisterDefaults(scheme *runtime.Scheme) error {
+	scheme.AddTypeDefaultingFunc(&OpenMeterProviderOperator{}, func(obj interface{}) {
+		SetObjectDefaults_OpenMeterProviderOperator(obj.(*OpenMeterProviderOperator))
+	})
+	return nil
+}
+
+func SetObjectDefaults_OpenMeterProviderOperator(in *OpenMeterProviderOperator) {
+	SetDefaults_OpenMeterProviderOperator(in)
+	SetDefaults_MetricsServerConfig(&in.MetricsServer)
+	SetDefaults_TLSConfig(&in.MetricsServer.TLS)
+}

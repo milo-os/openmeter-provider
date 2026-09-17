@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# single-cluster overlay is intended for downstream consumers that want to
+# deploy openmeter-provider into the same cluster that hosts the Milo API
+# server. It produces a minimal runnable bundle: namespace, manager +
+# submission-consumer Deployments, leader-election RBAC. Consumers layer
+# controller_rbac, milo-integration and (optionally) prometheus on top via
+# their own Flux Kustomization, matching amberflo-provider/stripe-provider.
+namespace: openmeter-system
+
+resources:
+  - namespace.yaml
+  - ../../base/manager
+  - ../../base/submission-consumer
+
+components:
+  - ../../components/leader_election

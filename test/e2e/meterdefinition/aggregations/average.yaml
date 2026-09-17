@@ -1,0 +1,18 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-agg-average
+spec:
+  meterName: e2e.miloapis.com/agg/average
+  phase: Published
+  displayName: E2E Average Aggregation
+  measurement:
+    aggregation: Average
+    unit: "ms"
+    dimensions:
+      - region
+  billing:
+    consumedUnit: "ms"
+    pricingUnit: "ms"
+  monitoredResourceTypes:
+    - ri2.miloapis.com/hosted-api

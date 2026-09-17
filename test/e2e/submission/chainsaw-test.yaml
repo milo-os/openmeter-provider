@@ -1,0 +1,331 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: submission
+spec:
+  description: |
+    End-to-end lifecycle test for the submission-consumer: sets up a
+    Published MeterDefinition and a BillingAccount bound to a project (so
+    OpenMeter has a customer with usageAttribution.subjectKeys set), publishes
+    usage CloudEvents directly onto NATS JetStream's
+    billing.usage.<project>.valid subject (the exact subject
+    SubmissionConsumer's durable pull consumer filters on — see
+    filterSubject in internal/submission/submission.go), and polls OpenMeter's
+    meter query endpoint (scoped to that customer's own internal id) to
+    confirm the usage actually landed against that customer. Also publishes
+    a duplicate event (same CloudEvent id, different value) to confirm
+    OpenMeter's native (source, id) ingestion dedup actually protects
+    against double-billing on a NATS redelivery, not just that a single
+    publish works once.
+
+    This is the one path openmeter-provider's other e2e suites (billingaccount,
+    meterdefinition) don't cover: they exercise the CRD reconcilers, but never
+    the standalone submission-consumer binary that turns validated NATS
+    events into OpenMeter usage. Prerequisites (installed by `task
+    dev:install-nats`, itself part of `task dev:deploy`):
+      - nats-system namespace with NATS JetStream + nack (config/dependencies/nats-ci)
+      - a nats-box pod in nats-system for CLI publish operations
+      - the billing-usage JetStream stream covering billing.usage.>
+        (config/components/nats-streams)
+      - the submission-consumer Deployment running in openmeter-system,
+        connected to that same NATS cluster
+
+    This cluster runs only openmeter-provider + OpenMeter (not billing's own
+    Central Validation/Attribution consumer), so events are published
+    straight onto the already-valid subject rather than the raw .ingest
+    subject billing's own gateway would use — submission-consumer only ever
+    reads from .valid regardless of what upstream produced it.
+  namespace: openmeter-system
+  steps:
+    - name: purge stale test events from the billing-usage stream
+      description: |
+        Purge any e2e-submission-project messages left over from a previous
+        run (e.g. one that failed after publishing but before the consumer
+        acked them). Without this, SubmissionConsumer's durable consumer
+        keeps redelivering those unacked messages — each redelivery
+        re-nacks with "MeterDefinition not found" once this run's own
+        MeterDefinition/BillingAccount fixtures are torn down again at the
+        end, producing a wall of retry log noise unrelated to this run.
+        Scoped to this test's own subject filter so it never touches other
+        tests' or the real pipeline's messages on the same stream.
+      try:
+        - script:
+            timeout: 45s
+            content: |
+              set -eu
+              NATS_POD=$(kubectl get pod -n nats-system -l app.kubernetes.io/component=nats-box --no-headers -o name | head -1)
+              if [ -z "$NATS_POD" ]; then
+                echo "WARNING: no nats-box pod found, skipping purge"
+                exit 0
+              fi
+              kubectl exec -n nats-system "$NATS_POD" -- \
+                nats --server nats://nats:4222 \
+                stream purge billing-usage \
+                --filter "billing.usage.e2e-submission.>" -f || true
+              echo "Purged stale billing.usage.e2e-submission.> messages."
+
+    - name: start the OpenMeter query pod
+      description: |
+        Start a long-lived helper pod so later steps can reach the
+        openmeter-api ClusterIP service via `kubectl exec` — the app pods
+        themselves are distroless and offer no shell/curl of their own.
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query
+              status:
+                phase: Running
+
+    - name: create the MeterDefinition and confirm the meter exists
+      description: |
+        Apply meterdefinition.yaml (Published, Sum aggregation). Confirm the
+        finalizer is attached and poll OpenMeter to confirm
+        MeterDefinitionReconciler's EnsureMeter created the meter — the
+        events published below would otherwise have nothing to aggregate
+        into, since OpenMeter's meter query is scoped to a specific meter
+        slug.
+      try:
+        - apply:
+            file: meterdefinition.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-submission-requests
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - script:
+            timeout: 35s
+            content: sh verify-meter.sh e2e_miloapis_com_submission_requests SUM
+
+    - name: create the BillingAccount, bind the project, and resolve the OpenMeter customer
+      description: |
+        Apply billingaccount.yaml, then create a BillingAccountBinding for
+        project "e2e-submission" and patch its status.phase to Active
+        (simulating billing's own controller, not present in this e2e
+        cluster — see the test-level description). Capture the
+        BillingAccount's UID (OpenMeter's external customer key) and poll the
+        customer to confirm usageAttribution.subjectKeys actually includes
+        "projects/e2e-submission" before publishing any events — this is
+        the attribution the published CloudEvents' subject must match
+        exactly for OpenMeter to attribute usage to this customer at all.
+
+        Note: this step does NOT hand its $customerKey output to later
+        steps — chainsaw script `outputs` are scoped to the step (`try:`
+        block) they're produced in, so the next step re-derives it itself
+        (see its own description).
+      try:
+        - apply:
+            file: billingaccount.yaml
+        - script:
+            content: |
+              kubectl get billingaccount e2e-submission-account -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - apply:
+            file: billingaccountbinding.yaml
+        - patch:
+            file: billingaccountbinding-active.yaml
+            subresource: status
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              set -eu
+              url="http://openmeter-api.openmeter-system.svc.cluster.local/api/v1/customers/${CUSTOMER_KEY}"
+              for i in $(seq 1 12); do
+                body=$(kubectl exec -n openmeter-system openmeter-query -- wget -q -O - "$url" 2>/dev/null || true)
+                if echo "$body" | grep -q '"projects/e2e-submission"'; then
+                  echo "customer ${CUSTOMER_KEY} attributed to projects/e2e-submission: ${body}"
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "customer ${CUSTOMER_KEY} never gained subjectKeys=projects/e2e-submission"
+              echo "last response: ${body}"
+              exit 1
+
+    - name: publish usage events onto NATS and confirm they reach OpenMeter
+      description: |
+        Re-derives the BillingAccount's UID and resolves OpenMeter's
+        internal customer id from it (needed for the filterCustomerId-scoped
+        usage query below — script `outputs` don't carry over from the
+        previous step, so this is done fresh here rather than reused).
+
+        Publishes three usage CloudEvents (values 100, 250, 150 — sum 500)
+        directly onto billing.usage.e2e-submission.valid via the nats-box
+        pod's `nats pub`, with subject "projects/e2e-submission" matching
+        the customer's usageAttribution.subjectKeys exactly. Then polls
+        OpenMeter's meter query endpoint, scoped to this customer's own
+        internal id, until the summed value converges to 500 — the
+        end-to-end proof that SubmissionConsumer picked the events up from
+        its durable JetStream pull consumer, forwarded them via
+        SubmitUsageBatch, and OpenMeter attributed them to this specific
+        customer.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-submission-account -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh resolve-customer-id.sh "$CUSTOMER_KEY"
+            outputs:
+              - name: openMeterCustomerId
+                value: ($stdout)
+        - script:
+            content: |
+              # printf, NOT a bare `date`: chainsaw's ($stdout) capture keeps
+              # a trailing newline verbatim, and this value is substituted
+              # into a URL query string downstream.
+              printf '%s' "$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+            outputs:
+              - name: startTime
+                value: ($stdout)
+        - script:
+            timeout: 30s
+            content: |
+              sh publish-usage.sh e2e-submission e2e.miloapis.com/submission/requests 100 250 150
+            outputs:
+              - name: totalPublished
+                value: ($stdout)
+        - script:
+            # Comfortably above verify-usage.sh's own internal retry budget
+            # (90 attempts * 5s = 7.5min) — that budget, not this timeout, is
+            # what should trip first and print a real diagnostic. See its own
+            # comment for why the raw-ingest-to-queryable pipeline can lag
+            # this much under CI's resource-constrained OpenMeter install.
+            timeout: 480s
+            env:
+              - name: OPENMETER_CUSTOMER_ID
+                value: ($openMeterCustomerId)
+              - name: START_TIME
+                value: ($startTime)
+              - name: TOTAL_PUBLISHED
+                value: ($totalPublished)
+            content: |
+              sh verify-usage.sh e2e_miloapis_com_submission_requests "$OPENMETER_CUSTOMER_ID" projects/e2e-submission "$TOTAL_PUBLISHED" "$START_TIME"
+
+    - name: publish a duplicate event and confirm OpenMeter deduplicates by (source, id)
+      description: |
+        Publishes the SAME CloudEvent id twice — once with value 777, then
+        again with a different value (333) — simulating a real NATS
+        redelivery of an already-processed message (e.g. a nack before ack,
+        or a pod restart between fetch and ack; JetStream is at-least-once,
+        so this is a normal, expected occurrence, not a contrived edge
+        case). Polls OpenMeter and confirms the summed usage is exactly 777,
+        not 1110 (both counted) and not 333 (second write replacing the
+        first) — the end-to-end proof that OpenMeter's documented (source,
+        id) ingestion dedup (see internal/submission/submission.go's own
+        comment on why SubmissionConsumer needs no derived idempotency key)
+        actually holds, not just that it's documented. If this ever broke,
+        every redelivered usage event would double-bill a customer —
+        exactly the class of "OpenMeter must always reflect correct state"
+        failure worth catching here rather than in production.
+
+        Uses a fresh startTime (not the previous step's) so this step's
+        query window only covers its own two publishes, isolating the
+        assertion from the 500 already accumulated above.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-submission-account -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh resolve-customer-id.sh "$CUSTOMER_KEY"
+            outputs:
+              - name: openMeterCustomerId
+                value: ($stdout)
+        - script:
+            content: |
+              printf '%s' "$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
+            outputs:
+              - name: startTime
+                value: ($stdout)
+        - script:
+            content: |
+              printf '%s' "e2e-dedup-$$-$(date +%s)"
+            outputs:
+              - name: dedupEventId
+                value: ($stdout)
+        - script:
+            timeout: 15s
+            env:
+              - name: DEDUP_EVENT_ID
+                value: ($dedupEventId)
+            content: |
+              sh publish-usage-with-id.sh e2e-submission e2e.miloapis.com/submission/requests "$DEDUP_EVENT_ID" 777
+        - script:
+            timeout: 15s
+            env:
+              - name: DEDUP_EVENT_ID
+                value: ($dedupEventId)
+            content: |
+              sh publish-usage-with-id.sh e2e-submission e2e.miloapis.com/submission/requests "$DEDUP_EVENT_ID" 333
+        - script:
+            timeout: 480s
+            env:
+              - name: OPENMETER_CUSTOMER_ID
+                value: ($openMeterCustomerId)
+              - name: START_TIME
+                value: ($startTime)
+            content: |
+              sh verify-usage.sh e2e_miloapis_com_submission_requests "$OPENMETER_CUSTOMER_ID" projects/e2e-submission 777 "$START_TIME"
+
+    - name: clean up the BillingAccount, binding, and MeterDefinition
+      description: |
+        Delete the test resources so a re-run of this suite starts from a
+        clean slate, and confirm the BillingAccount's OpenMeter-side cleanup
+        (customer + billing-profile override + BillingProfile) ran, the same
+        way the billingaccount e2e suite does.
+      try:
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccountBinding
+              name: e2e-submission-binding
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              name: e2e-submission-account
+        - error:
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-submission-account
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              name: e2e-submission-requests
+        - error:
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-submission-requests

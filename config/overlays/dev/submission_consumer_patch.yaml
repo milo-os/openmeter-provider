@@ -1,0 +1,19 @@
+# JSON patches (not a strategic merge patch) for the volumeMounts/volumes
+# removal: strategic merge's `$patch: delete` on a named list item can clear
+# the ENTIRE list instead of just the targeted item (confirmed live — it
+# dropped the "config" volumeMount too, alongside "nats-certs", which made
+# the container fail with "unable to read server config from
+# /config/config.yaml" since the ConfigMap was never actually mounted).
+# billing's own dev overlay hits and documents the same kustomize behavior
+# for the same reason. Index 1 is nats-certs in both arrays — see
+# config/base/submission-consumer/deployment.yaml (config is index 0).
+- op: replace
+  path: /spec/template/spec/containers/0/image
+  value: ghcr.io/milo-os/openmeter-provider:dev
+- op: add
+  path: /spec/template/spec/containers/0/imagePullPolicy
+  value: IfNotPresent
+- op: remove
+  path: /spec/template/spec/containers/0/volumeMounts/1
+- op: remove
+  path: /spec/template/spec/volumes/1
