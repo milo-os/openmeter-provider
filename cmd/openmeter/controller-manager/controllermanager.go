@@ -105,6 +105,12 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 
 			metricsServerOptions := serverConfig.MetricsServer.Options(ctx, bootstrapClient, metricsAuthConfig)
 
+			// Leader election's Lease also lives on the LOCAL cluster (this
+			// Deployment's own namespace), not the Milo control plane `cfg`
+			// points at via KubeconfigPath. Without this override, election
+			// permanently fails on every replica: the Lease create call goes
+			// to the Milo control plane, which has no namespace matching
+			// this Deployment's own.
 			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 				Scheme:                  scheme,
 				Metrics:                 metricsServerOptions,
@@ -112,6 +118,7 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 				LeaderElection:          enableLeaderElection,
 				LeaderElectionID:        "openmeter-provider.miloapis.com",
 				LeaderElectionNamespace: leaderElectionNamespace,
+				LeaderElectionConfig:    metricsAuthConfig,
 			})
 			if err != nil {
 				return fmt.Errorf("starting manager: %w", err)
