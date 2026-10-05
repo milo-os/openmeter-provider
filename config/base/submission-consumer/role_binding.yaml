@@ -1,0 +1,12 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openmeter-provider-submission-consumer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openmeter-provider-submission-consumer
+subjects:
+  - kind: ServiceAccount
+    name: submission-consumer
+    namespace: openmeter-system

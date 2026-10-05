@@ -1,0 +1,15 @@
+# A billing.miloapis.com PaymentMethod, fabricated directly rather than
+# created through the real setup flow (SetupIntent, portal confirmation,
+# ...): this cluster runs only openmeter-provider, not stripe-provider or
+# billing's own controllers, so nothing else would ever drive this to
+# Active. The following status patches (paymentmethod-active.yaml,
+# stripepaymentmethod-active.yaml, billingaccount-payment-method-ready.yaml)
+# simulate exactly what those controllers would have written.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: PaymentMethod
+metadata:
+  name: e2e-payment-method
+spec:
+  billingAccountRef:
+    name: e2e-billingaccount
+  displayName: E2E Test Card

@@ -3,17 +3,16 @@ kind: Kustomization
 
 resources:
 - manager.yaml
-- service.yaml
 - service_account.yaml
 - pdb.yaml
 
 images:
-- name: ghcr.io/milo-os/controller-template
+- name: ghcr.io/milo-os/openmeter-provider
   newTag: latest
 
 configMapGenerator:
 - files:
   - config.yaml
-  name: controller-template-config
+  name: openmeter-provider-config
   options:
     disableNameSuffixHash: true

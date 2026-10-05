@@ -1,0 +1,22 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: nack
+  namespace: nats-system
+  labels:
+    app.kubernetes.io/name: nack
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  interval: 1h
+  chart:
+    spec:
+      chart: nack
+      version: ">=0.1.0"
+      sourceRef:
+        kind: HelmRepository
+        name: nats-io
+        namespace: nats-system
+  values:
+    jetstream:
+      nats:
+        url: nats://nats:4222

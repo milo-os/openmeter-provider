@@ -1,0 +1,17 @@
+# Status patch simulating billing's own controller setting
+# DefaultPaymentMethodReady=True once it observes the (fabricated) Active
+# PaymentMethod referenced by spec.defaultPaymentMethodRef. This cluster
+# runs only openmeter-provider, so nothing else would ever set this —
+# resolveStripeCustomer gates entirely on this condition, matching
+# amberflo-provider's resolveStripeCustomerID.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-billingaccount
+status:
+  conditions:
+    - type: DefaultPaymentMethodReady
+      status: "True"
+      reason: PaymentMethodActive
+      message: e2e-simulated Active payment method
+      lastTransitionTime: "2024-01-01T00:00:00Z"

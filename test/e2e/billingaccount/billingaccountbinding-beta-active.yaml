@@ -1,0 +1,10 @@
+# Status patch simulating what billing's own BillingAccountBinding
+# controller would do (not present in this e2e cluster, which runs only
+# openmeter-provider + OpenMeter itself). See billingaccountbinding-active.yaml
+# for why this is required for the binding to affect usage attribution.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccountBinding
+metadata:
+  name: e2e-binding-beta
+status:
+  phase: Active

@@ -1,8 +1,14 @@
 apiVersion: apiserver.config.miloapis.com/v1alpha1
-kind: ControllerTemplateOperator
+kind: OpenMeterProviderOperator
 metricsServer:
   bindAddress: "0"
-webhookServer: {}
+# openMeter configures the meter-definition controller. Point serverUrl at the
+# in-cluster OpenMeter API service. The dev install runs with authentication
+# disabled, so apiSecret is empty; in production, source the token from a
+# Secret (e.g. external-secrets) and never commit it here.
+openMeter:
+  serverUrl: http://openmeter-api.openmeter-system.svc.cluster.local
+  # apiSecret:
 # kubeconfigPath points at the Milo control plane API server.
 # Leave empty to use in-cluster config (default when deployed alongside the API server).
 # kubeconfigPath: /etc/milo/kubeconfig

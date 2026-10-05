@@ -1,0 +1,23 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-update-requests
+spec:
+  # meterName, aggregation, and unit are immutable (CEL rule on the CRD) and
+  # so are left unchanged from meterdefinition.yaml; displayName, description,
+  # and (additively) dimensions are the mutable fields this case exercises.
+  meterName: e2e.miloapis.com/update/requests
+  phase: Published
+  displayName: Updated Display Name
+  description: Explicit updated description
+  measurement:
+    aggregation: Sum
+    unit: "{request}"
+    dimensions:
+      - region
+      - tier
+  billing:
+    consumedUnit: "{request}"
+    pricingUnit: "{request}"
+  monitoredResourceTypes:
+    - ri2.miloapis.com/hosted-api

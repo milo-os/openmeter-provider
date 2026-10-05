@@ -1,0 +1,18 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-agg-latest
+spec:
+  meterName: e2e.miloapis.com/agg/latest
+  phase: Published
+  displayName: E2E Latest Aggregation
+  measurement:
+    aggregation: Latest
+    unit: "{connection}"
+    dimensions:
+      - region
+  billing:
+    consumedUnit: "{connection}"
+    pricingUnit: "{connection}"
+  monitoredResourceTypes:
+    - ri2.miloapis.com/hosted-api

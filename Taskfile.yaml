@@ -1,22 +1,45 @@
 version: '3'
 
+# Loads STRIPE_TEST_API_KEY (see .env.example) into the environment of every
+# task's cmds, if a .env file is present. .env is gitignored — never commit
+# real secrets there. Test-mode (sandbox) Stripe key only — never a live key.
+dotenv: ['.env']
+
 vars:
   TOOL_DIR: "{{.USER_WORKING_DIR}}/bin"
-  IMAGE_NAME: "ghcr.io/milo-os/controller-template"
+  IMAGE_NAME: "ghcr.io/milo-os/openmeter-provider"
   IMAGE_TAG: "dev"
   TEST_INFRA_CLUSTER_NAME: "test-infra"
   TEST_INFRA_REPO_REF: 'v0.6.0'
-  CONTROLLER_TOOLS_VERSION: "v0.16.4"
+  WAIT_TIMEOUT: "10m"
+  CONTROLLER_TOOLS_VERSION: "v0.18.0"
   DEFAULTER_GEN_VERSION: "v0.32.3"
   GOLANGCI_LINT_VERSION: "v2.12.2"
-  CHAINSAW_VERSION: "v0.2.13"
+  CHAINSAW_VERSION: "v0.2.15"
+  # Billing repo release to pull the MeterDefinition CRD from. The
+  # openmeter-provider reconciles billing's MeterDefinition kind, so its CRD
+  # must be present in the cluster for the controller to start its watch.
+  BILLING_REPO_REF: "v0.3.5"
+  # stripe-provider release to pull the StripePaymentMethod CRD from.
+  # BillingAccountReconciler's resolveStripeCustomer watches this kind (see
+  # stripe_customer.go); without it in the cluster, the controller manager
+  # fails to start its watch ("no matches for kind StripePaymentMethod").
+  # go.mod's replace directive actually pins to a pseudo-version commit
+  # slightly ahead of v0.1.7 (not this tag) — verified byte-identical CRD
+  # YAML between that commit and v0.1.8, so this tag is safe to track and
+  # far simpler than resolving the unfetchable bare commit SHA. Bump this
+  # alongside go.mod's stripe-provider pin, and re-diff the CRDs if either
+  # moves far enough that they might have actually changed.
+  STRIPE_PROVIDER_REPO_REF: "v0.1.8"
 
 includes:
   # Must set TASK_X_REMOTE_TASKFILES=1 to use this feature.
   test-infra:
     taskfile: https://raw.githubusercontent.com/datum-cloud/test-infra/{{.TEST_INFRA_REPO_REF}}/Taskfile.yml
+    checksum: a1cf6063def6ee21ba42f8a0818127c92a9a5c313c293387f2294e42480dd3d5
     vars:
       REPO_REF: "{{.TEST_INFRA_REPO_REF}}"
+      WAIT_TIMEOUT: "{{.WAIT_TIMEOUT}}"
 
 tasks:
   default:
@@ -27,42 +50,38 @@ tasks:
 
   # Code generation
   generate:
-    desc: Run code generation (deepcopy, defaults)
+    desc: Run code generation (deepcopy)
     cmds:
       - |
         set -e
         echo "Running code generation..."
         {{.TOOL_DIR}}/controller-gen object:headerFile="hack/boilerplate.go.txt" paths="./..."
-        {{.TOOL_DIR}}/defaulter-gen ./internal/config --output-file=zz_generated.defaults.go
         echo "Code generation complete!"
     deps:
       - install-tools
     silent: true
 
   manifests:
-    desc: Generate CRD, RBAC, and webhook manifests
+    desc: Generate RBAC manifests
     cmds:
       - |
         set -e
         echo "Generating manifests..."
-        {{.TOOL_DIR}}/controller-gen rbac:roleName=controller-template-manager \
+        {{.TOOL_DIR}}/controller-gen rbac:roleName=openmeter-provider-manager \
           crd:generateEmbeddedObjectMeta=true \
-          webhook \
           paths="./..." \
-          output:crd:artifacts:config=config/base/crd/bases \
-          output:rbac:artifacts:config=config/components/controller_rbac \
-          output:webhook:artifacts:config=config/base/webhook
+          output:rbac:artifacts:config=config/components/controller_rbac
         echo "Manifests generated!"
     deps:
       - install-tools
     silent: true
 
   build:
-    desc: Build the controller-template binary
+    desc: Build the openmeter-provider and submission-consumer binaries
     cmds:
       - |
         set -e
-        echo "Building controller-template..."
+        echo "Building binaries..."
         mkdir -p {{.TOOL_DIR}}
 
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
@@ -80,8 +99,16 @@ tasks:
                     -X 'main.gitCommit=${GIT_COMMIT}' \
                     -X 'main.gitTreeState=${GIT_TREE_STATE}' \
                     -X 'main.buildDate=${BUILD_DATE}'" \
-          -o {{.TOOL_DIR}}/controller-template ./cmd/controller-template
-        echo "Binary built: {{.TOOL_DIR}}/controller-template"
+          -o {{.TOOL_DIR}}/openmeter-provider ./cmd/openmeter
+        echo "Binary built: {{.TOOL_DIR}}/openmeter-provider"
+
+        go build \
+          -ldflags="-X 'main.version=${VERSION}' \
+                    -X 'main.gitCommit=${GIT_COMMIT}' \
+                    -X 'main.gitTreeState=${GIT_TREE_STATE}' \
+                    -X 'main.buildDate=${BUILD_DATE}'" \
+          -o {{.TOOL_DIR}}/submission-consumer ./cmd/openmeter/submission-consumer
+        echo "Binary built: {{.TOOL_DIR}}/submission-consumer"
     silent: true
 
   test:
@@ -146,12 +173,12 @@ tasks:
 
   # Development tasks
   dev:build:
-    desc: Build the controller-template container image for development
+    desc: Build the openmeter-provider container image for development
     silent: true
     cmds:
       - |
         set -e
-        echo "Building controller-template container image: {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
+        echo "Building openmeter-provider container image: {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
 
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
         VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
@@ -170,7 +197,7 @@ tasks:
         echo "Successfully built {{.IMAGE_NAME}}:{{.IMAGE_TAG}}"
 
   dev:load:
-    desc: Load the controller-template container image into the kind cluster
+    desc: Load the openmeter-provider container image into the kind cluster
     silent: true
     cmds:
       - |
@@ -184,12 +211,19 @@ tasks:
     silent: true
     cmds:
       - task: test-infra:cluster-up
+      - task: dev:install-dependencies
       - task: dev:build
       - task: dev:load
       - task: dev:deploy
 
+  ci:setup:
+    desc: Setup CI test environment
+    silent: true
+    cmds:
+      - task: dev:setup
+
   dev:deploy:
-    desc: Deploy controller-template using dev overlay
+    desc: Deploy openmeter-provider using dev overlay
     silent: true
     cmds:
       - |
@@ -207,7 +241,19 @@ tasks:
 
         echo ""
         echo "----------------------------------------------------------------------"
-        echo "Stage 2: Deploying controller-template (Dev Overlay)"
+        echo "Stage 1b: Installing billing CRDs ({{.BILLING_REPO_REF}})"
+        echo "----------------------------------------------------------------------"
+        task dev:install-external-crds
+
+        echo ""
+        echo "----------------------------------------------------------------------"
+        echo "Stage 1c: Deploying NATS JetStream (submission-consumer dependency)"
+        echo "----------------------------------------------------------------------"
+        task dev:install-nats
+
+        echo ""
+        echo "----------------------------------------------------------------------"
+        echo "Stage 2: Deploying openmeter-provider (Dev Overlay)"
         echo "----------------------------------------------------------------------"
         until task test-infra:kubectl -- apply -k config/overlays/dev; do
           echo "  - Apply failed (likely webhook propagation), retrying in 5s..."
@@ -218,11 +264,290 @@ tasks:
         echo "----------------------------------------------------------------------"
         echo "Stage 3: Verification"
         echo "----------------------------------------------------------------------"
-        task test-infra:kubectl -- rollout status -n controller-template-system deployment/controller-template-manager --timeout=120s || echo "  - Controller not ready yet"
+        task test-infra:kubectl -- rollout status -n openmeter-system deployment/openmeter-provider-manager --timeout=120s || echo "  - Controller not ready yet"
+        task test-infra:kubectl -- rollout status -n openmeter-system deployment/submission-consumer --timeout=120s || echo "  - submission-consumer not ready yet"
 
         echo ""
-        echo "controller-template successfully deployed in dev mode!"
+        echo "openmeter-provider successfully deployed in dev mode!"
         echo "----------------------------------------------------------------------"
+
+  dev:install-nats:
+    desc: Install NATS JetStream (via Flux HelmRelease) and the billing-usage stream the submission-consumer reads from — so submission-consumer e2e tests can publish real CloudEvents onto NATS and verify they reach OpenMeter.
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Installing NATS + nack (JetStream controller)..."
+        task test-infra:kubectl -- apply -k config/dependencies/nats-ci
+
+        echo "Waiting for NATS JetStream CRDs (installed by nack)..."
+        until task test-infra:kubectl -- get crd streams.jetstream.nats.io >/dev/null 2>&1; do
+          echo "  - CRD not found yet, retrying..."
+          sleep 5
+        done
+        task test-infra:kubectl -- wait --for=condition=established crd/streams.jetstream.nats.io --timeout=120s
+
+        echo "Waiting for the NATS HelmRelease to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/nats -n nats-system --timeout={{.WAIT_TIMEOUT}}
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/nack -n nats-system --timeout={{.WAIT_TIMEOUT}}
+
+        echo "Waiting for the nats-box pod (used by e2e tests to publish/inspect JetStream messages)..."
+        task test-infra:kubectl -- wait --for=condition=ready pod/nats-box -n nats-system --timeout={{.WAIT_TIMEOUT}}
+
+        echo "Applying the billing-usage JetStream stream..."
+        until task test-infra:kubectl -- apply -k config/components/nats-streams; do
+          echo "  - Apply failed (nack webhook/controller may still be starting), retrying in 5s..."
+          sleep 5
+        done
+
+        echo "NATS JetStream ready."
+
+  dev:install-external-crds:
+    desc: Install all external CRDs (billing + stripe-provider) this controller watches
+    silent: true
+    cmds:
+      - |
+        set -e
+        echo "Installing billing CRDs from milo-os/billing ({{.BILLING_REPO_REF}})..."
+        task test-infra:kubectl -- apply \
+          -k "https://github.com/milo-os/billing//config/base/crd?ref={{.BILLING_REPO_REF}}"
+
+        # Wait for the one the controller watches before proceeding.
+        task test-infra:kubectl -- wait --for=condition=established crd/meterdefinitions.billing.miloapis.com --timeout=120s
+
+        echo "Billing CRDs installed."
+
+        echo "Installing stripe-provider CRDs from milo-os/stripe-provider ({{.STRIPE_PROVIDER_REPO_REF}})..."
+        task test-infra:kubectl -- apply \
+          -k "https://github.com/milo-os/stripe-provider//config/base/crd?ref={{.STRIPE_PROVIDER_REPO_REF}}"
+
+        # resolveStripeCustomer's watch needs this one specifically.
+        task test-infra:kubectl -- wait --for=condition=established crd/stripepaymentmethods.stripe.billing.miloapis.com --timeout=120s
+
+        echo "stripe-provider CRDs installed."
+
+  dev:install-stripe-app:
+    desc: Install a Stripe TEST-MODE (sandbox) app on the dev OpenMeter instance from STRIPE_TEST_API_KEY (.env) and make it the org's default BillingProfile — see .env.example. Skips gracefully if unset; idempotent.
+    silent: true
+    cmds:
+      - |
+        set -eu
+
+        if [ -z "${STRIPE_TEST_API_KEY:-}" ]; then
+          echo "⚠️  STRIPE_TEST_API_KEY not set (see .env.example) — skipping Stripe app install."
+          echo "   BillingAccountReconciler's Stripe app-data sync will 412 with"
+          echo "   \"no stripe app found in billing profile\" until this is set."
+          exit 0
+        fi
+
+        PF_PORT=18898
+        task test-infra:kubectl -- port-forward -n openmeter-system svc/openmeter-api "${PF_PORT}:80" >/tmp/openmeter-install-stripe-pf.log 2>&1 &
+        PF_PID=$!
+        trap 'kill "$PF_PID" >/dev/null 2>&1 || true' EXIT
+        # Give the port-forward a moment to establish before the first request.
+        sleep 3
+
+        base="http://127.0.0.1:${PF_PORT}/api/v1"
+
+        stripe_app_id="$(command curl -s "${base}/apps" | jq -r '.items[]? | select(.type=="stripe") | .id' | head -1)"
+
+        if [ -n "$stripe_app_id" ]; then
+          echo "✅ A Stripe app is already installed (id=${stripe_app_id})."
+        else
+          echo "Installing a Stripe app from STRIPE_TEST_API_KEY (test-mode/sandbox key expected, sk_test_...)..."
+          resp="$(command curl -s -X POST -H "Content-Type: application/json" \
+            -d "{\"apiKey\": \"${STRIPE_TEST_API_KEY}\", \"name\": \"stripe\"}" \
+            "${base}/marketplace/listings/stripe/install/apikey")"
+          # OpenMeter's own response already masks the key (maskedAPIKey), so
+          # it's safe to print in full.
+          echo "$resp"
+          stripe_app_id="$(echo "$resp" | jq -r '.app.id // empty')"
+          if [ -z "$stripe_app_id" ]; then
+            echo "❌ Stripe app install failed — see response above."
+            exit 1
+          fi
+          echo "✅ Stripe app installed (id=${stripe_app_id})."
+        fi
+
+        # --------------------------------------------------------------
+        # Make the Stripe app the org's default BillingProfile.
+        #
+        # Installing the app alone does NOT wire it into anything —
+        # confirmed live: the install response's defaultForCapabilityTypes
+        # came back empty. This OpenMeter version has no "set default app"
+        # endpoint, and Apps can only be set at BillingProfile *creation*,
+        # never updated afterward (PUT has no apps field; also confirmed
+        # the server rejects mixed apps across invoicing/payment/tax with
+        # "all apps must be the same" — it's all-Stripe or nothing, no
+        # per-capability mixing). So EnsureBillingProfile's clone-from-
+        # default (see billingprofile.go's createBillingProfile) would
+        # otherwise keep inheriting the Sandbox app forever, and every
+        # BillingAccount's Stripe app-data sync would keep 412ing with
+        # "no stripe app found in billing profile" — this is exactly what
+        # happened the first time this was set up manually, hence this
+        # step now being part of cluster bootstrap instead of a one-off.
+        #
+        # The only way to actually switch is to create a brand-new default
+        # profile pointing all three app slots at Stripe — OpenMeter then
+        # auto-un-defaults whatever was default before (only one profile
+        # can be default at a time), which is the one part of this that
+        # genuinely does happen automatically.
+        # --------------------------------------------------------------
+        default_payment_app_id="$(command curl -s "${base}/billing/profiles?expand=apps" \
+          | jq -r '.items[]? | select(.default==true) | .apps.payment.id // empty')"
+
+        if [ "$default_payment_app_id" = "$stripe_app_id" ]; then
+          echo "✅ Default BillingProfile's payment app is already Stripe — nothing to do."
+          exit 0
+        fi
+
+        echo "Creating a new default BillingProfile pointing invoicing/payment/tax at the Stripe app..."
+        profile_body="$(jq -n --arg appId "$stripe_app_id" '{
+          name: "openmeter-stripe",
+          description: "Default profile: Stripe for invoicing/payment/tax",
+          default: true,
+          supplier: {name: "OpenMeter", addresses: [{country: "US"}]},
+          apps: {invoicing: $appId, payment: $appId, tax: $appId},
+          workflow: {
+            collection: {alignment: {type: "subscription"}, interval: "PT1H"},
+            invoicing: {autoAdvance: true, draftPeriod: "P0D", dueAfter: "P30D", progressiveBilling: true, subscriptionEndProrationMode: "bill_actual_period"},
+            payment: {collectionMethod: "charge_automatically"},
+            tax: {enabled: true, enforced: false}
+          }
+        }')"
+
+        resp="$(command curl -s -X POST -H "Content-Type: application/json" -d "$profile_body" "${base}/billing/profiles")"
+        if echo "$resp" | jq -e '.id' >/dev/null 2>&1; then
+          echo "✅ New default BillingProfile created (Stripe-backed): $(echo "$resp" | jq -r '.id')"
+        else
+          echo "❌ Failed to create the Stripe-backed default BillingProfile:"
+          echo "$resp"
+          exit 1
+        fi
+
+  dev:install-dependencies:
+    desc: Install all infrastructure dependencies (OpenMeter + billing CRDs + Stripe app)
+    silent: true
+    deps:
+      - dev:install-external-crds
+    cmds:
+      - |
+        set -e
+        echo "📦 Installing infrastructure dependencies..."
+        echo ""
+        # billing CRDs (MeterDefinition etc.) are installed and awaited by
+        # the dev:install-external-crds dependency above.
+
+        # ============================================================
+        # Install OpenMeter
+        # ============================================================
+        echo "📦 Installing OpenMeter..."
+
+        echo "Applying OpenMeter resources..."
+        task test-infra:kubectl -- apply -k config/dependencies/openmeter
+
+        echo "Waiting for OpenMeter namespace to be created..."
+        task test-infra:kubectl -- wait --for=jsonpath='{.status.phase}'=Active namespace/openmeter-system --timeout=1000s 2>/dev/null || echo "⚠️  Namespace not ready yet"
+
+        echo "Waiting for OpenMeter HelmRelease to be ready..."
+        task test-infra:kubectl -- wait --for=condition=ready helmrelease/openmeter -n openmeter-system --timeout=1000s 2>/dev/null || echo "⚠️  OpenMeter HelmRelease not ready yet"
+
+        echo "Waiting for OpenMeter app pods to be ready..."
+        # Wait only on the long-running app workload pods. The broad
+        # app.kubernetes.io/name=openmeter label also matches one-shot CronJob
+        # pods (e.g. openmeter-billing-*-invoices) that finish as Completed
+        # 0/1 and never reach Ready, which would hang a plain wait forever.
+        # Exclude the CronJob pods by field selector on owner kind.
+        task test-infra:kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=openmeter -n openmeter-system \
+          --field-selector status.phase=Running --timeout=1000s 2>/dev/null || echo "⚠️  OpenMeter pods not ready yet"
+
+        echo "✅ OpenMeter installed"
+        echo ""
+
+        # ============================================================
+        # Install a Stripe test-mode app (skips gracefully if STRIPE_TEST_API_KEY unset)
+        # ============================================================
+        task dev:install-stripe-app
+
+        # ============================================================
+        # Summary
+        # ============================================================
+        echo "✅ All infrastructure dependencies installed successfully!"
+        echo ""
+        echo "📊 Check status:"
+        echo "  OpenMeter:  task test-infra:kubectl -- get pods -n openmeter-system"
+        echo ""
+        echo "📋 HelmRelease status:"
+        echo "  task test-infra:kubectl -- get helmrelease -n openmeter-system"
+        echo ""
+
+  dev:pf-openmeter:
+    desc: Port forward OpenMeter API for local development
+    cmds:
+      - echo "Port forwarding OpenMeter API to localhost:8888..."
+      - task test-infra:kubectl -- port-forward -n openmeter-system svc/openmeter-api 8888:80
+
+  dev:list-stale-results:
+    desc: List every billing/stripe-provider CRD instance (all namespaces) and every resource this provider actually creates in OpenMeter — spot leftover/orphaned e2e test data.
+    silent: true
+    cmds:
+      - |
+        set -eu
+
+        echo "========================================================================"
+        echo "Cluster: CRD instances (billing.miloapis.com + stripe.billing.miloapis.com)"
+        echo "========================================================================"
+        for group in billing.miloapis.com stripe.billing.miloapis.com; do
+          for kind in $(task test-infra:kubectl -- api-resources --api-group="$group" --no-headers -o name 2>/dev/null); do
+            echo ""
+            echo "--- ${kind} (all namespaces) ---"
+            task test-infra:kubectl -- get "$kind" -A 2>&1 || true
+          done
+        done
+
+        echo ""
+        echo "========================================================================"
+        echo "OpenMeter: resources this provider actually creates"
+        echo "========================================================================"
+
+        PF_PORT=18899
+        task test-infra:kubectl -- port-forward -n openmeter-system svc/openmeter-api "${PF_PORT}:80" >/tmp/openmeter-list-stale-pf.log 2>&1 &
+        PF_PID=$!
+        trap 'kill "$PF_PID" >/dev/null 2>&1 || true' EXIT
+        # Give the port-forward a moment to establish before the first request.
+        sleep 3
+
+        base="http://127.0.0.1:${PF_PORT}/api/v1"
+
+        show() {
+          # $1=title $2=url $3=jq filter (falls back to the raw body if the
+          # filter or the response body itself isn't parseable JSON, e.g. an
+          # error response from a still-establishing port-forward)
+          echo ""
+          echo "--- $1 ---"
+          body="$(curl -s "$2")"
+          echo "$body" | jq -r "$3" 2>/dev/null || echo "$body"
+        }
+
+        show "Meters" \
+          "${base}/meters" \
+          '.data[]? // .items[]? | "\(.id // .slug)\t\(.name // .slug)"'
+
+        show "Customers" \
+          "${base}/customers" \
+          '.items[]? | "\(.id)\tkey=\(.key // "-")\t\(.name)"'
+
+        show "Billing profiles" \
+          "${base}/billing/profiles" \
+          '.items[]? | "\(.id)\t\(.name)\tdefault=\(.default)"'
+
+        show "Billing profile customer overrides" \
+          "${base}/billing/customers" \
+          '.items[]? | "\(.customerId)\t-> profile \(.billingProfileId)"'
+
+        show "Invoices" \
+          "${base}/billing/invoices" \
+          '.items[]? | "\(.id)\tcustomer=\(.customer.key // .customer.id // "-")\t\(.status)"'
 
   dev:redeploy:
     desc: Quick rebuild and redeploy for dev environment
@@ -232,9 +557,14 @@ tasks:
     cmds:
       - |
         set -e
-        echo "Redeploying controller-template (dev)..."
-        task test-infra:kubectl -- delete pod -n controller-template-system -l app.kubernetes.io/name=controller-template --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
-        task test-infra:kubectl -- rollout status -n controller-template-system deployment/controller-template-manager --timeout=120s || true
+        echo "Redeploying openmeter-provider (dev)..."
+        task test-infra:kubectl -- delete pod -n openmeter-system -l app.kubernetes.io/name=openmeter-provider --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
+        task test-infra:kubectl -- rollout status -n openmeter-system deployment/openmeter-provider-manager --timeout=120s || true
+
+        echo "Redeploying submission-consumer (dev)..."
+        task test-infra:kubectl -- delete pod -n openmeter-system -l app.kubernetes.io/name=submission-consumer --wait=false || echo "Deployment not found, run 'task dev:deploy' first"
+        task test-infra:kubectl -- rollout status -n openmeter-system deployment/submission-consumer --timeout=120s || true
+
         echo "Redeployment complete!"
     silent: true
 
@@ -326,13 +656,13 @@ tasks:
         set -e
         GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
         VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
-        docker build -t "ghcr.io/milo-os/controller-template-ui:dev" ui/
-        echo "Built ghcr.io/milo-os/controller-template-ui:dev"
+        docker build -t "ghcr.io/milo-os/openmeter-provider-ui:dev" ui/
+        echo "Built ghcr.io/milo-os/openmeter-provider-ui:dev"
     silent: true
 
   # E2E Testing
   e2e:
-    desc: Run chainsaw e2e tests
+    desc: 'Run chainsaw e2e tests. Pass a subdirectory under test/e2e/ to scope the run, e.g. `task e2e -- meterdefinition` or `task e2e -- meterdefinition/aggregations`.'
     deps:
       - task: install-go-tool
         vars:
@@ -340,5 +670,5 @@ tasks:
           PACKAGE: github.com/kyverno/chainsaw
           VERSION: "{{.CHAINSAW_VERSION}}"
     cmds:
-      - "{{.TOOL_DIR}}/chainsaw test {{if .CLI_ARGS}}{{.CLI_ARGS}}{{else}}test/e2e/{{end}}"
+      - "{{.TOOL_DIR}}/chainsaw test --config test/e2e/.chainsaw.yaml {{if .CLI_ARGS}}test/e2e/{{.CLI_ARGS}}{{else}}test/e2e/{{end}}"
     silent: false

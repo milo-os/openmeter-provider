@@ -1,0 +1,188 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: aggregations
+spec:
+  description: |
+    Exercises all seven billingv1alpha1.MeterAggregation values against a
+    real OpenMeter instance (Sum, Count, UniqueCount, Max, Min, Latest,
+    Average), one MeterDefinition per aggregation.
+
+    Every case asserts two independent things: that the controller attached
+    its finalizer (proof EnsureMeter was called and returned success), and
+    that the meter which actually landed in OpenMeter has the aggregation,
+    valueProperty, and groupBy that openmeter.DesiredMeter should have
+    produced for that aggregation. The second check is what would catch a
+    wrong MeterAggregation/valueNeedsProperty mapping even though the
+    finalizer alone already reports success — this is what caught a real bug
+    where UniqueCount omitted the valueProperty OpenMeter requires for it.
+
+    MeterDefinition is cluster-scoped (scope=Cluster); the namespace bound
+    below only applies to the query pod used to verify OpenMeter's state.
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      description: |
+        Start a long-lived helper pod so later steps can reach the
+        openmeter-api ClusterIP service via `kubectl exec` — the app pods
+        themselves are distroless and offer no shell/curl of their own.
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query
+              status:
+                phase: Running
+
+    - name: Sum aggregation converges to SUM with a valueProperty
+      description: |
+        Create a MeterDefinition with measurement.aggregation=Sum. Confirm
+        the finalizer is attached, then poll OpenMeter for the meter and
+        confirm aggregation=SUM, a valueProperty is present ("$.value"), and
+        groupBy contains the declared "region" dimension.
+      try:
+        - apply:
+            file: sum.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-agg-sum
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - script:
+            timeout: 35s
+            content: sh verify-meter.sh e2e_miloapis_com_agg_sum SUM yes region
+
+    - name: Count aggregation converges to COUNT without a valueProperty
+      description: |
+        Create a MeterDefinition with measurement.aggregation=Count. Confirm
+        the finalizer is attached, then poll OpenMeter for the meter and
+        confirm aggregation=COUNT, no valueProperty is set (OpenMeter rejects
+        one for COUNT), and groupBy contains "region".
+      try:
+        - apply:
+            file: count.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-agg-count
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - script:
+            timeout: 35s
+            content: sh verify-meter.sh e2e_miloapis_com_agg_count COUNT no region
+
+    - name: UniqueCount aggregation converges to UNIQUE_COUNT with a valueProperty
+      description: |
+        Create a MeterDefinition with measurement.aggregation=UniqueCount.
+        Confirm the finalizer is attached, then poll OpenMeter for the meter
+        and confirm aggregation=UNIQUE_COUNT, a valueProperty IS present
+        (unlike Count, OpenMeter requires one here too), and groupBy contains
+        "project_id".
+      try:
+        - apply:
+            file: unique-count.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-agg-unique-count
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - script:
+            timeout: 35s
+            content: sh verify-meter.sh e2e_miloapis_com_agg_uniquecount UNIQUE_COUNT yes project_id
+
+    - name: Max aggregation converges to MAX with a valueProperty
+      description: |
+        Create a MeterDefinition with measurement.aggregation=Max. Confirm
+        the finalizer is attached, then poll OpenMeter for the meter and
+        confirm aggregation=MAX, a valueProperty is present, and groupBy
+        contains "region".
+      try:
+        - apply:
+            file: max.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-agg-max
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - script:
+            timeout: 35s
+            content: sh verify-meter.sh e2e_miloapis_com_agg_max MAX yes region
+
+    - name: Min aggregation converges to MIN with a valueProperty
+      description: |
+        Create a MeterDefinition with measurement.aggregation=Min. Confirm
+        the finalizer is attached, then poll OpenMeter for the meter and
+        confirm aggregation=MIN, a valueProperty is present, and groupBy
+        contains "region".
+      try:
+        - apply:
+            file: min.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-agg-min
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - script:
+            timeout: 35s
+            content: sh verify-meter.sh e2e_miloapis_com_agg_min MIN yes region
+
+    - name: Latest aggregation converges to LATEST with a valueProperty
+      description: |
+        Create a MeterDefinition with measurement.aggregation=Latest. Confirm
+        the finalizer is attached, then poll OpenMeter for the meter and
+        confirm aggregation=LATEST, a valueProperty is present, and groupBy
+        contains "region".
+      try:
+        - apply:
+            file: latest.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-agg-latest
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - script:
+            timeout: 35s
+            content: sh verify-meter.sh e2e_miloapis_com_agg_latest LATEST yes region
+
+    - name: Average aggregation converges to AVG with a valueProperty
+      description: |
+        Create a MeterDefinition with measurement.aggregation=Average.
+        Confirm the finalizer is attached, then poll OpenMeter for the meter
+        and confirm aggregation=AVG, a valueProperty is present, and groupBy
+        contains "region".
+      try:
+        - apply:
+            file: average.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-agg-average
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - script:
+            timeout: 35s
+            content: sh verify-meter.sh e2e_miloapis_com_agg_average AVG yes region

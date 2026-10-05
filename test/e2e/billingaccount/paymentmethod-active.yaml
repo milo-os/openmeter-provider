@@ -1,0 +1,9 @@
+# Status patch simulating stripe-provider driving this PaymentMethod to
+# Active — see paymentmethod.yaml for why this is fabricated rather than
+# produced by a real setup flow.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: PaymentMethod
+metadata:
+  name: e2e-payment-method
+status:
+  phase: Active

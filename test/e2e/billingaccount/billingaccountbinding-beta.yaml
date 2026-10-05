@@ -1,0 +1,9 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccountBinding
+metadata:
+  name: e2e-binding-beta
+spec:
+  billingAccountRef:
+    name: e2e-billingaccount
+  projectRef:
+    name: project-beta

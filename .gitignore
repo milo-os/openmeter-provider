@@ -27,3 +27,6 @@ cover.out
 
 # Claude AI
 .claude/.initialized
+
+# Local secrets (Stripe test-mode API key, etc.) — see .env.example
+.env

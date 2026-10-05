@@ -1,0 +1,8 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-submission-account
+spec:
+  currencyCode: USD
+  contactInfo:
+    email: submission-e2e@example.com

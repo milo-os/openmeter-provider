@@ -1,7 +1,0 @@
-apiVersion: example.miloapis.com/v1alpha1
-kind: Resource
-metadata:
-  name: example-resource
-  namespace: default
-spec:
-  description: "An example resource managed by the controller-template."

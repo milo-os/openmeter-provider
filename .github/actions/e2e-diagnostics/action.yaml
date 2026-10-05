@@ -1,0 +1,110 @@
+name: e2e diagnostics
+description: Dump cluster and pipeline state for debugging a failed e2e run.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        # Never abort mid-dump; best-effort diagnostics only. Every command
+        # below runs through `task test-infra:kubectl --`, matching how the
+        # rest of this workflow already talks to the kind cluster (it wraps
+        # the cluster's own kubeconfig), not a raw `kubectl`.
+        set +e
+
+        echo "=== nodes ==="
+        task test-infra:kubectl -- get nodes -o wide
+
+        echo "=== node resource allocation (requests/limits vs capacity) ==="
+        # A Pending pod almost always traces back to this: confirmed live
+        # this session that a bundled sub-chart's default resourcesPreset
+        # (Kafka's "small" preset x3 replicas = 1.5 CPU / 1.5Gi requests
+        # alone) can exceed what's left on a constrained CI runner node,
+        # long before any single pod's own describe makes that obvious.
+        task test-infra:kubectl -- describe node | grep -A20 "Allocated resources"
+
+        echo "=== pods (all namespaces) ==="
+        task test-infra:kubectl -- get pods -A -o wide
+
+        echo "=== non-Running/non-Completed pods: full describe ==="
+        # Catches OOMKilled/Pending/CrashLoopBackOff root causes directly
+        # (exit code, reason, resource requests/limits, recent Events) —
+        # exactly the kubectl describe output that diagnosed both the
+        # Kafka scheduling and Kafka OOMKill issues this session, without
+        # needing a human to spot the failing pod and re-run it by hand.
+        for ns_pod in $(task test-infra:kubectl -- get pods -A --no-headers 2>/dev/null \
+            | awk '$4 != "Running" && $4 != "Completed" { print $1"/"$2 }'); do
+          ns="${ns_pod%%/*}"
+          pod="${ns_pod#*/}"
+          echo "--- describe ${ns_pod} ---"
+          task test-infra:kubectl -- describe pod -n "$ns" "$pod"
+        done
+
+        echo "=== recent cluster events (all namespaces) ==="
+        task test-infra:kubectl -- get events -A --sort-by=.lastTimestamp | tail -60
+
+        echo "=== openmeter-provider controller-manager logs ==="
+        task test-infra:kubectl -- logs -n openmeter-system -l control-plane=openmeter-provider --tail=200
+
+        echo "=== submission-consumer logs ==="
+        task test-infra:kubectl -- logs -n openmeter-system -l control-plane=submission-consumer --tail=200
+
+        echo "=== NATS status ==="
+        task test-infra:kubectl -- get pods -n nats-system -o wide
+        echo "=== NATS server logs ==="
+        task test-infra:kubectl -- logs -n nats-system -l app.kubernetes.io/name=nats --tail=100
+        echo "=== nack (JetStream CRD controller) logs ==="
+        task test-infra:kubectl -- logs -n nats-system -l app.kubernetes.io/name=nack --tail=100
+
+        echo "=== billing.miloapis.com CRD instances (test fixtures at failure time) ==="
+        for kind in billingaccounts billingaccountbindings meterdefinitions; do
+          echo "--- ${kind} ---"
+          task test-infra:kubectl -- get "$kind" -A -o wide
+        done
+
+        # Everything below traces one usage event through OpenMeter's own
+        # ingest pipeline (raw ingest -> Kafka -> sink-worker -> ClickHouse).
+        # This exact chain of checks is what it took to find, this session,
+        # that submission-consumer/OpenMeter's ingest API both succeeded
+        # while the event never became queryable — proving the break was
+        # sink-worker's one-shot-at-boot topic discovery, not our own code.
+        KAFKA_POD=$(task test-infra:kubectl -- get pod -n openmeter-system -l app.kubernetes.io/name=kafka \
+          --field-selector status.phase=Running --no-headers -o custom-columns=":metadata.name" | head -1)
+        if [ -n "$KAFKA_POD" ]; then
+          echo "=== Kafka topics ==="
+          task test-infra:kubectl -- exec -n openmeter-system "$KAFKA_POD" -- \
+            kafka-topics.sh --bootstrap-server localhost:9092 --list
+
+          echo "=== Kafka consumer groups (empty here means NOTHING has ever consumed anything) ==="
+          task test-infra:kubectl -- exec -n openmeter-system "$KAFKA_POD" -- \
+            kafka-consumer-groups.sh --bootstrap-server localhost:9092 --list
+
+          echo "=== Kafka topic offsets (per-namespace usage-event topics) ==="
+          for topic in $(task test-infra:kubectl -- exec -n openmeter-system "$KAFKA_POD" -- \
+              kafka-topics.sh --bootstrap-server localhost:9092 --list 2>/dev/null | grep '^om_[^s]'); do
+            task test-infra:kubectl -- exec -n openmeter-system "$KAFKA_POD" -- \
+              kafka-get-offsets.sh --broker-list localhost:9092 --topic "$topic"
+          done
+        else
+          echo "no Running Kafka pod found"
+        fi
+
+        echo "=== sink-worker logs (full — this stage's own logging is extremely sparse; a healthy" \
+             "run may show almost nothing past startup, so truncating with --tail would hide the signal) ==="
+        task test-infra:kubectl -- logs -n openmeter-system -l app.kubernetes.io/component=sink-worker
+
+        echo "=== openmeter-api logs (the actual ingest endpoint) ==="
+        task test-infra:kubectl -- logs -n openmeter-system -l app.kubernetes.io/component=api --tail=200
+
+        CLICKHOUSE_POD=$(task test-infra:kubectl -- get pod -n openmeter-system -l app.kubernetes.io/component=clickhouse \
+          --field-selector status.phase=Running --no-headers -o custom-columns=":metadata.name" | head -1)
+        if [ -n "$CLICKHOUSE_POD" ]; then
+          echo "=== ClickHouse raw event count (0 here means the sink pipeline never flushed ANYTHING," \
+               "not just this test's own events — a systemic break, not a per-test one) ==="
+          task test-infra:kubectl -- exec -n openmeter-system "$CLICKHOUSE_POD" -c clickhouse -- \
+            clickhouse-client --query "SELECT count() FROM default.om_events"
+        else
+          echo "no Running ClickHouse pod found"
+        fi
+
+        true

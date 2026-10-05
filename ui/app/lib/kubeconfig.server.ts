@@ -20,18 +20,18 @@ const IN_CLUSTER_CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
  * ServiceAccount, or a local kubeconfig (in that order).
  *
  * Environment variables:
- * - CONTROLLER_TEMPLATE_API_SERVER_URL
- * - CONTROLLER_TEMPLATE_API_CA_FILE
- * - CONTROLLER_TEMPLATE_API_CERT_FILE
- * - CONTROLLER_TEMPLATE_API_KEY_FILE
- * - CONTROLLER_TEMPLATE_API_TOKEN_FILE
+ * - OPENMETER_PROVIDER_API_SERVER_URL
+ * - OPENMETER_PROVIDER_API_CA_FILE
+ * - OPENMETER_PROVIDER_API_CERT_FILE
+ * - OPENMETER_PROVIDER_API_KEY_FILE
+ * - OPENMETER_PROVIDER_API_TOKEN_FILE
  */
 export function getKubeConfig(): KubeConfig {
   if (cachedConfig) {
     return cachedConfig;
   }
 
-  const envApiServerUrl = process.env.CONTROLLER_TEMPLATE_API_SERVER_URL;
+  const envApiServerUrl = process.env.OPENMETER_PROVIDER_API_SERVER_URL;
   if (envApiServerUrl) {
     console.log("Using API server from environment:", envApiServerUrl);
 
@@ -40,19 +40,19 @@ export function getKubeConfig(): KubeConfig {
     let clientKey: Buffer | undefined;
     let bearerToken: string | undefined;
 
-    const caFile = process.env.CONTROLLER_TEMPLATE_API_CA_FILE;
+    const caFile = process.env.OPENMETER_PROVIDER_API_CA_FILE;
     if (caFile) {
       try { caCert = readFileSync(caFile); } catch { /* optional */ }
     }
 
-    const tokenFile = process.env.CONTROLLER_TEMPLATE_API_TOKEN_FILE;
+    const tokenFile = process.env.OPENMETER_PROVIDER_API_TOKEN_FILE;
     if (tokenFile) {
       try { bearerToken = readFileSync(tokenFile, "utf8").trim(); } catch { /* optional */ }
     }
 
     if (!bearerToken) {
-      const certFile = process.env.CONTROLLER_TEMPLATE_API_CERT_FILE;
-      const keyFile = process.env.CONTROLLER_TEMPLATE_API_KEY_FILE;
+      const certFile = process.env.OPENMETER_PROVIDER_API_CERT_FILE;
+      const keyFile = process.env.OPENMETER_PROVIDER_API_KEY_FILE;
       if (certFile && keyFile) {
         try {
           clientCert = readFileSync(certFile);
