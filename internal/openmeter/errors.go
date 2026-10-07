@@ -23,6 +23,12 @@ var ErrMeterNotFound = errors.New("openmeter: meter not found")
 // treats it as success.
 var ErrCustomerNotFound = errors.New("openmeter: customer not found")
 
+// ErrPlanNotFound is the sentinel returned by GetPlanByKey when OpenMeter
+// responds with a 404 for the requested plan key. Callers compare with
+// errors.Is to decide whether to create or update the plan; DeletePlan
+// treats it as success.
+var ErrPlanNotFound = errors.New("openmeter: plan not found")
+
 // TransientError wraps a failure that the caller should retry with backoff.
 // Network errors, 429s, and 5xx responses all surface as TransientError.
 type TransientError struct {

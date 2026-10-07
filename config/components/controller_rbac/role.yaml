@@ -25,6 +25,7 @@ rules:
   resources:
   - billingaccounts
   - meterdefinitions
+  - offers
   verbs:
   - get
   - list
@@ -36,6 +37,7 @@ rules:
   resources:
   - billingaccounts/finalizers
   - meterdefinitions/finalizers
+  - offers/finalizers
   verbs:
   - update
 - apiGroups:

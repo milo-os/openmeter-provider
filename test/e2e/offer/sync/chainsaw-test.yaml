@@ -1,0 +1,85 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: offer-sync
+spec:
+  description: |
+    Exercises OfferReconciler syncing a GA Offer to an OpenMeter Plan.
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+               apiVersion: v1
+               kind: Pod
+               metadata:
+                 name: openmeter-query
+               status:
+                 phase: Running
+
+    - name: GA Offer converges to OpenMeter Plan
+      description: |
+        Create a MeterDefinition and a GA Offer. Confirm finalizer is attached.
+        Poll OpenMeter for the Plan by Key (UID) and confirm name.
+      try:
+        - apply:
+            file: meter.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-metric
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - apply:
+            file: offer.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-offer-sync
+                (finalizers[?@ == 'openmeter.miloapis.com/product-plan']): ['openmeter.miloapis.com/product-plan']
+        - script:
+            timeout: 35s
+            # Key is the UID of the offer. Since we don't know it, we extract it using a bash script.
+            # But wait, in chainsaw we can extract the UID and pass it to the script.
+            # Alternatively, we can let chainsaw do the assert logic if it supports executing and passing bindings.
+            # For simplicity, we can fetch the UID in the script.
+            content: |
+              OFFER_UID=$(kubectl get offer e2e-offer-sync -o jsonpath='{.metadata.uid}')
+              sh verify-comprehensive.sh "$OFFER_UID" "E2E Comprehensive Offer"
+
+    - name: Draft Offer does not sync to OpenMeter
+      description: |
+        Create a Draft Offer. Confirm finalizer is attached (so publish works later),
+        but verify that no plan is created in OpenMeter.
+      try:
+        - apply:
+            file: offer-draft.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-offer-draft
+                (finalizers[?@ == 'openmeter.miloapis.com/product-plan']): ['openmeter.miloapis.com/product-plan']
+        - script:
+            timeout: 30s
+            # Expecting it NOT to exist, verify-plan.sh returns 1 if not found.
+            # We can use ! sh verify-plan.sh or write a new script that expects it NOT to be there.
+            content: |
+              OFFER_UID=$(kubectl get offer e2e-offer-draft -o jsonpath='{.metadata.uid}')
+              if sh verify-plan.sh "$OFFER_UID" "E2E Draft Offer"; then
+                echo "Draft Offer incorrectly synced to OpenMeter!"
+                exit 1
+              fi
+              echo "Draft Offer correctly skipped OpenMeter sync."
+              exit 0

@@ -98,7 +98,7 @@ func valueNeedsProperty(a om.MeterAggregation) bool {
 // meterName is always carried verbatim in the meter's eventType, so event
 // routing never depends on the slug encoding.
 func MeterSlug(meterName string) string {
-	replacer := strings.NewReplacer(".", "_", "/", "_")
+	replacer := strings.NewReplacer(".", "_", "/", "_", "-", "_")
 	return replacer.Replace(strings.ToLower(meterName))
 }
 

@@ -1,0 +1,20 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-offer-draft
+  annotations:
+    kubernetes.io/display-name: "E2E Draft Offer"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+  servicePricings:
+    - name: usage-item
+      spec:
+        displayName: "Usage Item"
+        chargeType: Usage
+        metric: e2e-metric
+        pricingUnit: request
+        serviceRef: platform.miloapis.com
+        rates:
+          - flat: "1.00"

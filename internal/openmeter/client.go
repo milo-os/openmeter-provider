@@ -130,6 +130,17 @@ type Client interface {
 	// ULID), same caveat as UpsertBillingProfileCustomerOverride.
 	DeleteBillingProfileCustomerOverride(ctx context.Context, customerID CustomerID) error
 
+	// Plans and Features (see plan.go, feature.go).
+
+	// EnsureFeature creates a feature if it does not exist.
+	EnsureFeature(ctx context.Context, desired DesiredFeature) (om.Feature, error)
+	// EnsurePlan creates or updates a plan by Key.
+	EnsurePlan(ctx context.Context, desired DesiredPlan) (om.Plan, error)
+	// GetPlanByKey fetches a plan by key. Returns NotFound error when absent.
+	GetPlanByKey(ctx context.Context, key string) (om.Plan, error)
+	// DeletePlan removes a plan by id. NotFound is treated as success.
+	DeletePlan(ctx context.Context, id string) error
+
 	// Usage ingestion (see ingest.go).
 
 	// SubmitUsageBatch ingests already-validated CloudEvents into OpenMeter.

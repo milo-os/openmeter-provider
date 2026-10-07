@@ -1,0 +1,47 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-offer-sync
+  annotations:
+    kubernetes.io/display-name: "E2E Comprehensive Offer"
+spec:
+  launchStage: GA
+  chargeTypes:
+    - Usage
+    - Recurring
+    - OneTime
+  servicePricings:
+    - name: usage-item-multi-region
+      spec:
+        displayName: "Compute Usage"
+        chargeType: Usage
+        metric: e2e-metric
+        pricingUnit: vcpu
+        serviceRef: compute.miloapis.com
+        rates:
+          - match:
+              dimension: region
+              value: us-east
+            flat: "0.10"
+          - match:
+              dimension: region
+              value: eu-west
+            tiered:
+              - rate: "0.12"
+                upTo: "100"
+              - rate: "0.08"
+          - flat: "0.05" # Default catch-all
+    - name: recurring-base-fee
+      spec:
+        displayName: "Monthly Platform Fee"
+        chargeType: Recurring
+        amount: "50.00"
+        interval: monthly
+        serviceRef: platform.miloapis.com
+    - name: one-time-setup
+      spec:
+        displayName: "Setup Fee"
+        chargeType: OneTime
+        amount: "100.00"
+        trigger: BillingAccountActivation
+        serviceRef: platform.miloapis.com
