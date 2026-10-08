@@ -292,6 +292,18 @@ func (f *meterLinkFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 	logger := log.FromContext(ctx)
 	slug := openmeter.MeterSlug(md.Spec.MeterName)
 
+	// Archive the meter's features that no live plan references before the
+	// meter itself is deleted. OpenMeter rejects deleting a meter that still
+	// has active features (409 conflict), which would wedge this finalizer
+	// forever. Features still referenced by a live plan are deliberately left
+	// active and the subsequent DeleteMeter 409 keeps the finalizer in place —
+	// the MeterDefinition cannot go while another Offer's plan still depends
+	// on its meter, which is the correct dependency ordering.
+	if err := f.OpenMeterClient.ArchiveUnreferencedMeterFeatures(ctx, slug); err != nil {
+		logger.Error(err, "ArchiveUnreferencedMeterFeatures failure; finalizer blocks deletion")
+		return finalizer.Result{}, err
+	}
+
 	if err := f.OpenMeterClient.DeleteMeter(ctx, slug); err != nil {
 		if openmeter.IsTransient(err) {
 			logger.Info("DeleteMeter transient failure", "err", err.Error())
