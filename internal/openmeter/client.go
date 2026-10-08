@@ -134,6 +134,22 @@ type Client interface {
 
 	// EnsureFeature creates a feature if it does not exist.
 	EnsureFeature(ctx context.Context, desired DesiredFeature) (om.Feature, error)
+	// ListFeatures returns every active (non-archived) feature, optionally
+	// filtered to the features bound to a single meter.
+	ListFeatures(ctx context.Context, meterSlug *string) ([]om.Feature, error)
+	// DeleteFeature archives the feature identified by id or key. OpenMeter
+	// has no hard feature delete in this API generation — DELETE sets
+	// archivedAt. NotFound is treated as success.
+	DeleteFeature(ctx context.Context, idOrKey string) error
+	// ArchiveFeaturesIfUnreferenced archives each member of candidateKeys
+	// that no live plan references. Features still referenced by a plan are
+	// left active.
+	ArchiveFeaturesIfUnreferenced(ctx context.Context, candidateKeys []string) error
+	// ArchiveUnreferencedMeterFeatures archives every active feature bound to
+	// meterSlug that no live plan references. Used by the MeterDefinition
+	// finalizer so the meter can be deleted (OpenMeter rejects deleting a
+	// meter with active features).
+	ArchiveUnreferencedMeterFeatures(ctx context.Context, meterSlug string) error
 	// EnsurePlan creates or updates a plan by Key.
 	EnsurePlan(ctx context.Context, desired DesiredPlan) (om.Plan, error)
 	// GetPlanByKey fetches a plan by key. Returns NotFound error when absent.
