@@ -1,0 +1,59 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: offer-slug-mismatch
+spec:
+  description: |
+    Regression guard for F1: an Offer whose usage pricing references a
+    reverse-DNS meterName (metrics.miloapis.com/cpu-usage) while the
+    MeterDefinition's metadata.name differs (cpu-usage-meter). The reconciler
+    must derive the meter slug from spec.meterName; a regression deriving it
+    from metadata.name produces feature keys/metereSlug pointing at a
+    non-existent meter and the Offer never converges.
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-slug
+              status:
+                phase: Running
+
+    - name: GA Offer on reverse-DNS meterName converges
+      description: |
+        Create the MeterDefinition and GA Offer. Confirm the finalizer is
+        attached and the plan converges with feature keys derived from
+        spec.meterName.
+      try:
+        - apply:
+            file: meter.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: cpu-usage-meter
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - apply:
+            file: offer.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-slug-mismatch
+                (finalizers[?@ == 'openmeter.miloapis.com/product-plan']): ['openmeter.miloapis.com/product-plan']
+        - script:
+            timeout: 45s
+            content: |
+              OFFER_UID=$(kubectl get offer e2e-slug-mismatch -o jsonpath='{.metadata.uid}')
+              sh verify.sh "$OFFER_UID"
