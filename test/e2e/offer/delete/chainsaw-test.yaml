@@ -1,0 +1,68 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: offer-delete-convergence
+spec:
+  description: |
+    End-to-end exercise of the finalizer release + plan deletion path.
+    Creates a GA Offer, verifies the OpenMeter plan converges, then deletes
+    the Offer and verifies (a) the OpenMeter plan is removed (no orphaned live
+    plan) and (b) the Offer object fully disappears (finalizer released — no
+    wedged deletion).
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-del
+              status:
+                phase: Running
+
+    - name: GA Offer converges to OpenMeter Plan
+      description: Create MeterDefinition + GA Offer, confirm finalizer, plan present.
+      try:
+        - apply:
+            file: meter.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: del-metric
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - apply:
+            file: offer.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-offer-delete
+                (finalizers[?@ == 'openmeter.miloapis.com/product-plan']): ['openmeter.miloapis.com/product-plan']
+        - script:
+            timeout: 45s
+            content: |
+              OFFER_UID=$(kubectl get offer e2e-offer-delete -o jsonpath='{.metadata.uid}')
+              sh verify.sh "$OFFER_UID" present
+
+    - name: Delete converges — plan removed and finalizer released
+      description: |
+        Delete the GA Offer. The reconciler must look up the plan by key (UID),
+        delete it in OpenMeter, then remove the finalizer so the object
+        disappears. Verify both the plan is gone and the object is gone.
+      try:
+        - script:
+            timeout: 60s
+            content: |
+              OFFER_UID=$(kubectl get offer e2e-offer-delete -o jsonpath='{.metadata.uid}')
+              kubectl delete offer e2e-offer-delete
+              sh verify.sh "$OFFER_UID" absent

@@ -1,0 +1,18 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: del-metric
+spec:
+  meterName: del-metric
+  phase: Published
+  displayName: "Delete E2E Metric"
+  measurement:
+    aggregation: Sum
+    unit: count
+    dimensions:
+      - region
+  billing:
+    consumedUnit: count
+    pricingUnit: count
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource

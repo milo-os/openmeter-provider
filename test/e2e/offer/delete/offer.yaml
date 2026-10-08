@@ -1,0 +1,31 @@
+# GA Offer used for the delete-convergence suite. It is created, verified to
+# sync, then deleted; the suite asserts the OpenMeter plan is removed and the
+# finalizer releases the object.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-offer-delete
+  annotations:
+    kubernetes.io/display-name: "E2E Delete Offer"
+spec:
+  launchStage: GA
+  chargeTypes:
+    - Usage
+    - Recurring
+  servicePricings:
+    - name: delete-usage
+      spec:
+        displayName: "Delete Usage"
+        chargeType: Usage
+        metric: del-metric
+        pricingUnit: vcpu
+        serviceRef: compute.miloapis.com
+        rates:
+          - flat: "0.05"
+    - name: delete-recurring
+      spec:
+        displayName: "Delete Recurring"
+        chargeType: Recurring
+        amount: "20.00"
+        interval: monthly
+        serviceRef: platform.miloapis.com
