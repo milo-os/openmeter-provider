@@ -1,0 +1,19 @@
+# Usage pricing on the reverse-DNS meterName (metrics.miloapis.com/cpu-usage),
+# whose MeterDefinition's metadata.name differs (cpu-usage-meter).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: usage-item-1
+spec:
+  displayName: "CPU Usage"
+  chargeType: Usage
+  currency: USD
+  metric: metrics.miloapis.com/cpu-usage
+  pricingUnit: vcpu
+  serviceRef: compute.miloapis.com
+  rates:
+    - match:
+        dimension: region
+        value: us-east
+      flat: "0.10"
+    - flat: "0.05" # Catch-all: usage outside us-east

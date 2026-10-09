@@ -4,11 +4,14 @@ metadata:
   name: offer-delete-convergence
 spec:
   description: |
-    End-to-end exercise of the finalizer release + plan deletion path.
-    Creates a GA Offer, verifies the OpenMeter plan converges, then deletes
-    the Offer and verifies (a) the OpenMeter plan is removed (no orphaned live
-    plan) and (b) the Offer object fully disappears (finalizer released — no
-    wedged deletion).
+    End-to-end exercise of the finalizer release path. A GA Offer (published
+    through billing's flow, simulated by ../publish.sh) is synced
+    and renamed (so its plan has an archived v1 and an active v2), then
+    deleted. Every version must be deleted — the active one archived first,
+    since OpenMeter refuses to delete an active plan — the Offer's features
+    must be archived, and the Offer must disappear. Finally the
+    MeterDefinition is deleted, which only succeeds once no active feature
+    remains on its meter.
   namespace: openmeter-system
   steps:
     - name: start the OpenMeter query pod
@@ -25,8 +28,7 @@ spec:
               status:
                 phase: Running
 
-    - name: GA Offer converges to OpenMeter Plan
-      description: Create MeterDefinition + GA Offer, confirm finalizer, plan present.
+    - name: GA Offer converges and is re-versioned
       try:
         - apply:
             file: meter.yaml
@@ -39,30 +41,50 @@ spec:
                 name: del-metric
                 (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
         - apply:
+            file: servicepricings.yaml
+        - apply:
             file: offer.yaml
+        - script:
+            timeout: 15s
+            content: bash ../publish.sh e2e-offer-delete
         - assert:
-            timeout: 20s
+            timeout: 30s
             resource:
               apiVersion: billing.miloapis.com/v1alpha1
               kind: Offer
               metadata:
                 name: e2e-offer-delete
                 (finalizers[?@ == 'openmeter.miloapis.com/product-plan']): ['openmeter.miloapis.com/product-plan']
-        - script:
-            timeout: 45s
-            content: |
-              OFFER_UID=$(kubectl get offer e2e-offer-delete -o jsonpath='{.metadata.uid}')
-              sh verify.sh "$OFFER_UID" present
-
-    - name: Delete converges — plan removed and finalizer released
-      description: |
-        Delete the GA Offer. The reconciler must look up the plan by key (UID),
-        delete it in OpenMeter, then remove the finalizer so the object
-        disappears. Verify both the plan is gone and the object is gone.
-      try:
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
         - script:
             timeout: 60s
             content: |
               OFFER_UID=$(kubectl get offer e2e-offer-delete -o jsonpath='{.metadata.uid}')
-              kubectl delete offer e2e-offer-delete
-              sh verify.sh "$OFFER_UID" absent
+              kubectl annotate offer e2e-offer-delete kubernetes.io/display-name="E2E Delete Offer v2" --overwrite
+              bash verify.sh "$OFFER_UID" present
+
+    - name: Delete converges — plan versions removed, features archived, finalizer released
+      try:
+        - script:
+            timeout: 90s
+            content: |
+              OFFER_UID=$(kubectl get offer e2e-offer-delete -o jsonpath='{.metadata.uid}')
+              kubectl delete offer e2e-offer-delete --wait=false
+              bash verify.sh "$OFFER_UID" absent
+
+    - name: MeterDefinition deletes once its features are archived
+      try:
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              name: del-metric
+        - error:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: del-metric

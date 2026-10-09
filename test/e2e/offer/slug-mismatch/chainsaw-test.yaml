@@ -8,7 +8,7 @@ spec:
     reverse-DNS meterName (metrics.miloapis.com/cpu-usage) while the
     MeterDefinition's metadata.name differs (cpu-usage-meter). The reconciler
     must derive the meter slug from spec.meterName; a regression deriving it
-    from metadata.name produces feature keys/metereSlug pointing at a
+    from metadata.name produces feature keys/meterSlug pointing at a
     non-existent meter and the Offer never converges.
   namespace: openmeter-system
   steps:
@@ -43,7 +43,12 @@ spec:
                 name: cpu-usage-meter
                 (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
         - apply:
+            file: servicepricings.yaml
+        - apply:
             file: offer.yaml
+        - script:
+            timeout: 15s
+            content: bash ../publish.sh e2e-slug-mismatch
         - assert:
             timeout: 20s
             resource:
@@ -56,4 +61,4 @@ spec:
             timeout: 45s
             content: |
               OFFER_UID=$(kubectl get offer e2e-slug-mismatch -o jsonpath='{.metadata.uid}')
-              sh verify.sh "$OFFER_UID"
+              bash verify.sh "$OFFER_UID"

@@ -2,6 +2,7 @@
 # (metrics.miloapis.com/cpu-usage) while the MeterDefinition's metadata.name is
 # different (cpu-usage-meter). This exercises the F1 regression guard: the
 # reconciler must map the metric to the slug derived from spec.meterName.
+# Authored as Draft with refs; the suite publishes it with ../publish.sh.
 apiVersion: billing.miloapis.com/v1alpha1
 kind: Offer
 metadata:
@@ -9,20 +10,9 @@ metadata:
   annotations:
     kubernetes.io/display-name: "E2E Slug Mismatch Offer"
 spec:
-  launchStage: GA
+  launchStage: Draft
   chargeTypes:
     - Usage
-  servicePricings:
+  servicePricingRefs:
     - name: usage-item-1
-      spec:
-        displayName: "CPU Usage"
-        chargeType: Usage
-        metric: metrics.miloapis.com/cpu-usage
-        pricingUnit: vcpu
-        serviceRef: compute.miloapis.com
-        rates:
-          - match:
-              dimension: region
-              value: us-east
-            flat: "0.10"
-          - flat: "0.05" # Default catch-all
+      namespace: openmeter-system

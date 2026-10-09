@@ -1,139 +1,64 @@
 #!/bin/bash
+# Verifies the GA Offer in offer.yaml converged to a published OpenMeter plan
+# carrying every pricing shape, with usage features that partition the
+# meter's usage (no double billing between matched rates and the catch-all).
+#
+# Usage: verify-comprehensive.sh <offer-uid> <want-plan-name>
 set -euo pipefail
+QUERY_POD=openmeter-query
+. ../lib.sh
 
-offer_key="${1//-/_}"
+key=$(plan_key "$1")
 want_name="$2"
 
-url="http://openmeter-api.openmeter-system.svc.cluster.local/api/v1/plans?key=${offer_key}"
-feature_url="http://openmeter-api.openmeter-system.svc.cluster.local/api/v1/features"
-
-echo "Waiting for plan ${offer_key} to converge..."
-
-# Wait for plan to exist
-for i in $(seq 1 15); do
-  body=$(kubectl exec -n openmeter-system openmeter-query -- wget -q -O - "$url" 2>/dev/null || true)
-  
-  # Ensure valid JSON and get item count
-  count=$(echo "$body" | jq -r '.items | length' 2>/dev/null || echo "0")
-  if [ "$count" -gt 0 ]; then
-    break
-  fi
-  sleep 2
-done
-
-if [ "$count" -eq 0 ]; then
-  echo "Plan not found."
-  echo "Last response: $body"
-  exit 1
-fi
-
-echo "Plan found. Validating state..."
-plan=$(echo "$body" | jq -r '.items[0]')
-
-# Validate Plan Name
-plan_name=$(echo "$plan" | jq -r '.name')
-if [ "$plan_name" != "$want_name" ]; then
-  echo "ERROR: Plan name expected '$want_name', got '$plan_name'"
-  exit 1
-fi
-
-# Validate Phases (should have 1 phase)
-phases_count=$(echo "$plan" | jq -r '.phases | length')
-if [ "$phases_count" -ne 1 ]; then
-  echo "ERROR: Expected 1 phase, got $phases_count"
-  exit 1
-fi
-
-phase=$(echo "$plan" | jq -r '.phases[0]')
-ratecards_count=$(echo "$phase" | jq -r '.rateCards | length')
-# usage-item-multi-region has 3 rates (us-east flat, eu-west tiered, default flat) -> 3 rate cards
-# recurring-base-fee has 1 -> 1 rate card
-# one-time-setup has 1 -> 1 rate card
-# Total: 5 rate cards
-if [ "$ratecards_count" -ne 5 ]; then
-  echo "ERROR: Expected 5 rate cards, got $ratecards_count"
-  exit 1
-fi
-
-# Fetch features to validate advanced filters
-echo "Validating Features..."
-features_body=$(kubectl exec -n openmeter-system openmeter-query -- wget -q -O - "$feature_url" 2>/dev/null || true)
-
-function validate_feature() {
-  local key=$1
-  local dim_val=$2 # Expected value for 'region'
-  
-  feature=$(echo "$features_body" | jq -r ".[] | select(.key == \"$key\")")
-  if [ -z "$feature" ]; then
-    echo "ERROR: Feature $key not found"
-    exit 1
-  fi
-  
-  if [ "$dim_val" != "default" ]; then
-    filter_val=$(echo "$feature" | jq -r '.advancedMeterGroupByFilters.region."$eq"')
-    if [ "$filter_val" != "$dim_val" ]; then
-      echo "ERROR: Feature $key expected region=$dim_val, got $filter_val"
-      exit 1
-    fi
-  else
-    has_filter=$(echo "$feature" | jq -r '.advancedMeterGroupByFilters | length')
-    if [ "$has_filter" -gt 0 ]; then
-      echo "ERROR: Feature $key expected no filters, got filters"
-      exit 1
-    fi
-  fi
+has_named_active_plan() {
+  plan=$(active_plan "$key")
+  [ -n "$plan" ] && [ "$(echo "$plan" | jq -r '.name')" = "$want_name" ]
 }
+echo "Waiting for active plan ${key} named '${want_name}'..."
+retry 15 has_named_active_plan || fail "no active plan ${key} named '${want_name}'" "$(plan_versions "$key")"
 
-validate_feature "e2e_metric_region_us_east" "us-east"
-validate_feature "e2e_metric_region_eu_west" "eu-west"
-validate_feature "e2e_metric_default" "default"
+# A draft plan cannot be subscribed to: it must be published.
+expect_jq "$plan" '.status == "active" and .version == 1' "plan must be published as version 1"
+expect_jq "$plan" '.metadata["openmeter.miloapis.com/spec-hash"] | length > 0' "plan must carry its spec hash"
+expect_jq "$plan" '.phases | length == 1' "expected 1 phase"
+expect_jq "$plan" '.phases[0].rateCards | length == 5' "expected 5 rate cards (3 usage, 2 flat)"
 
+echo "Validating usage rate cards and features..."
+cards=$(usage_cards "$plan" | jq -s -c '.')
+expect_jq "$cards" 'length == 3' "expected 3 usage rate cards"
+expect_jq "$cards" 'all(.feature != null)' "every usage rate card must reference an existing feature"
+expect_jq "$cards" 'all(.feature.meterSlug == "e2e_metric")' "features must be bound to meter e2e_metric"
+expect_jq "$cards" 'all(.key == .featureKey and .feature.key == .featureKey)' "rate card key must equal its feature key"
+expect_jq "$cards" 'all(.billingCadence == "P1M")' "usage cards must bill monthly"
+expect_jq "$cards" 'all(.metadata["miloapis.com/pricing-unit"] == "vcpu")' "usage cards must carry the pricing unit"
 
-echo "Validating RateCards..."
+us=$(echo "$cards" | jq -c '.[] | select(.feature.advancedMeterGroupByFilters.region["$eq"] == "us-east")')
+[ -n "$us" ] || fail "no usage card filtered on region=us-east" "$cards"
+expect_jq "$us" '.price.type == "unit" and (.price.amount | tonumber) == 0.1' "us-east must be a 0.10 unit price"
 
-function get_ratecard() {
-  local key_suffix=$1
-  echo "$phase" | jq -r ".rateCards[] | select(.key == \"$key_suffix\")"
-}
+eu=$(echo "$cards" | jq -c '.[] | select(.feature.advancedMeterGroupByFilters.region["$eq"] == "eu-west")')
+[ -n "$eu" ] || fail "no usage card filtered on region=eu-west" "$cards"
+expect_jq "$eu" '.price.type == "tiered" and .price.mode == "graduated"' "eu-west must be graduated tiers"
+expect_jq "$eu" '(.price.tiers[0].upToAmount | tonumber) == 100 and (.price.tiers[0].unitPrice.amount | tonumber) == 0.12' "eu-west tier 0"
+expect_jq "$eu" '.price.tiers[1].upToAmount == null and (.price.tiers[1].unitPrice.amount | tonumber) == 0.08' "eu-west tier 1 must be open-ended"
 
-# 1. us-east flat fee
-rc_us=$(get_ratecard "e2e_metric_region_us_east")
-if [ "$(echo "$rc_us" | jq -r '.type')" != "usage_based" ]; then echo "ERROR us-east type"; exit 1; fi
-if [ "$(echo "$rc_us" | jq -r '.featureKey')" != "e2e_metric_region_us_east" ]; then echo "ERROR us-east feature"; exit 1; fi
-if [ "$(echo "$rc_us" | jq -r '.price.type')" != "unit" ]; then echo "ERROR us-east price type"; exit 1; fi
-if [ "$(echo "$rc_us" | jq -r '.price.amount')" != "0.10" ] && [ "$(echo "$rc_us" | jq -r '.price.amount')" != "0.1" ]; then echo "ERROR us-east amount: $(echo "$rc_us" | jq -r '.price.amount')"; exit 1; fi
-if [ "$(echo "$rc_us" | jq -r '.metadata["miloapis.com/pricing-unit"]')" != "vcpu" ]; then echo "ERROR metadata unit"; exit 1; fi
+# The catch-all must EXCLUDE the matched regions; an unfiltered catch-all
+# would bill us-east and eu-west usage a second time.
+catch=$(echo "$cards" | jq -c '.[] | select(.feature.advancedMeterGroupByFilters.region["$nin"] != null)')
+[ -n "$catch" ] || fail "catch-all rate card must filter region \$nin the matched values" "$cards"
+expect_jq "$catch" '(.feature.advancedMeterGroupByFilters.region["$nin"] | sort) == ["eu-west", "us-east"]' "catch-all must exclude exactly eu-west and us-east"
+expect_jq "$catch" '(.price.amount | tonumber) == 0.05' "catch-all must be a 0.05 unit price"
 
-# 2. eu-west tiered
-rc_eu=$(get_ratecard "e2e_metric_region_eu_west")
-if [ "$(echo "$rc_eu" | jq -r '.price.type')" != "tiered" ]; then echo "ERROR eu-west price type"; exit 1; fi
-if [ "$(echo "$rc_eu" | jq -r '.price.mode')" != "graduated" ]; then echo "ERROR eu-west tier mode"; exit 1; fi
-tier0_upto=$(echo "$rc_eu" | jq -r '.price.tiers[0].upToAmount')
-tier0_rate=$(echo "$rc_eu" | jq -r '.price.tiers[0].unitPrice.amount')
-tier1_upto=$(echo "$rc_eu" | jq -r '.price.tiers[1].upToAmount')
-tier1_rate=$(echo "$rc_eu" | jq -r '.price.tiers[1].unitPrice.amount')
+echo "Validating flat-fee rate cards..."
+rec=$(flat_card "$plan" recurring-base-fee)
+[ -n "$rec" ] || fail "recurring-base-fee rate card missing" "$plan"
+expect_jq "$rec" '.billingCadence == "P1M" and (.price.amount | tonumber) == 50' "recurring fee must be 50.00 monthly"
+expect_jq "$rec" '.metadata["miloapis.com/service-ref"] == "platform.miloapis.com"' "recurring fee service-ref"
 
-if [ "$tier0_upto" != "100" ]; then echo "ERROR eu-west tier0 upto"; exit 1; fi
-if [ "$tier0_rate" != "0.12" ] && [ "$tier0_rate" != "0.12" ]; then echo "ERROR eu-west tier0 rate: $tier0_rate"; exit 1; fi
-if [ "$tier1_upto" != "null" ]; then echo "ERROR eu-west tier1 upto"; exit 1; fi
-if [ "$tier1_rate" != "0.08" ] && [ "$tier1_rate" != "0.08" ]; then echo "ERROR eu-west tier1 rate: $tier1_rate"; exit 1; fi
+one=$(flat_card "$plan" one-time-setup)
+[ -n "$one" ] || fail "one-time-setup rate card missing" "$plan"
+expect_jq "$one" '.billingCadence == null and (.price.amount | tonumber) == 100' "one-time fee must be 100.00 with no cadence"
+expect_jq "$one" '.metadata["miloapis.com/trigger"] == "BillingAccountActivation"' "one-time fee trigger"
 
-# 3. default flat fee
-rc_def=$(get_ratecard "e2e_metric_default")
-if [ "$(echo "$rc_def" | jq -r '.price.amount')" != "0.05" ] && [ "$(echo "$rc_def" | jq -r '.price.amount')" != "0.05" ]; then echo "ERROR default amount: $(echo "$rc_def" | jq -r '.price.amount')"; exit 1; fi
-
-# 4. recurring fee
-rc_rec=$(get_ratecard "recurring_base_fee")
-if [ "$(echo "$rc_rec" | jq -r '.type')" != "flat_fee" ]; then echo "ERROR recurring type"; exit 1; fi
-if [ "$(echo "$rc_rec" | jq -r '.billingCadence')" != "P1M" ]; then echo "ERROR recurring cadence"; exit 1; fi
-if [ "$(echo "$rc_rec" | jq -r '.price.amount')" != "50.00" ] && [ "$(echo "$rc_rec" | jq -r '.price.amount')" != "50" ]; then echo "ERROR recurring amount: $(echo "$rc_rec" | jq -r '.price.amount')"; exit 1; fi
-if [ "$(echo "$rc_rec" | jq -r '.metadata["miloapis.com/service-ref"]')" != "platform.miloapis.com" ]; then echo "ERROR recurring meta"; exit 1; fi
-
-# 5. one-time fee
-rc_one=$(get_ratecard "one_time_setup")
-if [ "$(echo "$rc_one" | jq -r '.billingCadence')" != "null" ]; then echo "ERROR one-time cadence"; exit 1; fi
-if [ "$(echo "$rc_one" | jq -r '.price.amount')" != "100.00" ] && [ "$(echo "$rc_one" | jq -r '.price.amount')" != "100" ]; then echo "ERROR one-time amount: $(echo "$rc_one" | jq -r '.price.amount')"; exit 1; fi
-if [ "$(echo "$rc_one" | jq -r '.metadata["miloapis.com/trigger"]')" != "BillingAccountActivation" ]; then echo "ERROR one-time trigger"; exit 1; fi
-
-echo "All OpenMeter validations passed successfully!"
-exit 0
+echo "All OpenMeter validations passed."

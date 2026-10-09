@@ -1,0 +1,25 @@
+# Usage rates matching on two different dimensions. An event with
+# region=us-east AND tier=premium satisfies both rates, so OpenMeter would
+# bill it twice (each rate card's feature is evaluated independently).
+# Billing currently accepts this shape (see BILLING_TODO.md, item 1); the
+# provider must refuse to sync it rather than double-bill.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: overlapping-usage
+spec:
+  displayName: "Overlapping Usage"
+  chargeType: Usage
+  currency: USD
+  metric: invalid-metric
+  pricingUnit: request
+  serviceRef: compute.miloapis.com
+  rates:
+    - match:
+        dimension: region
+        value: us-east
+      flat: "0.10"
+    - match:
+        dimension: tier
+        value: premium
+      flat: "0.20"

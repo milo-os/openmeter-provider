@@ -2,65 +2,68 @@
 # Delete-convergence verification.
 #
 # Usage:
-#   verify.sh <offer-key> <mode>
-#
-#   mode=present  : wait for the OpenMeter plan identified by <offer-key> to
-#                   exist (create-convergence check).
-#   mode=absent   : wait for the plan to be absent from OpenMeter AND for the
-#                   Offer object to be fully gone from Kubernetes (finalizer
-#                   released / deletion completed). This is the safety property:
-#                   no live plan may be orphaned, and no finalizer may wedge the
-#                   object.
+#   verify.sh <offer-uid> present
+#       Wait for the plan to have two versions — v1 archived, v2 active —
+#       and its usage feature to be active.
+#   verify.sh <offer-uid> absent
+#       Wait for every plan version to be deleted, every feature on the
+#       Offer's meter to be archived, and the Offer object to be gone
+#       (finalizer released). Archiving features is what lets the meter be
+#       deleted later: OpenMeter refuses to delete a meter with active
+#       features.
 set -euo pipefail
+QUERY_POD=openmeter-query-del
+. ../lib.sh
 
-offer_key="${1//-/_}"
+key=$(plan_key "$1")
 mode="$2"
-url="http://openmeter-api.openmeter-system.svc.cluster.local/api/v1/plans?key=${offer_key}"
+meter_slug="del_metric"
 
-if [ "$mode" = "present" ]; then
-  echo "Waiting for plan ${offer_key} to converge..."
-  for i in $(seq 1 20); do
-    body=$(kubectl exec -n openmeter-system openmeter-query-del -- wget -q -O - "$url" 2>/dev/null || true)
-    count=$(echo "$body" | jq -r '.items | length' 2>/dev/null || echo "0")
-    [ "$count" -gt 0 ] && break
-    sleep 2
-  done
-  if [ "$count" -gt 0 ]; then
-    echo "Plan ${offer_key} present."
-    exit 0
-  fi
-  echo "ERROR: plan ${offer_key} did not converge."
-  echo "Last response: $body"
-  exit 1
+active_meter_features() {
+  om_get "/features?meterSlug=${meter_slug}" | jq -c '.'
+}
 
-elif [ "$mode" = "absent" ]; then
-  echo "Waiting for plan ${offer_key} to be deleted from OpenMeter..."
-  for i in $(seq 1 20); do
-    body=$(kubectl exec -n openmeter-system openmeter-query-del -- wget -q -O - "$url" 2>/dev/null || true)
-    count=$(echo "$body" | jq -r '.items | length' 2>/dev/null || echo "0")
-    [ "$count" -eq 0 ] && break
-    sleep 2
-  done
-  if [ "$count" -ne 0 ]; then
-    echo "ERROR: plan ${offer_key} still exists after Offer deletion (unsync risk!)."
-    echo "Response: $body"
-    exit 1
-  fi
+case "$mode" in
+present)
+  two_versions() {
+    versions=$(plan_versions "$key")
+    [ "$(echo "$versions" | jq 'map(select(.status == "active")) | length')" -eq 1 ] &&
+      [ "$(echo "$versions" | jq 'length')" -eq 2 ]
+  }
+  echo "Waiting for plan ${key} to have an archived v1 and an active v2..."
+  retry 20 two_versions || fail "plan ${key} did not reach two versions" "$(plan_versions "$key")"
+  expect_jq "$versions" '(map(select(.version == 1))[0].status) == "archived"' "v1 must be archived"
+  features=$(active_meter_features)
+  expect_jq "$features" 'length == 1' "expected exactly one active feature on ${meter_slug}"
+  echo "Plan ${key} present with two versions."
+  ;;
 
-  echo "Waiting for Offer object to be fully deleted (finalizer released)..."
-  for i in $(seq 1 20); do
-    obj=$(kubectl get offer e2e-offer-delete -n openmeter-system -o json 2>/dev/null || true)
-    if [ -z "$obj" ]; then
-      echo "Offer object gone."
-      exit 0
-    fi
-    sleep 2
-  done
-  echo "ERROR: Offer e2e-offer-delete still present — finalizer likely wedged."
-  kubectl get offer e2e-offer-delete -n openmeter-system -o yaml || true
-  exit 1
+absent)
+  no_versions() {
+    [ "$(plan_versions "$key" | jq 'length')" -eq 0 ]
+  }
+  echo "Waiting for every version of plan ${key} to be deleted..."
+  retry 20 no_versions || fail "plan ${key} still has live versions (orphan risk)" "$(plan_versions "$key")"
 
-else
+  no_features() {
+    [ "$(active_meter_features | jq 'length')" -eq 0 ]
+  }
+  echo "Waiting for the Offer's features on ${meter_slug} to be archived..."
+  retry 10 no_features || fail "features on ${meter_slug} left active after Offer deletion" "$(active_meter_features)"
+
+  offer_gone() {
+    ! kubectl get offer e2e-offer-delete >/dev/null 2>&1
+  }
+  echo "Waiting for the Offer object to be fully deleted (finalizer released)..."
+  retry 20 offer_gone || {
+    kubectl get offer e2e-offer-delete -o yaml || true
+    fail "Offer e2e-offer-delete still present — finalizer likely wedged"
+  }
+  echo "Plan deleted, features archived, Offer gone."
+  ;;
+
+*)
   echo "verify.sh: unknown mode '$mode' (want present|absent)"
   exit 2
-fi
+  ;;
+esac

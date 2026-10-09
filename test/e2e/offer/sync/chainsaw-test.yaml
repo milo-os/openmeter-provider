@@ -4,7 +4,12 @@ metadata:
   name: offer-sync
 spec:
   description: |
-    Exercises OfferReconciler syncing a GA Offer to an OpenMeter Plan.
+    Exercises OfferReconciler through billing's real publish flow: a Draft
+    Offer referencing ServicePricings, the GA flip with an empty snapshot,
+    then the snapshot fill (simulated by ../publish.sh, since the billing
+    operator does not run in e2e). Covers every pricing shape, catch-all
+    exclusion, the status condition, re-versioning on a display-name change,
+    and that Draft Offers never sync.
   namespace: openmeter-system
   steps:
     - name: start the OpenMeter query pod
@@ -14,17 +19,14 @@ spec:
         - assert:
             timeout: 20s
             resource:
-               apiVersion: v1
-               kind: Pod
-               metadata:
-                 name: openmeter-query
-               status:
-                 phase: Running
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query
+              status:
+                phase: Running
 
-    - name: GA Offer converges to OpenMeter Plan
-      description: |
-        Create a MeterDefinition and a GA Offer. Confirm finalizer is attached.
-        Poll OpenMeter for the Plan by Key (UID) and confirm name.
+    - name: Draft Offer gets the finalizer but no plan
       try:
         - apply:
             file: meter.yaml
@@ -37,6 +39,8 @@ spec:
                 name: e2e-metric
                 (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
         - apply:
+            file: servicepricings.yaml
+        - apply:
             file: offer.yaml
         - assert:
             timeout: 20s
@@ -47,19 +51,74 @@ spec:
                 name: e2e-offer-sync
                 (finalizers[?@ == 'openmeter.miloapis.com/product-plan']): ['openmeter.miloapis.com/product-plan']
         - script:
-            timeout: 35s
-            # Key is the UID of the offer. Since we don't know it, we extract it using a bash script.
-            # But wait, in chainsaw we can extract the UID and pass it to the script.
-            # Alternatively, we can let chainsaw do the assert logic if it supports executing and passing bindings.
-            # For simplicity, we can fetch the UID in the script.
+            timeout: 30s
             content: |
               OFFER_UID=$(kubectl get offer e2e-offer-sync -o jsonpath='{.metadata.uid}')
-              sh verify-comprehensive.sh "$OFFER_UID" "E2E Comprehensive Offer"
+              bash verify-absent.sh "$OFFER_UID"
 
-    - name: Draft Offer does not sync to OpenMeter
+    - name: GA without a snapshot waits for billing
       description: |
-        Create a Draft Offer. Confirm finalizer is attached (so publish works later),
-        but verify that no plan is created in OpenMeter.
+        Billing flips launchStage to GA before its controller fills the
+        snapshot. In that window the provider must not sync anything or
+        report a sync condition; it requeues until the snapshot appears.
+      try:
+        - script:
+            timeout: 15s
+            content: bash ../publish.sh e2e-offer-sync ga
+        - script:
+            timeout: 30s
+            content: |
+              OFFER_UID=$(kubectl get offer e2e-offer-sync -o jsonpath='{.metadata.uid}')
+              bash verify-absent.sh "$OFFER_UID"
+              conds=$(kubectl get offer e2e-offer-sync -o jsonpath='{.status.conditions[?(@.type=="OpenMeterPlanSynced")].type}')
+              if [ -n "$conds" ]; then
+                echo "GA Offer without a snapshot must not carry an OpenMeterPlanSynced condition"
+                exit 1
+              fi
+
+    - name: Snapshot fill converges to a published OpenMeter plan
+      description: |
+        Once the snapshot is written the Offer gets OpenMeterPlanSynced=True
+        and OpenMeter holds an active plan whose rate cards and features
+        match the snapshot.
+      try:
+        - script:
+            timeout: 15s
+            content: bash ../publish.sh e2e-offer-sync snapshot
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-offer-sync
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+                    reason: Synced
+        - script:
+            timeout: 45s
+            content: |
+              OFFER_UID=$(kubectl get offer e2e-offer-sync -o jsonpath='{.metadata.uid}')
+              bash verify-comprehensive.sh "$OFFER_UID" "E2E Comprehensive Offer"
+
+    - name: Display-name change publishes a new plan version
+      description: |
+        The display-name annotation is the only mutable field of a GA Offer.
+        Active OpenMeter plans cannot be edited, so the change must publish
+        version 2 and archive version 1 (existing subscriptions stay on it).
+      try:
+        - script:
+            timeout: 45s
+            content: |
+              OFFER_UID=$(kubectl get offer e2e-offer-sync -o jsonpath='{.metadata.uid}')
+              kubectl annotate offer e2e-offer-sync kubernetes.io/display-name="E2E Renamed Offer" --overwrite
+              bash verify-renamed.sh "$OFFER_UID" "E2E Renamed Offer"
+
+    - name: Unpublished Draft Offer never syncs
+      description: |
+        A Draft Offer gets the finalizer (so a later publish can clean up)
+        but no plan and no sync condition, however long it stays Draft.
       try:
         - apply:
             file: offer-draft.yaml
@@ -73,13 +132,11 @@ spec:
                 (finalizers[?@ == 'openmeter.miloapis.com/product-plan']): ['openmeter.miloapis.com/product-plan']
         - script:
             timeout: 30s
-            # Expecting it NOT to exist, verify-plan.sh returns 1 if not found.
-            # We can use ! sh verify-plan.sh or write a new script that expects it NOT to be there.
             content: |
               OFFER_UID=$(kubectl get offer e2e-offer-draft -o jsonpath='{.metadata.uid}')
-              if sh verify-plan.sh "$OFFER_UID" "E2E Draft Offer"; then
-                echo "Draft Offer incorrectly synced to OpenMeter!"
+              bash verify-absent.sh "$OFFER_UID"
+              conds=$(kubectl get offer e2e-offer-draft -o jsonpath='{.status.conditions[?(@.type=="OpenMeterPlanSynced")].type}')
+              if [ -n "$conds" ]; then
+                echo "Draft Offer must not carry an OpenMeterPlanSynced condition"
                 exit 1
               fi
-              echo "Draft Offer correctly skipped OpenMeter sync."
-              exit 0
