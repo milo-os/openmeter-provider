@@ -55,6 +55,7 @@ rules:
   - billing.miloapis.com
   resources:
   - invoices/status
+  - offers/status
   verbs:
   - get
   - patch

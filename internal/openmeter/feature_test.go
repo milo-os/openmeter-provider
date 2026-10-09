@@ -280,25 +280,154 @@ func TestArchiveUnreferencedMeterFeatures(t *testing.T) {
 	}
 }
 
-// TestEnsureFeature ensures the existing EnsureFeature path still works
-// against the fake server (create + idempotent get).
+// TestEnsureFeature covers create, idempotent reuse, and the immutability
+// guard against a key that already exists with a different definition.
 func TestEnsureFeature(t *testing.T) {
+	usEast := "us-east"
+	regionUSEast := map[string]om.FilterString{"region": {Eq: &usEast}}
+
 	t.Run("creates then idempotently returns", func(t *testing.T) {
 		c, f := newTestClient(t)
-		desired := DesiredFeature{Key: "m1_default", Name: "m1_default", MeterSlug: "m1"}
+		desired := DesiredFeature{
+			Key: "m1_region_us_east", Name: "m1 [region=us-east]", MeterSlug: "m1",
+			AdvancedMeterGroupByFilters: regionUSEast,
+			Metadata:                    map[string]string{"miloapis.com/meter-name": "m1"},
+		}
 		feat, err := c.EnsureFeature(context.Background(), desired)
 		if err != nil {
 			t.Fatalf("EnsureFeature create: %v", err)
 		}
-		if feat.Key != "m1_default" {
-			t.Fatalf("created feature Key = %q, want m1_default", feat.Key)
+		stored := f.features["m1_region_us_east"]
+		if stored.AdvancedMeterGroupByFilters == nil || *(*stored.AdvancedMeterGroupByFilters)["region"].Eq != "us-east" {
+			t.Fatalf("filters not sent on create: %+v", stored.AdvancedMeterGroupByFilters)
+		}
+		if stored.Metadata == nil || (*stored.Metadata)["miloapis.com/meter-name"] != "m1" {
+			t.Fatalf("metadata not sent on create: %+v", stored.Metadata)
 		}
 		again, err := c.EnsureFeature(context.Background(), desired)
 		if err != nil {
 			t.Fatalf("EnsureFeature second call: %v", err)
 		}
-		if f.features["m1_default"].Id != again.Id {
-			t.Fatalf("second EnsureFeature returned a different feature")
+		if again.Id != feat.Id || f.featureCreates != 1 {
+			t.Fatalf("second EnsureFeature created again (creates=%d)", f.featureCreates)
 		}
 	})
+
+	t.Run("existing key with different filters is permanent", func(t *testing.T) {
+		c, f := newTestClient(t)
+		existing := featureFixture("m1_region_us_east", "m1")
+		usDot := "us.east"
+		existing.AdvancedMeterGroupByFilters = &map[string]om.FilterString{"region": {Eq: &usDot}}
+		seedFeature(f, existing)
+
+		_, err := c.EnsureFeature(context.Background(), DesiredFeature{
+			Key: "m1_region_us_east", MeterSlug: "m1", AdvancedMeterGroupByFilters: regionUSEast,
+		})
+		if !IsPermanent(err) {
+			t.Fatalf("EnsureFeature err = %v, want permanent (feature would bill the wrong usage)", err)
+		}
+	})
+
+	t.Run("existing key on a different meter is permanent", func(t *testing.T) {
+		c, f := newTestClient(t)
+		seedFeature(f, featureFixture("shared_key", "m2"))
+		_, err := c.EnsureFeature(context.Background(), DesiredFeature{Key: "shared_key", MeterSlug: "m1"})
+		if !IsPermanent(err) {
+			t.Fatalf("EnsureFeature err = %v, want permanent", err)
+		}
+	})
+
+	t.Run("archived feature under the key is replaced", func(t *testing.T) {
+		c, f := newTestClient(t)
+		archived := featureFixture("m1_all", "m1")
+		now := time.Now().UTC()
+		archived.ArchivedAt = &now
+		seedFeature(f, archived)
+
+		feat, err := c.EnsureFeature(context.Background(), DesiredFeature{Key: "m1_all", MeterSlug: "m1"})
+		if err != nil {
+			t.Fatalf("EnsureFeature: %v", err)
+		}
+		if feat.ArchivedAt != nil || f.featureCreates != 1 {
+			t.Fatalf("archived feature reused (creates=%d)", f.featureCreates)
+		}
+	})
+
+	t.Run("missing key or meter is permanent", func(t *testing.T) {
+		c, _ := newTestClient(t)
+		if _, err := c.EnsureFeature(context.Background(), DesiredFeature{MeterSlug: "m1"}); !IsPermanent(err) {
+			t.Errorf("missing key err = %v, want permanent", err)
+		}
+		if _, err := c.EnsureFeature(context.Background(), DesiredFeature{Key: "k"}); !IsPermanent(err) {
+			t.Errorf("missing meter err = %v, want permanent", err)
+		}
+	})
+}
+
+func TestFiltersEqual(t *testing.T) {
+	a, b := "a", "b"
+	tests := []struct {
+		name string
+		x, y map[string]om.FilterString
+		want bool
+	}{
+		{"nil and empty", nil, map[string]om.FilterString{}, true},
+		{"same eq", map[string]om.FilterString{"d": {Eq: &a}}, map[string]om.FilterString{"d": {Eq: &a}}, true},
+		{"different eq", map[string]om.FilterString{"d": {Eq: &a}}, map[string]om.FilterString{"d": {Eq: &b}}, false},
+		{"different dimension", map[string]om.FilterString{"d": {Eq: &a}}, map[string]om.FilterString{"e": {Eq: &a}}, false},
+		{"nin order irrelevant",
+			map[string]om.FilterString{"d": {Nin: &[]string{"a", "b"}}},
+			map[string]om.FilterString{"d": {Nin: &[]string{"b", "a"}}}, true},
+		{"nin vs eq", map[string]om.FilterString{"d": {Nin: &[]string{"a"}}}, map[string]om.FilterString{"d": {Eq: &a}}, false},
+		{"filter vs none", map[string]om.FilterString{"d": {Eq: &a}}, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FiltersEqual(tt.x, tt.y); got != tt.want {
+				t.Errorf("FiltersEqual = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestListFeatures_WalksAllPages: more features than one page must all be
+// returned, or meter deletion would leave active features behind.
+func TestListFeatures_WalksAllPages(t *testing.T) {
+	c, f := newTestClient(t)
+	for i := 0; i < 250; i++ {
+		seedFeature(f, featureFixture("f"+strconv.Itoa(i), "m1"))
+	}
+	got, err := c.ListFeatures(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListFeatures: %v", err)
+	}
+	if len(got) != 250 {
+		t.Fatalf("ListFeatures = %d features, want 250", len(got))
+	}
+}
+
+// TestArchiveFeaturesIfUnreferenced_ArchivedPlanVersionsCountAsReferences:
+// subscriptions keep billing against an archived plan version, so its
+// features must survive; only deleted versions release them.
+func TestArchiveFeaturesIfUnreferenced_ArchivedPlanVersionsCountAsReferences(t *testing.T) {
+	c, f := newTestClient(t)
+	seedFeature(f, featureFixture("on_archived", "m1"))
+	seedFeature(f, featureFixture("on_deleted", "m1"))
+	archived := planFixture("p1", "k", usageRateCard("rc", "on_archived"))
+	archived.Status = om.PlanStatusArchived
+	f.plans["p1"] = archived
+	deleted := planFixture("p2", "k2", usageRateCard("rc", "on_deleted"))
+	now := time.Now().UTC()
+	deleted.DeletedAt = &now
+	f.plans["p2"] = deleted
+
+	if err := c.ArchiveFeaturesIfUnreferenced(context.Background(), []string{"on_archived", "on_deleted"}); err != nil {
+		t.Fatalf("ArchiveFeaturesIfUnreferenced: %v", err)
+	}
+	if got, _ := f.lookupFeature("on_archived"); got.ArchivedAt != nil {
+		t.Errorf("feature referenced by an archived plan version was archived")
+	}
+	if got, _ := f.lookupFeature("on_deleted"); got.ArchivedAt == nil {
+		t.Errorf("feature referenced only by a deleted plan was not archived")
+	}
 }

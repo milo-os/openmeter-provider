@@ -130,9 +130,12 @@ type Client interface {
 	// ULID), same caveat as UpsertBillingProfileCustomerOverride.
 	DeleteBillingProfileCustomerOverride(ctx context.Context, customerID CustomerID) error
 
-	// Plans and Features (see plan.go, feature.go).
+	// Features (see feature.go).
 
-	// EnsureFeature creates a feature if it does not exist.
+	// EnsureFeature creates the feature if absent. An existing active feature
+	// under the same key must already match desired (meter and group-by
+	// filters); features are immutable in OpenMeter, so a mismatch is a
+	// PermanentError rather than a silent reuse of the wrong definition.
 	EnsureFeature(ctx context.Context, desired DesiredFeature) (om.Feature, error)
 	// ListFeatures returns every active (non-archived) feature, optionally
 	// filtered to the features bound to a single meter.
@@ -142,20 +145,32 @@ type Client interface {
 	// archivedAt. NotFound is treated as success.
 	DeleteFeature(ctx context.Context, idOrKey string) error
 	// ArchiveFeaturesIfUnreferenced archives each member of candidateKeys
-	// that no live plan references. Features still referenced by a plan are
-	// left active.
+	// that no non-deleted plan version references. Features still referenced
+	// by a plan (including archived versions that may carry subscriptions)
+	// are left active.
 	ArchiveFeaturesIfUnreferenced(ctx context.Context, candidateKeys []string) error
 	// ArchiveUnreferencedMeterFeatures archives every active feature bound to
-	// meterSlug that no live plan references. Used by the MeterDefinition
-	// finalizer so the meter can be deleted (OpenMeter rejects deleting a
-	// meter with active features).
+	// meterSlug that no non-deleted plan version references. Used by the
+	// MeterDefinition finalizer so the meter can be deleted (OpenMeter rejects
+	// deleting a meter with active features).
 	ArchiveUnreferencedMeterFeatures(ctx context.Context, meterSlug string) error
-	// EnsurePlan creates or updates a plan by Key.
+
+	// Plans (see plan.go).
+
+	// EnsurePlan converges the plan identified by desired.Key to a published
+	// (active) version whose content matches desired. A matching active
+	// version is a no-op; a pending draft is updated and published; any
+	// other difference creates and publishes a new version, which makes
+	// OpenMeter archive the previous active one.
 	EnsurePlan(ctx context.Context, desired DesiredPlan) (om.Plan, error)
-	// GetPlanByKey fetches a plan by key. Returns NotFound error when absent.
-	GetPlanByKey(ctx context.Context, key string) (om.Plan, error)
-	// DeletePlan removes a plan by id. NotFound is treated as success.
-	DeletePlan(ctx context.Context, id string) error
+	// ListPlanVersions returns every version of the plan identified by key,
+	// ordered by ascending version. Deleted versions are included only when
+	// includeDeleted is set. An empty slice means no version exists.
+	ListPlanVersions(ctx context.Context, key string, includeDeleted bool) ([]om.Plan, error)
+	// DeletePlan deletes a single plan version, archiving it first when it
+	// is active (OpenMeter refuses to delete an active plan). Already-deleted
+	// versions and NotFound are treated as success.
+	DeletePlan(ctx context.Context, plan om.Plan) error
 
 	// Usage ingestion (see ingest.go).
 

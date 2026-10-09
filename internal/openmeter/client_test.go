@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,6 +44,12 @@ type fakeServer struct {
 	// plans is keyed by plan id. ListPlans filters to non-deleted plans,
 	// mirroring the real API's default.
 	plans map[string]om.Plan
+	// planSeq generates plan ids; planWrites counts every plan mutation
+	// (create, update, publish, archive, delete).
+	planSeq    int
+	planWrites int
+	// featureCreates counts feature POSTs.
+	featureCreates int
 
 	// statusOverride, when non-zero, short-circuits every request with that
 	// status code. Tests use it to inject wire-level failures (429s, 5xxs)
@@ -168,19 +175,22 @@ func (f *fakeServer) serveFeatures(w http.ResponseWriter, r *http.Request) bool 
 			w.WriteHeader(http.StatusBadRequest)
 			return true
 		}
-		if _, exists := f.features[body.Key]; exists {
+		now := time.Now().UTC()
+		if existing, exists := f.features[body.Key]; exists && existing.ArchivedAt == nil {
 			w.WriteHeader(http.StatusConflict)
 			return true
 		}
-		now := time.Now().UTC()
 		feat := om.Feature{
-			Id:        "id-" + body.Key,
-			Key:       body.Key,
-			Name:      body.Name,
-			MeterSlug: body.MeterSlug,
-			CreatedAt: now,
-			UpdatedAt: now,
+			Id:                          "id-" + body.Key,
+			Key:                         body.Key,
+			Name:                        body.Name,
+			MeterSlug:                   body.MeterSlug,
+			AdvancedMeterGroupByFilters: body.AdvancedMeterGroupByFilters,
+			Metadata:                    body.Metadata,
+			CreatedAt:                   now,
+			UpdatedAt:                   now,
 		}
+		f.featureCreates++
 		f.features[body.Key] = feat
 		f.featureByID[feat.Id] = feat.Key
 		if !f.emptyBodyOnWrite {
@@ -193,7 +203,8 @@ func (f *fakeServer) serveFeatures(w http.ResponseWriter, r *http.Request) bool 
 
 	case r.Method == http.MethodGet && !isCollection && strings.Trim(idOrKey, "/") != "":
 		feat, ok := f.lookupFeature(strings.TrimSuffix(idOrKey, "/"))
-		if !ok {
+		if !ok || feat.ArchivedAt != nil {
+			// The real GET excludes archived features.
 			w.WriteHeader(http.StatusNotFound)
 			return true
 		}
@@ -219,7 +230,21 @@ func (f *fakeServer) serveFeatures(w http.ResponseWriter, r *http.Request) bool 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(out)
+		// The real API answers with a bare array unless paging is
+		// requested, in which case it returns a paginated envelope.
+		if r.URL.Query().Get("page") == "" {
+			_ = json.NewEncoder(w).Encode(out)
+			return true
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+		page, pageSize := pageParams(r)
+		start, end := pageBounds(page, pageSize, len(out))
+		_ = json.NewEncoder(w).Encode(om.FeaturePaginatedResponse{
+			Items:      out[start:end],
+			Page:       page,
+			PageSize:   pageSize,
+			TotalCount: len(out),
+		})
 
 	case r.Method == http.MethodDelete && !isCollection && strings.Trim(idOrKey, "/") != "":
 		feat, ok := f.lookupFeature(strings.TrimSuffix(idOrKey, "/"))
@@ -238,62 +263,200 @@ func (f *fakeServer) serveFeatures(w http.ResponseWriter, r *http.Request) bool 
 	return true
 }
 
-// servePlans mirrors the plan routes used by the client: ListPlans (with
-// page-based pagination) and nothing else we exercise today. Plans are keyed
-// by id. GET /api/v1/plans returns a PlanPaginatedResponse over the
-// non-deleted plans, using page/pageSize with a default page size of 100 to
-// match the client's pagination loop (page*100 >= totalCount).
+// servePlans mirrors OpenMeter's plan lifecycle closely enough to exercise
+// the client's versioning logic:
+//
+//	GET    /api/v1/plans                  list (key, includeDeleted, paging)
+//	POST   /api/v1/plans                  create a draft; next version per key;
+//	                                      400 while a draft exists for the key
+//	PUT    /api/v1/plans/{id}             replace; draft/scheduled only
+//	POST   /api/v1/plans/{id}/publish     draft -> active; archives the
+//	                                      previous active version of the key
+//	POST   /api/v1/plans/{id}/archive     active -> archived
+//	DELETE /api/v1/plans/{id}             draft/archived/scheduled only
 func (f *fakeServer) servePlans(w http.ResponseWriter, r *http.Request) bool {
 	if !strings.HasPrefix(r.URL.Path, "/api/v1/plans") {
 		return false
 	}
-	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/plans" {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/plans"), "/")
+	parts := strings.Split(rest, "/")
+	writeJSON := func(status int, v any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(v)
+	}
+	badRequest := func(msg string) {
+		writeJSON(http.StatusBadRequest, map[string]string{"title": "Bad Request", "detail": msg})
+	}
+
+	switch {
+	case rest == "" && r.Method == http.MethodGet:
+		q := r.URL.Query()
+		keys := q["key"]
+		includeDeleted := q.Get("includeDeleted") == "true"
+		var all []om.Plan
+		for _, plan := range f.plans {
+			if plan.DeletedAt != nil && !includeDeleted {
+				continue
+			}
+			if len(keys) > 0 && !slices.Contains(keys, plan.Key) {
+				continue
+			}
+			all = append(all, plan)
+		}
+		// Stable order so pagination is consistent across page requests.
+		sort.Slice(all, func(i, j int) bool { return all[i].Id < all[j].Id })
+		page, pageSize := pageParams(r)
+		start, end := pageBounds(page, pageSize, len(all))
+		writeJSON(http.StatusOK, om.PlanPaginatedResponse{
+			Items:      all[start:end],
+			Page:       page,
+			PageSize:   pageSize,
+			TotalCount: len(all),
+		})
+
+	case rest == "" && r.Method == http.MethodPost:
+		var body om.PlanCreate
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			badRequest(err.Error())
+			return true
+		}
+		version := 1
+		for _, p := range f.plans {
+			if p.Key != body.Key {
+				continue
+			}
+			if p.DeletedAt == nil && p.Status == om.PlanStatusDraft {
+				badRequest("only a single draft version is allowed for Plan")
+				return true
+			}
+			if p.Version >= version {
+				version = p.Version + 1
+			}
+		}
+		f.planSeq++
+		f.planWrites++
+		now := time.Now().UTC()
+		plan := om.Plan{
+			Id:             "plan-" + strconv.Itoa(f.planSeq),
+			Key:            body.Key,
+			Name:           body.Name,
+			Description:    body.Description,
+			Currency:       body.Currency,
+			BillingCadence: body.BillingCadence,
+			Metadata:       body.Metadata,
+			Phases:         body.Phases,
+			Status:         om.PlanStatusDraft,
+			Version:        version,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}
+		f.plans[plan.Id] = plan
+		writeJSON(http.StatusCreated, plan)
+
+	case len(parts) == 1 && r.Method == http.MethodPut:
+		plan, ok := f.plans[parts[0]]
+		if !ok || plan.DeletedAt != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return true
+		}
+		if plan.Status != om.PlanStatusDraft && plan.Status != om.PlanStatusScheduled {
+			badRequest("only Plans in [draft scheduled] can be updated")
+			return true
+		}
+		var body om.PlanReplaceUpdate
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			badRequest(err.Error())
+			return true
+		}
+		f.planWrites++
+		plan.Name = body.Name
+		plan.Description = body.Description
+		plan.Metadata = body.Metadata
+		plan.Phases = body.Phases
+		plan.UpdatedAt = time.Now().UTC()
+		f.plans[plan.Id] = plan
+		writeJSON(http.StatusOK, plan)
+
+	case len(parts) == 2 && parts[1] == "publish" && r.Method == http.MethodPost:
+		plan, ok := f.plans[parts[0]]
+		if !ok || plan.DeletedAt != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return true
+		}
+		if plan.Status != om.PlanStatusDraft && plan.Status != om.PlanStatusScheduled {
+			badRequest("only Plans in [draft scheduled] can be published")
+			return true
+		}
+		now := time.Now().UTC()
+		for id, p := range f.plans {
+			if p.Key == plan.Key && p.DeletedAt == nil && p.Status == om.PlanStatusActive {
+				p.Status = om.PlanStatusArchived
+				p.EffectiveTo = &now
+				f.plans[id] = p
+			}
+		}
+		f.planWrites++
+		plan.Status = om.PlanStatusActive
+		plan.EffectiveFrom = &now
+		f.plans[plan.Id] = plan
+		writeJSON(http.StatusOK, plan)
+
+	case len(parts) == 2 && parts[1] == "archive" && r.Method == http.MethodPost:
+		plan, ok := f.plans[parts[0]]
+		if !ok || plan.DeletedAt != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return true
+		}
+		if plan.Status != om.PlanStatusActive {
+			badRequest("only Plans in [active] can be archived")
+			return true
+		}
+		f.planWrites++
+		now := time.Now().UTC()
+		plan.Status = om.PlanStatusArchived
+		plan.EffectiveTo = &now
+		f.plans[plan.Id] = plan
+		writeJSON(http.StatusOK, plan)
+
+	case len(parts) == 1 && r.Method == http.MethodDelete:
+		plan, ok := f.plans[parts[0]]
+		if !ok || plan.DeletedAt != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return true
+		}
+		if plan.Status == om.PlanStatusActive {
+			badRequest("only Plans in [archived scheduled draft] can be deleted, but it has active state")
+			return true
+		}
+		f.planWrites++
+		now := time.Now().UTC()
+		plan.DeletedAt = &now
+		f.plans[plan.Id] = plan
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
 		w.WriteHeader(http.StatusNotFound)
-		return true
 	}
-
-	page := 1
-	if p := r.URL.Query().Get("page"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil && v > 0 {
-			page = v
-		}
-	}
-	pageSize := 100
-	if ps := r.URL.Query().Get("pageSize"); ps != "" {
-		if v, err := strconv.Atoi(ps); err == nil && v > 0 {
-			pageSize = v
-		}
-	}
-
-	var all []om.Plan
-	for _, plan := range f.plans {
-		if plan.DeletedAt != nil {
-			continue
-		}
-		all = append(all, plan)
-	}
-	// Sort by id so pagination is stable across page requests. A real API
-	// pages over a consistent ordering; re-iterating the map on every request
-	// reshuffles plans between pages, so the client's page-walking test
-	// becomes flaky (a reference on the last page can be missed).
-	sort.Slice(all, func(i, j int) bool { return all[i].Id < all[j].Id })
-
-	start := (page - 1) * pageSize
-	if start > len(all) {
-		start = len(all)
-	}
-	end := start + pageSize
-	if end > len(all) {
-		end = len(all)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(om.PlanPaginatedResponse{
-		Items:      all[start:end],
-		Page:       page,
-		PageSize:   pageSize,
-		TotalCount: len(all),
-	})
 	return true
+}
+
+// pageParams reads page/pageSize query parameters with the real API's
+// defaults (page 1, 100 items).
+func pageParams(r *http.Request) (page, pageSize int) {
+	page, pageSize = 1, 100
+	if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 0 {
+		page = p
+	}
+	if ps, err := strconv.Atoi(r.URL.Query().Get("pageSize")); err == nil && ps > 0 {
+		pageSize = ps
+	}
+	return page, pageSize
+}
+
+// pageBounds returns the slice bounds of one page over n items.
+func pageBounds(page, pageSize, n int) (start, end int) {
+	start = min((page-1)*pageSize, n)
+	end = min(start+pageSize, n)
+	return start, end
 }

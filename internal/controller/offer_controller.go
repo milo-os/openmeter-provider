@@ -17,20 +17,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 
-	om "github.com/openmeterio/openmeter/api/client/go"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )
 
@@ -39,9 +42,28 @@ const (
 	offerControllerName  = "offer"
 
 	EventReasonSyncSkipped = "SyncSkipped"
+
+	// ConditionTypeOpenMeterPlanSynced reports whether the Offer's OpenMeter
+	// plan is published and matches the Offer. It is owned by this provider;
+	// the billing controller preserves foreign condition types.
+	ConditionTypeOpenMeterPlanSynced = "OpenMeterPlanSynced"
+
+	conditionReasonSynced         = "Synced"
+	conditionReasonMeterNotFound  = "MeterNotFound"
+	conditionReasonMeterNotSynced = "MeterNotSynced"
+	conditionReasonInvalidPricing = "InvalidPricing"
+	conditionReasonOpenMeterError = "OpenMeterError"
 )
 
-// OfferReconciler syncs GA Offers into OpenMeter Product Plans.
+// OfferReconciler syncs GA Offers into published OpenMeter plans.
+//
+// Each GA Offer owns one OpenMeter plan key (its UID). The plan content is a
+// pure function of the Offer snapshot and the MeterDefinitions it references
+// (see buildOfferMapping); EnsurePlan keeps exactly one published version
+// matching it, versioning the plan whenever the content changes (only the
+// display-name annotation can change on a GA Offer, but a provider upgrade
+// may change the mapping too). Usage features are created before the plan
+// that references them and garbage-collected after the plan is deleted.
 type OfferReconciler struct {
 	client.Client
 	OpenMeterClient openmeter.Client
@@ -50,15 +72,13 @@ type OfferReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=offers,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=billing.miloapis.com,resources=offers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=offers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=meterdefinitions,verbs=get;list;watch
 
 // Reconcile syncs a single Offer.
 func (r *OfferReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("offer", req.Name)
-
-	var result ctrl.Result
-	var reconcileErr error
 
 	var offer billingv1alpha1.Offer
 	if err := r.Get(ctx, req.NamespacedName, &offer); err != nil {
@@ -68,19 +88,17 @@ func (r *OfferReconciler) Reconcile(ctx context.Context, req reconcile.Request) 
 		return ctrl.Result{}, err
 	}
 
-	planKey := strings.ReplaceAll(string(offer.UID), "-", "_")
-	logger = logger.WithValues("uid", planKey, "launchStage", offer.Spec.LaunchStage)
+	planKey := planKeyForOffer(&offer)
+	logger = logger.WithValues("planKey", planKey, "launchStage", offer.Spec.LaunchStage)
 
 	if !offer.DeletionTimestamp.IsZero() {
-		result, reconcileErr = r.reconcileDelete(ctx, logger, &offer, planKey)
-		return result, reconcileErr
+		return r.reconcileDelete(ctx, logger, &offer, planKey)
 	}
 
 	if !controllerutil.ContainsFinalizer(&offer, ProductPlanFinalizer) {
 		controllerutil.AddFinalizer(&offer, ProductPlanFinalizer)
 		if err := r.Update(ctx, &offer); err != nil {
-			reconcileErr = fmt.Errorf("add finalizer: %w", err)
-			return ctrl.Result{}, reconcileErr
+			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -92,41 +110,162 @@ func (r *OfferReconciler) Reconcile(ctx context.Context, req reconcile.Request) 
 		return ctrl.Result{}, nil
 	}
 	if len(offer.Spec.ServicePricings) == 0 {
+		// The billing controller fills the snapshot asynchronously after
+		// launchStage flips to GA.
 		logger.Info("skipping sync: GA offer has empty servicePricings snapshot")
-		if r.Recorder != nil {
-			r.Recorder.Eventf(&offer, "Normal", EventReasonSyncSkipped,
-				"GA Offer has no servicePricings snapshot yet")
-		}
+		r.event(&offer, "Normal", EventReasonSyncSkipped, "GA Offer has no servicePricings snapshot yet")
 		return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
 	}
 
-	desired, err := r.desiredPlan(ctx, &offer)
+	return r.reconcileSync(ctx, logger, &offer)
+}
+
+// reconcileSync converges the Offer's features and published plan.
+func (r *OfferReconciler) reconcileSync(
+	ctx context.Context,
+	logger logr.Logger,
+	offer *billingv1alpha1.Offer,
+) (ctrl.Result, error) {
+	meters, err := r.meterIndex(ctx)
 	if err != nil {
-		logger.Error(err, "build DesiredPlan")
-		if r.Recorder != nil {
-			r.Recorder.Eventf(&offer, "Warning", EventReasonSyncFailed, "%v", err)
+		return ctrl.Result{}, err
+	}
+
+	mapping, err := buildOfferMapping(offer, meters)
+	if err != nil {
+		var invalid *invalidOfferError
+		switch {
+		case errors.Is(err, errMeterNotFound):
+			// The MeterDefinition watch requeues the Offer as soon as the
+			// meter appears; the timed requeue is a fallback.
+			logger.Info("waiting for MeterDefinition", "reason", err.Error())
+			return r.syncFailed(ctx, offer, conditionReasonMeterNotFound, err, transientRequeueAfter)
+		case errors.As(err, &invalid):
+			logger.Error(err, "offer cannot be represented in OpenMeter")
+			return r.syncFailed(ctx, offer, conditionReasonInvalidPricing, err, permanentRequeueAfter)
+		default:
+			logger.Error(err, "build OpenMeter mapping")
+			return r.syncFailed(ctx, offer, conditionReasonInvalidPricing, err, transientRequeueAfter)
 		}
-		return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
 	}
 
-	plan, err := r.OpenMeterClient.EnsurePlan(ctx, desired)
+	// Features can only be created on meters OpenMeter already has. The
+	// MeterDefinition controller creates them asynchronously, so check
+	// first: a feature create against a missing meter is a 4xx that would
+	// otherwise be backed off as permanent.
+	for _, slug := range mapping.MeterSlugs {
+		if _, err := r.OpenMeterClient.GetMeter(ctx, slug); err != nil {
+			if errors.Is(err, openmeter.ErrMeterNotFound) {
+				logger.Info("waiting for OpenMeter meter", "meterSlug", slug)
+				return r.syncFailed(ctx, offer, conditionReasonMeterNotSynced,
+					fmt.Errorf("OpenMeter meter %q does not exist yet", slug), transientRequeueAfter)
+			}
+			return r.openMeterFailed(ctx, logger, offer, fmt.Errorf("get meter %q: %w", slug, err))
+		}
+	}
+
+	for _, feature := range mapping.Features {
+		if _, err := r.OpenMeterClient.EnsureFeature(ctx, feature); err != nil {
+			return r.openMeterFailed(ctx, logger, offer, fmt.Errorf("ensure feature %q: %w", feature.Key, err))
+		}
+	}
+
+	plan, err := r.OpenMeterClient.EnsurePlan(ctx, mapping.Plan)
 	if err != nil {
-		return r.handleOpenMeterError(logger, &offer, err)
+		return r.openMeterFailed(ctx, logger, offer, fmt.Errorf("ensure plan: %w", err))
 	}
 
-	// Do not annotate the Offer after sync. GA Offers are immutable except
-	// for kubernetes.io/display-name, so writing openmeter.miloapis.com/product-plan-id
-	// is denied and the reconciler would retry forever. BillingEntitlement
-	// already requeues while GetProductPlan returns not found.
-
-	logger.Info("reconciled offer product plan", "planID", plan.Id, "items", len(desired.Phases))
-	if r.Recorder != nil {
-		r.Recorder.Eventf(&offer, "Normal", EventReasonSynced,
-			"OpenMeter product plan %s synced", plan.Id)
+	// The plan reference lives in the status condition, never in an
+	// annotation: GA Offers are immutable except for
+	// kubernetes.io/display-name, so a metadata write would be denied.
+	msg := fmt.Sprintf("OpenMeter plan %s version %d is %s", plan.Id, plan.Version, plan.Status)
+	changed, err := r.setSyncedCondition(ctx, offer, metav1.ConditionTrue, conditionReasonSynced, msg)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if changed {
+		logger.Info("reconciled offer plan", "planID", plan.Id, "version", plan.Version,
+			"rateCards", len(mapping.Plan.Phases[0].RateCards), "features", len(mapping.Features))
+		r.event(offer, "Normal", EventReasonSynced, msg)
 	}
 	return ctrl.Result{}, nil
 }
 
+// openMeterFailed classifies an OpenMeter error into a requeue schedule.
+func (r *OfferReconciler) openMeterFailed(
+	ctx context.Context,
+	logger logr.Logger,
+	offer *billingv1alpha1.Offer,
+	err error,
+) (ctrl.Result, error) {
+	switch {
+	case openmeter.IsPermanent(err):
+		logger.Error(err, "OpenMeter permanent failure", "requeueAfter", permanentRequeueAfter.String())
+		return r.syncFailed(ctx, offer, conditionReasonOpenMeterError,
+			fmt.Errorf("%s: %w", syncReasonPermanent, err), permanentRequeueAfter)
+	case openmeter.IsTransient(err):
+		logger.Info("OpenMeter transient failure", "err", err.Error(), "requeueAfter", transientRequeueAfter.String())
+		return r.syncFailed(ctx, offer, conditionReasonOpenMeterError,
+			fmt.Errorf("%s: %w", syncReasonTransient, err), transientRequeueAfter)
+	default:
+		logger.Error(err, "OpenMeter unclassified failure; treating as transient")
+		return r.syncFailed(ctx, offer, conditionReasonOpenMeterError,
+			fmt.Errorf("%s: %w", syncReasonTransient, err), transientRequeueAfter)
+	}
+}
+
+// syncFailed records a failed sync on the Offer and schedules a retry. The
+// Warning event is only emitted when the condition changes, so a persistent
+// failure does not flood the event stream every requeue.
+func (r *OfferReconciler) syncFailed(
+	ctx context.Context,
+	offer *billingv1alpha1.Offer,
+	reason string,
+	cause error,
+	requeueAfter time.Duration,
+) (ctrl.Result, error) {
+	changed, err := r.setSyncedCondition(ctx, offer, metav1.ConditionFalse, reason, cause.Error())
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if changed {
+		r.event(offer, "Warning", EventReasonSyncFailed, fmt.Sprintf("%s: %v", reason, cause))
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// setSyncedCondition patches the OpenMeterPlanSynced condition when it
+// changes. The patch carries an optimistic lock so it never clobbers a
+// concurrent status write by the billing controller; a conflict is returned
+// and the reconcile retried.
+func (r *OfferReconciler) setSyncedCondition(
+	ctx context.Context,
+	offer *billingv1alpha1.Offer,
+	status metav1.ConditionStatus,
+	reason, message string,
+) (bool, error) {
+	base := offer.DeepCopy()
+	changed := apimeta.SetStatusCondition(&offer.Status.Conditions, metav1.Condition{
+		Type:               ConditionTypeOpenMeterPlanSynced,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: offer.Generation,
+	})
+	if !changed {
+		return false, nil
+	}
+	if err := r.Status().Patch(ctx, offer, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+		return false, fmt.Errorf("patch offer status: %w", err)
+	}
+	return true, nil
+}
+
+// reconcileDelete removes every version of the Offer's plan, then archives
+// the features they referenced that no other plan still uses. Feature GC
+// must follow plan deletion: before it, the Offer's own plan references the
+// features and nothing would be archived. Deleted versions are listed too,
+// so a retry after a partial failure still knows which features to collect.
 func (r *OfferReconciler) reconcileDelete(
 	ctx context.Context,
 	logger logr.Logger,
@@ -137,73 +276,69 @@ func (r *OfferReconciler) reconcileDelete(
 		return ctrl.Result{}, nil
 	}
 
-	logger.Info("Attempting to get plan by key for deletion", "planKey", planKey)
-	plan, err := r.OpenMeterClient.GetPlanByKey(ctx, planKey)
+	versions, err := r.OpenMeterClient.ListPlanVersions(ctx, planKey, true)
 	if err != nil {
-		if errors.Is(err, openmeter.ErrPlanNotFound) {
-			controllerutil.RemoveFinalizer(offer, ProductPlanFinalizer)
-			return ctrl.Result{}, r.Update(ctx, offer)
+		// Never release the finalizer without knowing whether a published
+		// plan exists: it would stay assignable with no Offer behind it.
+		requeue := transientRequeueAfter
+		if openmeter.IsPermanent(err) {
+			requeue = permanentRequeueAfter
 		}
-		logger.Error(err, "reconcileDelete GetPlanByKey unclassified failure; requeueing")
-		return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
+		logger.Error(err, "list plan versions for deletion; keeping finalizer", "requeueAfter", requeue.String())
+		r.event(offer, "Warning", EventReasonDeleteFailed, fmt.Sprintf("list plan versions: %v", err))
+		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 
-	// Archive the plan's features that no other live plan references. Deleting
-	// the plan alone leaves its usage features orphaned and active; those
-	// orphans then block the meter deletion (OpenMeter rejects deleting a
-	// meter with active features), wedging the MeterDefinition finalizer.
-	// Features still referenced by another plan are left active — archiving
-	// one would break the referencing plan on its next reconcile.
-	featureKeys := planReferencedFeatureKeys(&plan)
+	var featureKeys []string
+	seen := map[string]struct{}{}
+	for _, v := range versions {
+		for _, key := range openmeter.PlanFeatureKeys(v) {
+			if _, dup := seen[key]; !dup {
+				seen[key] = struct{}{}
+				featureKeys = append(featureKeys, key)
+			}
+		}
+	}
+
+	deleted := 0
+	for _, v := range versions {
+		if v.DeletedAt != nil {
+			continue
+		}
+		if err := r.OpenMeterClient.DeletePlan(ctx, v); err != nil {
+			if !openmeter.IsPermanent(err) {
+				logger.Info("DeletePlan failed; requeueing", "planID", v.Id, "err", err.Error())
+				r.event(offer, "Warning", EventReasonDeleteFailed, fmt.Sprintf("delete plan %s: %v", v.Id, err))
+				return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
+			}
+			// Permanent: OpenMeter refuses this version for good. Holding
+			// the finalizer would block the Offer forever, so the version is
+			// left behind and surfaced instead.
+			logger.Error(err, "DeletePlan permanent failure; leaving plan version in OpenMeter", "planID", v.Id)
+			r.event(offer, "Warning", EventReasonDeleteFailed,
+				fmt.Sprintf("permanent: %v; leaving OpenMeter plan %s version %d in place", err, v.Id, v.Version))
+			continue
+		}
+		deleted++
+	}
+
 	if err := r.OpenMeterClient.ArchiveFeaturesIfUnreferenced(ctx, featureKeys); err != nil {
-		switch {
-		case openmeter.IsTransient(err):
-			logger.Info("archive features transient failure; requeueing", "err", err.Error())
-			if r.Recorder != nil {
-				r.Recorder.Eventf(offer, "Warning", EventReasonDeleteFailed, "transient: %v", err)
-			}
-			return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
-		case openmeter.IsPermanent(err):
-			logger.Error(err, "archive features permanent failure; releasing finalizer and leaving features")
-			if r.Recorder != nil {
-				r.Recorder.Eventf(offer, "Warning", EventReasonDeleteFailed,
-					"permanent: %v; leaving OpenMeter features archived", err)
-			}
-		default:
-			logger.Error(err, "archive features unclassified failure; requeueing")
-			if r.Recorder != nil {
-				r.Recorder.Eventf(offer, "Warning", EventReasonDeleteFailed, "unclassified: %v", err)
-			}
+		if !openmeter.IsPermanent(err) {
+			logger.Info("archive features failed; requeueing", "err", err.Error())
+			r.event(offer, "Warning", EventReasonDeleteFailed, fmt.Sprintf("archive features: %v", err))
 			return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
 		}
+		// Leftover features are harmless to billing; the MeterDefinition
+		// finalizer archives them before deleting the meter.
+		logger.Error(err, "archive features permanent failure; leaving features active")
+		r.event(offer, "Warning", EventReasonDeleteFailed,
+			fmt.Sprintf("permanent: %v; leaving OpenMeter features active", err))
 	}
 
-	if err := r.OpenMeterClient.DeletePlan(ctx, plan.Id); err != nil {
-		switch {
-		case openmeter.IsTransient(err):
-			logger.Info("DeletePlan transient failure; requeueing", "err", err.Error())
-			if r.Recorder != nil {
-				r.Recorder.Eventf(offer, "Warning", EventReasonDeleteFailed, "transient: %v", err)
-			}
-			return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
-		case openmeter.IsPermanent(err):
-			logger.Error(err, "DeletePlan permanent failure; releasing finalizer and leaving OpenMeter plan")
-			if r.Recorder != nil {
-				r.Recorder.Eventf(offer, "Warning", EventReasonDeleteFailed,
-					"permanent: %v; leaving OpenMeter plan in place", err)
-			}
-		default:
-			logger.Error(err, "DeletePlan unclassified failure; requeueing")
-			if r.Recorder != nil {
-				r.Recorder.Eventf(offer, "Warning", EventReasonDeleteFailed, "unclassified: %v", err)
-			}
-			return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
-		}
-	} else {
-		logger.Info("OpenMeter product plan deleted")
-		if r.Recorder != nil {
-			r.Recorder.Eventf(offer, "Normal", EventReasonDeleted, "OpenMeter product plan %s deleted", planKey)
-		}
+	if deleted > 0 {
+		logger.Info("OpenMeter plan deleted", "versions", deleted)
+		r.event(offer, "Normal", EventReasonDeleted,
+			fmt.Sprintf("OpenMeter plan %s deleted (%d versions)", planKey, deleted))
 	}
 
 	controllerutil.RemoveFinalizer(offer, ProductPlanFinalizer)
@@ -213,296 +348,62 @@ func (r *OfferReconciler) reconcileDelete(
 	return ctrl.Result{}, nil
 }
 
-func (r *OfferReconciler) handleOpenMeterError(
-	logger logr.Logger,
-	offer *billingv1alpha1.Offer,
-	err error,
-) (ctrl.Result, error) {
-	switch {
-	case openmeter.IsPermanent(err):
-		logger.Error(err, "OpenMeter EnsurePlan permanent failure; requeueing",
-			"requeueAfter", permanentRequeueAfter.String())
-		if r.Recorder != nil {
-			r.Recorder.Eventf(offer, "Warning", EventReasonSyncFailed, "%s: %v", syncReasonPermanent, err)
-		}
-		return ctrl.Result{RequeueAfter: permanentRequeueAfter}, nil
-	case openmeter.IsTransient(err):
-		logger.Info("OpenMeter EnsurePlan transient failure; requeueing",
-			"err", err.Error(), "requeueAfter", transientRequeueAfter.String())
-		if r.Recorder != nil {
-			r.Recorder.Eventf(offer, "Warning", EventReasonSyncFailed, "%s: %v", syncReasonTransient, err)
-		}
-		return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
-	default:
-		logger.Error(err, "OpenMeter EnsurePlan unclassified failure; treating as transient")
-		if r.Recorder != nil {
-			r.Recorder.Eventf(offer, "Warning", EventReasonSyncFailed, "%s: %v", syncReasonInvalid, err)
-		}
-		return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
-	}
-}
-
-func (r *OfferReconciler) desiredPlan(
-	ctx context.Context,
-	offer *billingv1alpha1.Offer,
-) (openmeter.DesiredPlan, error) {
-	name := offer.Annotations[billingv1alpha1.DisplayNameAnnotation]
-	if name == "" {
-		name = offer.Name
-	}
-
-	meterByName, err := r.meterAPINameIndex(ctx)
-	if err != nil {
-		return openmeter.DesiredPlan{}, err
-	}
-
-	var rateCards []om.RateCard
-	usedKeys := make(map[string]struct{})
-	// appendRateCard appends a rate card after enforcing key uniqueness.
-	// OpenMeter rejects a plan whose phase contains two rate cards with the
-	// same key (net error rate_card_duplicated_key), so a collision — e.g.
-	// two usage rates that sanitize to the same feature key, or a flat fee
-	// whose name collides with a feature key — is caught locally and surfaced
-	// as a mapping error instead of a permanent OpenMeter 400.
-	appendRateCard := func(key string, rc om.RateCard) error {
-		if _, dup := usedKeys[key]; dup {
-			return fmt.Errorf(
-				"duplicate rate card key %q; two service pricings (or rates) on offer %q map to the same OpenMeter key", key, offer.Name)
-		}
-		usedKeys[key] = struct{}{}
-		rateCards = append(rateCards, rc)
-		return nil
-	}
-
-	for _, sp := range offer.Spec.ServicePricings {
-		switch sp.Spec.ChargeType {
-		case billingv1alpha1.ChargeTypeUsage:
-			meterSlug, ok := meterByName[sp.Spec.Metric]
-			if !ok {
-				// The meter might not be synced yet, return transient error
-				return openmeter.DesiredPlan{}, fmt.Errorf("meter %q not found for usage pricing %q", sp.Spec.Metric, sp.Name)
-			}
-			for _, rate := range sp.Spec.Rates {
-				featureKey := fmt.Sprintf("%s_default", meterSlug)
-				var advancedFilters map[string]om.FilterString
-				if rate.Match != nil {
-					// The feature key encodes the raw dimension and value into
-					// regex-safe form; OpenMeter requires
-					// `^[a-z0-9]+(?:_[a-z0-9]+)*$`. The filter below always uses
-					// the raw value — the key is an identifier, the filter is
-					// the actual match.
-					featureKey = fmt.Sprintf("%s_%s_%s", meterSlug,
-						sanitizeKeyPart(rate.Match.Dimension), sanitizeKeyPart(rate.Match.Value))
-					val := rate.Match.Value
-					advancedFilters = map[string]om.FilterString{
-						rate.Match.Dimension: {
-							Eq: &val,
-						},
-					}
-				}
-
-				feature, err := r.OpenMeterClient.EnsureFeature(ctx, openmeter.DesiredFeature{
-					Key:                         featureKey,
-					Name:                        featureKey,
-					MeterSlug:                   meterSlug,
-					AdvancedMeterGroupByFilters: advancedFilters,
-				})
-				if err != nil {
-					return openmeter.DesiredPlan{}, fmt.Errorf("ensure feature %q: %w", featureKey, err)
-				}
-
-				rc := om.RateCardUsageBased{
-					Type:           om.RateCardUsageBasedTypeUsageBased,
-					Key:            feature.Key,
-					Name:           sp.Spec.DisplayName,
-					FeatureKey:     &feature.Key,
-					BillingCadence: "P1M",
-					Metadata: &om.Metadata{
-						"miloapis.com/service-ref":  sp.Spec.ServiceRef,
-						"miloapis.com/pricing-unit": sp.Spec.PricingUnit,
-					},
-				}
-				if rc.Name == "" {
-					rc.Name = featureKey
-				}
-
-				price := om.RateCardUsageBasedPrice{}
-				if rate.Flat != "" {
-					err := price.FromUnitPriceWithCommitments(om.UnitPriceWithCommitments{
-						Type:   om.UnitPriceWithCommitmentsTypeUnit,
-						Amount: om.Numeric(rate.Flat),
-					})
-					if err != nil {
-						return openmeter.DesiredPlan{}, err
-					}
-				} else if len(rate.Tiered) > 0 {
-					var tiers []om.PriceTier
-					for _, t := range rate.Tiered {
-						tier := om.PriceTier{
-							UnitPrice: &om.UnitPrice{
-								Amount: om.Numeric(t.Rate),
-								Type:   om.UnitPriceTypeUnit,
-							},
-						}
-						if t.UpTo != "" {
-							v := om.Numeric(t.UpTo)
-							tier.UpToAmount = &v
-						}
-						tiers = append(tiers, tier)
-					}
-					err := price.FromTieredPriceWithCommitments(om.TieredPriceWithCommitments{
-						Type:  om.TieredPriceWithCommitmentsTypeTiered,
-						Mode:  om.TieredPriceModeGraduated,
-						Tiers: tiers,
-					})
-					if err != nil {
-						return openmeter.DesiredPlan{}, err
-					}
-				}
-				rc.Price = &price
-
-				var wrapper om.RateCard
-				if err := wrapper.FromRateCardUsageBased(rc); err != nil {
-					return openmeter.DesiredPlan{}, err
-				}
-				if err := appendRateCard(feature.Key, wrapper); err != nil {
-					return openmeter.DesiredPlan{}, err
-				}
-			}
-		case billingv1alpha1.ChargeTypeOneTime, billingv1alpha1.ChargeTypeRecurring:
-			rc := om.RateCardFlatFee{
-				Type: om.RateCardFlatFeeTypeFlatFee,
-				Key:  sanitizeKeyPart(sp.Name),
-				Name: sp.Spec.DisplayName,
-				Metadata: &om.Metadata{
-					"miloapis.com/service-ref": sp.Spec.ServiceRef,
-					"miloapis.com/trigger":     string(sp.Spec.Trigger),
-				},
-			}
-			if rc.Name == "" {
-				rc.Name = sp.Name
-			}
-			if sp.Spec.ChargeType == billingv1alpha1.ChargeTypeRecurring {
-				cadence := "P1M"
-				rc.BillingCadence = &cadence
-			}
-			price := om.FlatPriceWithPaymentTerm{
-				Type:   om.FlatPriceWithPaymentTermTypeFlat,
-				Amount: om.Numeric(sp.Spec.Amount),
-			}
-			rc.Price = &price
-
-			var wrapper om.RateCard
-			if err := wrapper.FromRateCardFlatFee(rc); err != nil {
-				return openmeter.DesiredPlan{}, err
-			}
-			if err := appendRateCard(rc.Key, wrapper); err != nil {
-				return openmeter.DesiredPlan{}, err
-			}
-		default:
-			// A chargeType outside the three known values would silently
-			// produce no rate cards and degrade the plan (OpenMeter rejects
-			// a phase-less plan). ServicePricingSpec.chargeType is enum
-			// validated, so this is only reachable when the snapshot was
-			// produced by a version that knew a type we do not — surface it
-			// loudly rather than half-syncing.
-			return openmeter.DesiredPlan{}, fmt.Errorf(
-				"unsupported charge type %q on service pricing %q", sp.Spec.ChargeType, sp.Name)
-		}
-	}
-
-	if len(rateCards) == 0 {
-		// Defensive: every known chargeType produces at least one rate card
-		// (usage rates have MinItems=1), so this guards against a future
-		// chargeType mapping that yields nothing — OpenMeter would reject a
-		// plan with zero rate cards, and an empty plan is never the intent.
-		return openmeter.DesiredPlan{}, fmt.Errorf(
-			"offer %q produced no rate cards: nothing to sync to OpenMeter", offer.Name)
-	}
-
-	phase := om.PlanPhase{
-		Key:       "default_phase",
-		Name:      "Default Phase",
-		RateCards: rateCards,
-	}
-	phases := []om.PlanPhase{phase}
-
-	return openmeter.DesiredPlan{
-		Key:         strings.ReplaceAll(string(offer.UID), "-", "_"),
-		Name:        name,
-		Description: offer.Name,
-		Currency:    "USD",
-		Phases:      phases,
-	}, nil
-}
-
-// sanitizeKeyPart maps an arbitrary dimension or value string (which may
-// carry dots, spaces, hyphens, or mixed case) onto a single OpenMeter-key
-// safe segment. OpenMeter keys must match `^[a-z0-9]+(?:_[a-z0-9]+)*$`, so
-// every run of characters outside [a-z0-9] collapses to one underscore,
-// the input is lowercased, and surrounding underscore runs are dropped. The
-// function never emits leading/trailing underscores, so joining sanitized
-// segments with "_" always yields a valid key. The result is stable (same
-// input -> same output), which is what keeps EnsureFeature idempotent.
-func sanitizeKeyPart(s string) string {
-	var b strings.Builder
-	pendingUnderscore := false
-	for _, r := range strings.ToLower(s) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			if pendingUnderscore && b.Len() > 0 {
-				b.WriteByte('_')
-			}
-			pendingUnderscore = false
-			b.WriteRune(r)
-		} else {
-			pendingUnderscore = true
-		}
-	}
-	return b.String()
-}
-
-// planReferencedFeatureKeys collects the feature keys referenced by a plan's
-// usage rate cards. These are the features the plan's rate cards point at; on
-// offer deletion they become garbage (unless another plan still references
-// them) and are archived before the plan itself is deleted.
-func planReferencedFeatureKeys(plan *om.Plan) []string {
-	var keys []string
-	for _, phase := range plan.Phases {
-		for _, rc := range phase.RateCards {
-			usage, err := rc.AsRateCardUsageBased()
-			if err != nil {
-				// Flat-fee and other rate cards carry no feature reference.
-				continue
-			}
-			if usage.FeatureKey != nil && *usage.FeatureKey != "" {
-				keys = append(keys, *usage.FeatureKey)
-			}
-		}
-	}
-	return keys
-}
-
-func (r *OfferReconciler) meterAPINameIndex(ctx context.Context) (map[string]string, error) {
+// meterIndex maps every MeterDefinition's spec.meterName to what the
+// mapping needs. The slug must come from spec.meterName — the same
+// derivation the MeterDefinition controller uses when it creates the meter.
+// metadata.name is an unrelated Kubernetes name, and deriving the slug from
+// it points features at a meter that does not exist.
+func (r *OfferReconciler) meterIndex(ctx context.Context) (map[string]meterInfo, error) {
 	var list billingv1alpha1.MeterDefinitionList
 	if err := r.List(ctx, &list); err != nil {
 		return nil, fmt.Errorf("list MeterDefinitions: %w", err)
 	}
-	out := make(map[string]string, len(list.Items))
+	out := make(map[string]meterInfo, len(list.Items))
 	for i := range list.Items {
 		md := &list.Items[i]
 		if md.Spec.MeterName == "" {
 			continue
 		}
-		// The slug must be derived from spec.meterName — the same derivation
-		// the MeterDefinition controller uses when it creates the meter
-		// (see meterdefinition_controller.go). metadata.name is a distinct
-		// Kubernetes resource name that almost never equals the canonical
-		// reverse-DNS meterName, and deriving the slug from the wrong field
-		// makes attribute-based features point at a meter slug that does not
-		// exist, failing every feature create.
-		out[md.Spec.MeterName] = string(openmeter.MeterSlug(md.Spec.MeterName))
+		out[md.Spec.MeterName] = meterInfo{
+			Name:       md.Spec.MeterName,
+			Slug:       openmeter.MeterSlug(md.Spec.MeterName),
+			Dimensions: md.Spec.Measurement.Dimensions,
+		}
 	}
 	return out, nil
+}
+
+// offersForMeter enqueues every GA Offer that prices md's metric, so an
+// Offer waiting on its meter converges as soon as the meter is defined.
+func (r *OfferReconciler) offersForMeter(ctx context.Context, obj client.Object) []reconcile.Request {
+	md, ok := obj.(*billingv1alpha1.MeterDefinition)
+	if !ok || md.Spec.MeterName == "" {
+		return nil
+	}
+	var offers billingv1alpha1.OfferList
+	if err := r.List(ctx, &offers); err != nil {
+		log.FromContext(ctx).Error(err, "list Offers for MeterDefinition", "meterDefinition", md.Name)
+		return nil
+	}
+	var reqs []reconcile.Request
+	for _, offer := range offers.Items {
+		if offer.Spec.LaunchStage != billingv1alpha1.OfferLaunchStageGA {
+			continue
+		}
+		for _, sp := range offer.Spec.ServicePricings {
+			if sp.Spec.ChargeType == billingv1alpha1.ChargeTypeUsage && sp.Spec.Metric == md.Spec.MeterName {
+				reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Name: offer.Name}})
+				break
+			}
+		}
+	}
+	return reqs
+}
+
+func (r *OfferReconciler) event(offer *billingv1alpha1.Offer, eventType, reason, message string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(offer, eventType, reason, message)
+	}
 }
 
 // SetupWithManager registers the Offer reconciler.
@@ -519,5 +420,6 @@ func (r *OfferReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(offerControllerName).
 		For(&billingv1alpha1.Offer{}).
+		Watches(&billingv1alpha1.MeterDefinition{}, handler.EnqueueRequestsFromMapFunc(r.offersForMeter)).
 		Complete(r)
 }
