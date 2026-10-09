@@ -268,8 +268,8 @@ github.com/zclconf/go-cty v1.16.2 h1:LAJSwc3v81IRBZyUVQDUdZ7hs3SYs9jv0eZJDWHD/70
 github.com/zclconf/go-cty v1.16.2/go.mod h1:VvMs5i0vgZdhYawQNq5kePSpLAoz8u1xvZgrPIxfnZE=
 github.com/zclconf/go-cty-yaml v1.1.0 h1:nP+jp0qPHv2IhUVqmQSzjvqAWcObN0KBkUl2rWBdig0=
 github.com/zclconf/go-cty-yaml v1.1.0/go.mod h1:9YLUH4g7lOhVWqUbctnVlZ5KLpg7JAprQNgxSZ1Gyxs=
-go.miloapis.com/billing v0.3.1 h1:WzYKNchXwTRxtHlI5eiZ5KTJIn8Wee/UbmkhzGVNpuI=
-go.miloapis.com/billing v0.3.1/go.mod h1:nPJuynQBBVxZAl46uLm3noy0CvPPlK53D50r8xM2Irk=
+go.miloapis.com/billing v0.3.10 h1:aCvGafxNb+cmDlXwmHAUvlTnLIokxUy17cfsKL/wTPY=
+go.miloapis.com/billing v0.3.10/go.mod h1:8dPErvPy2NblAl4D7Qi/B42u6+LVMLef4zL+Ayi4BCU=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
 go.opentelemetry.io/auto/sdk v1.2.1/go.mod h1:KRTj+aOaElaLi+wW1kO/DZRXwkF4C5xPbEe3ZiIhN7Y=
 go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 h1:8tvICD4vSTOOsNrsI4Ljf6C+6UKvpTEH5XY3JMoyPoo=
