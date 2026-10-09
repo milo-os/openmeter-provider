@@ -551,10 +551,11 @@ tasks:
 
   dev:redeploy:
     desc: Quick rebuild and redeploy for dev environment
-    deps:
-      - dev:build
-      - dev:load
     cmds:
+      # Sequential, not `deps:` — Task runs deps in parallel, so the load
+      # could push the previous image into kind before the build finished.
+      - task: dev:build
+      - task: dev:load
       - |
         set -e
         echo "Redeploying openmeter-provider (dev)..."
