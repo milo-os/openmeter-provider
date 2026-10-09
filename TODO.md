@@ -14,7 +14,7 @@ land in later, instead of getting silently forgotten.
 |---|---|---|
 | `MeterDefinitionReconciler` | ✅ Done | All 7 `MeterAggregation` values covered; e2e in `test/e2e/meterdefinition/`. |
 | `BillingAccountReconciler` | ✅ Done (full parity, minus two genuinely-inapplicable fields) | Customer sync, invoice sync, Stripe app-data sync, and per-account BillingProfile sync (paymentTerms) all implemented. See "BillingAccount: what's still not synced" below for the two fields with no OpenMeter home at all. e2e in `test/e2e/billingaccount/`. |
-| `OfferReconciler` | ⏳ Not started | Amberflo: `amberflo-provider/internal/controller/offer_controller.go`. Syncs `Offer` → Amberflo Product Plan; watches `meterdefinitions`. Depends on `MeterDefinitionReconciler` (done), so this is next. |
+| `OfferReconciler` | ✅ Done (pending e2e run) | Syncs GA `Offer` → published OpenMeter plan + usage features (`internal/controller/offer_controller.go`, mapping in `offer_mapping.go`); watches `meterdefinitions`. Offers whose rates would double-bill are rejected as `InvalidPricing` — billing should reject them at publish instead, see [`BILLING_TODO.md`](BILLING_TODO.md). e2e in `test/e2e/offer/`. |
 | `BillingEntitlementReconciler` | ⏳ Not started | Amberflo: `amberflo-provider/internal/controller/billingentitlement_controller.go`. Syncs `BillingEntitlement` → Amberflo customer-plan assignment. Depends on **both** `BillingAccountReconciler` and `OfferReconciler` (customer + product plan must exist first) — do this last. |
 
 ## BillingAccount: what's synced, and what's genuinely not
@@ -107,9 +107,10 @@ cases) model:
   > unchanged if OpenMeter implements it.
   >
   > Until then the only cadence that has any effect is the subscription's, via
-  > `Plan.billingCadence` (with an optional per-`RateCard` override) — which lands with
-  > the not-yet-built `OfferReconciler`/`BillingEntitlementReconciler`. Note that
-  > openmeter-provider currently creates no Plans or Subscriptions at all, so accounts
+  > `Plan.billingCadence` (with an optional per-`RateCard` override). `OfferReconciler`
+  > now publishes Plans (monthly cadence), but the not-yet-built
+  > `BillingEntitlementReconciler` is what creates Subscriptions — until it exists,
+  > openmeter-provider creates no Subscriptions at all, so accounts
   > have no billing period and **OpenMeter generates no invoices for them** — which is
   > why `ListInvoices` has been empty in every run so far, and why `reconcileInvoices`
   > has never had anything to sync end to end.
@@ -142,18 +143,17 @@ Two more are fully consumed by what's already built above, not gaps:
 
 ## Other deferred items
 
+- **Billing-side fixes found during the Offer migration** — cross-rate pricing
+  validation, tier-bound docs and ordering, catch-all semantics. Tracked in
+  [`BILLING_TODO.md`](BILLING_TODO.md); do them in `milo-os/billing` once the
+  migration here is complete.
+
 - **Prometheus metrics** (`amberflo_provider_reconcile_duration_seconds`-style
   reconcile-duration histogram, `{controller, result}` labels) — amberflo-provider has
   this via `internal/controller/metrics.go`; openmeter-provider has no metrics at all
   yet. Explicitly deferred early in the migration ("we can add metrics later, let's keep
   focus"). Worth doing once all four controllers exist, so the metric can carry every
   controller's label from day one instead of being retrofitted controller by controller.
-- **`openmeter.MeterSlug` doesn't handle hyphens** — replaces only `.` and `/` with `_`;
-  a `meterName` segment containing `-` produces a slug that fails OpenMeter's
-  `^[a-z0-9]+(?:_[a-z0-9]+)*$` validation. Currently worked around in e2e fixtures by
-  avoiding hyphens in `meterName` (see comments in `test/e2e/meterdefinition/*/`.yaml`
-  files). Should be fixed in `MeterSlug` itself (e.g. also replacing `-` with `_`) once
-  it's clear that won't collide with an existing meter naming convention.
 - **`stripepaymentmethods.stripe.billing.miloapis.com` CRD isn't installed by
   `task dev:install-external-crds`** — that task only installs `milo-os/billing`'s CRDs.
   `BillingAccountReconciler` now watches `StripePaymentMethod` (stripe-provider's CRD),
