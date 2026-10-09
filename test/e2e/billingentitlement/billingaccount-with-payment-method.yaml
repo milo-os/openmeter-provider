@@ -1,0 +1,10 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-be-account
+spec:
+  currencyCode: USD
+  contactInfo:
+    email: entitlement@example.com
+  defaultPaymentMethodRef:
+    name: e2e-be-payment-method
