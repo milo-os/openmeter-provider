@@ -50,6 +50,19 @@ type fakeServer struct {
 	planWrites int
 	// featureCreates counts feature POSTs.
 	featureCreates int
+	// subscriptions is keyed by subscription id (see serveSubscriptions).
+	subscriptions map[string]om.Subscription
+	// subscriptionSeq generates subscription ids and orders creation.
+	subscriptionSeq int
+	// subscriptionWrites counts every subscription mutation.
+	subscriptionWrites int
+	// pendingLinesInvoiced counts invoice-pending-lines actions;
+	// invoicesDeleted records deleted invoice ids in order.
+	pendingLinesInvoiced int
+	invoicesDeleted      []string
+	// billingNotReady makes subscription creates fail the way OpenMeter does
+	// for a customer without Stripe app data.
+	billingNotReady bool
 
 	// statusOverride, when non-zero, short-circuits every request with that
 	// status code. Tests use it to inject wire-level failures (429s, 5xxs)
@@ -89,6 +102,7 @@ func newTestClient(t *testing.T) (Client, *fakeServer) {
 		features:                map[string]om.Feature{},
 		featureByID:             map[string]string{},
 		plans:                   map[string]om.Plan{},
+		subscriptions:           map[string]om.Subscription{},
 	}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
@@ -114,6 +128,10 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// (/api/v1/customers/{key}/apps) shares the /api/v1/customers prefix
 	// serveCustomers matches on, so the more specific route goes first.
 	if f.serveStripeAppData(w, r) {
+		return
+	}
+	// Same reason: /api/v1/customers/{key}/subscriptions.
+	if f.serveSubscriptions(w, r) {
 		return
 	}
 	if f.serveCustomers(w, r) {
