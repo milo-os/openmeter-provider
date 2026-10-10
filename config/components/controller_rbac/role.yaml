@@ -24,6 +24,7 @@ rules:
   - billing.miloapis.com
   resources:
   - billingaccounts
+  - billingentitlements
   - meterdefinitions
   - offers
   verbs:
@@ -36,9 +37,20 @@ rules:
   - billing.miloapis.com
   resources:
   - billingaccounts/finalizers
+  - billingentitlements/finalizers
   - meterdefinitions/finalizers
   - offers/finalizers
   verbs:
+  - update
+- apiGroups:
+  - billing.miloapis.com
+  resources:
+  - billingentitlements/status
+  - invoices/status
+  - offers/status
+  verbs:
+  - get
+  - patch
   - update
 - apiGroups:
   - billing.miloapis.com
@@ -51,15 +63,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - billing.miloapis.com
-  resources:
-  - invoices/status
-  - offers/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - stripe.billing.miloapis.com
   resources:

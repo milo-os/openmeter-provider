@@ -127,6 +127,11 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		}
 	}
 	if finalizeErr != nil {
+		if errors.Is(finalizeErr, openmeter.ErrInvoicesOutstanding) {
+			// Not a failure: invoices get paid on the billing provider's
+			// schedule, so poll slowly instead of backing off as an error.
+			return ctrl.Result{RequeueAfter: permanentRequeueAfter}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("running finalizers: %w", finalizeErr)
 	}
 	if finalizeResult.Updated {
@@ -467,6 +472,31 @@ func (f *customerLinkFinalizer) Finalize(ctx context.Context, obj client.Object)
 	}
 	logger := log.FromContext(ctx)
 	customerKey := openmeter.CustomerKey(account.UID)
+
+	// OpenMeter refuses to delete a customer with non-final invoices. Ending
+	// a subscription early (the BillingEntitlement controller cancels it as
+	// soon as the account is deleting) leaves a draft invoice for the closed
+	// period behind; zero-total ones are cleared here, while invoices with a
+	// balance hold the finalizer until they are paid.
+	customer, err := f.OpenMeterClient.GetCustomer(ctx, customerKey)
+	switch {
+	case errors.Is(err, openmeter.ErrCustomerNotFound):
+		logger.Info("OpenMeter customer already gone", "customerKey", customerKey)
+		return finalizer.Result{}, nil
+	case err != nil:
+		return finalizer.Result{}, fmt.Errorf("get customer: %w", err)
+	}
+	if err := f.OpenMeterClient.PrepareInvoicesForCustomerDeletion(ctx, openmeter.CustomerID(customer.Id)); err != nil {
+		if errors.Is(err, openmeter.ErrInvoicesOutstanding) {
+			logger.Info("waiting for outstanding invoices before deleting the customer", "invoices", err.Error())
+		} else {
+			logger.Error(err, "prepare invoices for customer deletion; finalizer blocks deletion")
+		}
+		if f.Recorder != nil {
+			f.Recorder.Eventf(account, "Warning", EventReasonDeleteFailed, "%v", err)
+		}
+		return finalizer.Result{}, err
+	}
 
 	if err := f.OpenMeterClient.DeleteCustomer(ctx, customerKey); err != nil {
 		if openmeter.IsTransient(err) {

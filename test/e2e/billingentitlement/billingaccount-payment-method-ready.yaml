@@ -1,0 +1,13 @@
+# Status patch simulating billing's controller observing the Active payment
+# method (see ../billingaccount/billingaccount-payment-method-ready.yaml).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-be-account
+status:
+  conditions:
+    - type: DefaultPaymentMethodReady
+      status: "True"
+      reason: PaymentMethodActive
+      message: e2e-simulated Active payment method
+      lastTransitionTime: "2024-01-01T00:00:00Z"

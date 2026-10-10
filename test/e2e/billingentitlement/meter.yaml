@@ -1,0 +1,16 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: be-usage-metric
+spec:
+  meterName: be-usage-metric
+  phase: Published
+  displayName: "Entitlement E2E Metric"
+  measurement:
+    aggregation: Sum
+    unit: count
+  billing:
+    consumedUnit: count
+    pricingUnit: count
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource

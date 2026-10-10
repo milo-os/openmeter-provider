@@ -1,0 +1,10 @@
+# Ids come from ../billingaccount/resolve-stripe-customer.sh: a placeholder
+# against a Sandbox app, a real Stripe test customer against a Stripe app.
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripePaymentMethod
+metadata:
+  name: e2e-be-payment-method
+status:
+  phase: Active
+  stripeCustomerId: ($stripeCustomerId)
+  stripePaymentMethodId: ($stripePaymentMethodId)

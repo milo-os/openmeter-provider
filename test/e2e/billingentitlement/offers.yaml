@@ -1,0 +1,30 @@
+# Two Offers on the same metric, authored as Draft with refs and published
+# with ../offer/publish.sh (billing's publish flow; its operator does not run
+# in e2e). The entitlement starts on A and is switched to B.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-be-offer-a
+  annotations:
+    kubernetes.io/display-name: "E2E Entitlement Offer A"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+  servicePricingRefs:
+    - name: be-usage-a
+      namespace: openmeter-system
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-be-offer-b
+  annotations:
+    kubernetes.io/display-name: "E2E Entitlement Offer B"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+  servicePricingRefs:
+    - name: be-usage-b
+      namespace: openmeter-system

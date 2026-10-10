@@ -147,13 +147,18 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 				}).SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("creating Offer controller: %w", err)
 				}
+				if err = (&controller.BillingEntitlementReconciler{
+					OpenMeterClient: openMeterClient,
+				}).SetupWithManager(mgr); err != nil {
+					return fmt.Errorf("creating BillingEntitlement controller: %w", err)
+				}
 				if err := controller.AddIndexers(ctx, mgr.GetFieldIndexer()); err != nil {
 					return fmt.Errorf("adding indexers: %w", err)
 				}
-				setupLog.Info("OpenMeter meter-definition, billing-account, and offer controllers registered",
+				setupLog.Info("OpenMeter meter-definition, billing-account, offer, and billing-entitlement controllers registered",
 					"server", serverConfig.OpenMeter.ServerURL)
 			} else {
-				setupLog.Info("openMeter not configured; meter-definition, billing-account, and offer controllers disabled")
+				setupLog.Info("openMeter not configured; meter-definition, billing-account, offer, and billing-entitlement controllers disabled")
 			}
 
 			if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

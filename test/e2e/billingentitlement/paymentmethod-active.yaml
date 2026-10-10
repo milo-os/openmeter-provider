@@ -1,0 +1,6 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: PaymentMethod
+metadata:
+  name: e2e-be-payment-method
+status:
+  phase: Active

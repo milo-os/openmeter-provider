@@ -1,0 +1,245 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: billingentitlement
+spec:
+  description: |
+    Exercises BillingEntitlementReconciler end to end against a real OpenMeter
+    instance. A BillingEntitlement binds a BillingAccount (OpenMeter customer,
+    key = account UID) to an Offer (OpenMeter plan, key = Offer UID); the
+    controller keeps exactly one live subscription of that customer on the
+    plan's active version:
+
+      - no payment method yet: OpenMeter refuses to bill the customer, the
+        entitlement waits (CustomerBillingNotReady);
+      - payment method attached: subscribed, with traceable metadata;
+      - Offer re-published as plan v2 (display-name change): migrated
+        immediately (never via a scheduled subscription: OpenMeter keeps
+        counting a deleted scheduled subscription as live, which would block
+        feature archival and so MeterDefinition deletion forever);
+      - offerRef switched: the subscription changes plan immediately;
+      - entitlement deleted: the subscription is canceled;
+      - BillingAccount deleted: the subscription is canceled first, and the
+        $0 draft invoices left by every early-ended period are deleted, so
+        the account's own finalizer can delete the customer (OpenMeter
+        refuses to delete a customer with a live subscription or a non-final
+        invoice).
+
+    Billing's operator, webhooks and stripe-provider do not run in e2e:
+    Offers are published with ../offer/publish.sh, and the payment method
+    chain is fabricated with status patches exactly as in the billingaccount
+    suite. Stripe ids come from ../billingaccount/resolve-stripe-customer.sh,
+    which creates a real Stripe test customer when the org's default billing
+    profile uses a Stripe app.
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-be
+              status:
+                phase: Running
+
+    - name: publish two Offers on the same metric
+      try:
+        - apply:
+            file: meter.yaml
+        - apply:
+            file: servicepricings.yaml
+        - apply:
+            file: offers.yaml
+        - script:
+            timeout: 30s
+            content: |
+              bash ../offer/publish.sh e2e-be-offer-a
+              bash ../offer/publish.sh e2e-be-offer-b
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-be-offer-a
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-be-offer-b
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+
+    - name: entitlement waits until the account can be invoiced
+      description: |
+        The account has no payment method, so its customer has no Stripe app
+        data and OpenMeter refuses the subscription (409 "invalid billing
+        setup"). The entitlement reports CustomerBillingNotReady instead of
+        failing hard. Skipped against a Sandbox billing app, which performs
+        no such check (see expect-billing-gate.sh).
+      try:
+        - apply:
+            file: billingaccount.yaml
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-be-account
+                (finalizers[?@ == 'openmeter.miloapis.com/customer-link']): ['openmeter.miloapis.com/customer-link']
+        - apply:
+            file: entitlement.yaml
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              metadata:
+                name: e2e-be-entitlement
+                (finalizers[?@ == 'openmeter.miloapis.com/subscription']): ['openmeter.miloapis.com/subscription']
+        - script:
+            timeout: 100s
+            content: bash expect-billing-gate.sh
+
+    - name: attaching a payment method subscribes the account to Offer A
+      try:
+        - script:
+            content: QUERY_POD=openmeter-query-be sh ../billingaccount/resolve-stripe-customer.sh "$NAMESPACE" customerId
+            outputs:
+              - name: stripeCustomerId
+                value: ($stdout)
+        - script:
+            content: QUERY_POD=openmeter-query-be sh ../billingaccount/resolve-stripe-customer.sh "$NAMESPACE" paymentMethodId
+            outputs:
+              - name: stripePaymentMethodId
+                value: ($stdout)
+        - apply:
+            file: paymentmethod.yaml
+        - patch:
+            file: paymentmethod-active.yaml
+            subresource: status
+        - patch:
+            file: stripepaymentmethod-active.yaml
+            subresource: status
+        - apply:
+            file: billingaccount-with-payment-method.yaml
+        - patch:
+            file: billingaccount-payment-method-ready.yaml
+            subresource: status
+        - script:
+            # The entitlement retries a refused subscription every 30s.
+            timeout: 100s
+            content: bash expect-condition.sh True Synced "version 1 is active"
+        - script:
+            timeout: 70s
+            content: |
+              bash expect-subscriptions.sh \
+                '(live | length == 1) and (live | on($a; 1) | length == 1) and live[0].status == "active" and live[0].metadata["miloapis.com/billing-entitlement"] == $be' \
+                "exactly one active subscription on Offer A v1, tagged with the entitlement"
+
+    - name: re-publishing Offer A migrates the subscription to v2
+      description: |
+        A display-name change publishes plan v2. The subscription moves to v2
+        immediately; nothing is left scheduled.
+      try:
+        - script:
+            timeout: 10s
+            content: kubectl annotate offer e2e-be-offer-a kubernetes.io/display-name="E2E Entitlement Offer A v2" --overwrite
+        - script:
+            timeout: 100s
+            content: bash expect-condition.sh True Synced "version 2 is active"
+        - script:
+            timeout: 70s
+            content: |
+              bash expect-subscriptions.sh \
+                '(live | length == 1) and (live | on($a; 2) | .[0].status == "active") and (on($a; 1) | all(.status == "inactive")) and live[0].metadata["miloapis.com/billing-entitlement"] == $be' \
+                "one active subscription on Offer A v2, v1 ended, metadata kept"
+
+    - name: switching offerRef to Offer B changes the plan immediately
+      description: |
+        Staff may change offerRef (billing allows it). The subscription
+        changes to Offer B now, carrying the entitlement metadata (OpenMeter
+        does not copy it on a plan change).
+      try:
+        - script:
+            timeout: 10s
+            content: kubectl patch billingentitlement e2e-be-entitlement -n "$NAMESPACE" --type merge -p '{"spec":{"offerRef":{"name":"e2e-be-offer-b"}}}'
+        - script:
+            timeout: 100s
+            content: bash expect-condition.sh True Synced "version 1 is active"
+        - script:
+            timeout: 70s
+            content: |
+              bash expect-subscriptions.sh \
+                '(live | length == 1) and (live | on($b; 1) | .[0].status == "active") and live[0].metadata["miloapis.com/billing-entitlement"] == $be and (map(select(.plan.key == $a)) | all(.status == "inactive"))' \
+                "one active subscription on Offer B; nothing left on Offer A"
+
+    - name: deleting the entitlement cancels the subscription
+      try:
+        - script:
+            timeout: 10s
+            content: kubectl delete billingentitlement e2e-be-entitlement -n "$NAMESPACE" --wait=false
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              metadata:
+                name: e2e-be-entitlement
+        - script:
+            timeout: 70s
+            content: bash expect-subscriptions.sh '(live | length == 0) and length > 0' "every subscription ended"
+
+    - name: deleting the BillingAccount cancels its subscription so the customer can be deleted
+      description: |
+        Re-entitle the account (to Offer B), then delete the BillingAccount
+        while the entitlement still exists. OpenMeter refuses to delete a
+        customer with a live subscription, so the account only disappears if
+        the entitlement controller canceled the subscription first.
+      try:
+        - apply:
+            file: entitlement-offer-b.yaml
+        - script:
+            timeout: 100s
+            content: bash expect-condition.sh True Synced "version 1 is active"
+        - script:
+            timeout: 70s
+            content: |
+              bash expect-subscriptions.sh \
+                '(live | length == 1) and (live | on($b; 1) | .[0].status == "active")' \
+                "re-subscribed to Offer B"
+        - script:
+            timeout: 10s
+            content: kubectl delete billingaccount e2e-be-account -n "$NAMESPACE" --wait=false
+        - error:
+            timeout: 120s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-be-account
+        - script:
+            timeout: 100s
+            content: bash expect-condition.sh False BillingAccountNotFound
+        - script:
+            timeout: 10s
+            content: kubectl delete billingentitlement e2e-be-entitlement -n "$NAMESPACE" --wait=false
+        - error:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              metadata:
+                name: e2e-be-entitlement

@@ -1,0 +1,31 @@
+# Usage-only pricings: a subscription to a plan without flat fees creates no
+# in-advance invoice, so the suite never issues a Stripe invoice. OpenMeter
+# still requires the customer to be invoiceable, because usage rates are
+# priced items.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: be-usage-a
+spec:
+  displayName: "Entitlement Usage A"
+  chargeType: Usage
+  currency: USD
+  metric: be-usage-metric
+  pricingUnit: count
+  serviceRef: compute.miloapis.com
+  rates:
+    - flat: "0.01"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: be-usage-b
+spec:
+  displayName: "Entitlement Usage B"
+  chargeType: Usage
+  currency: USD
+  metric: be-usage-metric
+  pricingUnit: count
+  serviceRef: compute.miloapis.com
+  rates:
+    - flat: "0.02"

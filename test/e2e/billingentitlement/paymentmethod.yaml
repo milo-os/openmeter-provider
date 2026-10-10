@@ -1,0 +1,18 @@
+# Fabricated PaymentMethod + StripePaymentMethod, as in the billingaccount
+# suite: neither billing's controllers nor stripe-provider run in e2e.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: PaymentMethod
+metadata:
+  name: e2e-be-payment-method
+spec:
+  billingAccountRef:
+    name: e2e-be-account
+  displayName: E2E Entitlement Card
+---
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripePaymentMethod
+metadata:
+  name: e2e-be-payment-method
+spec:
+  paymentMethodRef:
+    name: e2e-be-payment-method

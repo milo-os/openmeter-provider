@@ -5,8 +5,10 @@ package openmeter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,7 +26,48 @@ import (
 // Honors page/pageSize so multi-page ListInvoices behavior can actually be
 // tested, with a deterministic sort-by-Id order across pages.
 func (f *fakeServer) serveInvoices(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/api/v1/billing/invoices") {
+	if !strings.HasPrefix(r.URL.Path, "/api/v1/billing/invoices") {
+		return false
+	}
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/billing/invoices/invoice":
+		// Invoicing pending lines turns the customer's gathering invoice
+		// into a draft, as OpenMeter does.
+		var body om.InvoicePendingLinesActionInput
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.pendingLinesInvoiced++
+		for key, invs := range f.invoices {
+			for i := range invs {
+				if invs[i].Customer.Id != nil && *invs[i].Customer.Id == body.CustomerId && invs[i].Status == om.InvoiceStatusGathering {
+					invs[i].Status = om.InvoiceStatusDraft
+				}
+			}
+			f.invoices[key] = invs
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("[]"))
+		return true
+	case r.Method == http.MethodDelete:
+		// Only drafts (or earlier) can be deleted.
+		id := strings.TrimPrefix(r.URL.Path, "/api/v1/billing/invoices/")
+		for key, invs := range f.invoices {
+			for i, inv := range invs {
+				if inv.Id != id {
+					continue
+				}
+				if inv.Status != om.InvoiceStatusDraft && inv.Status != om.InvoiceStatusGathering {
+					w.WriteHeader(http.StatusBadRequest)
+					return true
+				}
+				f.invoices[key] = slices.Delete(invs, i, i+1)
+				f.invoicesDeleted = append(f.invoicesDeleted, id)
+				w.WriteHeader(http.StatusNoContent)
+				return true
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+		return true
+	case r.Method != http.MethodGet:
 		return false
 	}
 	var items []om.Invoice
@@ -134,5 +177,83 @@ func TestListInvoices_RequiresKey(t *testing.T) {
 	c, _ := newTestClient(t)
 	if _, err := c.ListInvoices(context.Background(), ""); !IsPermanent(err) {
 		t.Errorf("expected a PermanentError for an empty key, got %T: %v", err, err)
+	}
+}
+
+func invoiceFor(customerID, id string, status om.InvoiceStatus, total string) om.Invoice {
+	inv := baseInvoice(customerID, status)
+	inv.Id = id
+	inv.Totals.Total = total
+	return inv
+}
+
+func TestPrepareInvoicesForCustomerDeletion(t *testing.T) {
+	t.Run("zero-total drafts are deleted, final invoices kept", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.invoices["cust"] = []om.Invoice{
+			invoiceFor("cust", "inv-draft-0", om.InvoiceStatusDraft, "0"),
+			invoiceFor("cust", "inv-draft-000", om.InvoiceStatusDraft, "0.00"),
+			invoiceFor("cust", "inv-paid", om.InvoiceStatusPaid, "100.00"),
+			invoiceFor("cust", "inv-void", om.InvoiceStatusVoided, "5"),
+		}
+		if err := c.PrepareInvoicesForCustomerDeletion(context.Background(), "cust"); err != nil {
+			t.Fatalf("PrepareInvoicesForCustomerDeletion: %v", err)
+		}
+		if got := strings.Join(f.invoicesDeleted, ","); got != "inv-draft-0,inv-draft-000" {
+			t.Errorf("deleted = %q, want only the zero-total drafts", got)
+		}
+	})
+
+	t.Run("invoices with a balance are outstanding and never deleted", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.invoices["cust"] = []om.Invoice{
+			invoiceFor("cust", "inv-draft-owed", om.InvoiceStatusDraft, "12.50"),
+			invoiceFor("cust", "inv-issued", om.InvoiceStatusIssued, "0"),
+			invoiceFor("cust", "inv-draft-0", om.InvoiceStatusDraft, "0"),
+		}
+		err := c.PrepareInvoicesForCustomerDeletion(context.Background(), "cust")
+		if !errors.Is(err, ErrInvoicesOutstanding) {
+			t.Fatalf("err = %v, want ErrInvoicesOutstanding", err)
+		}
+		for _, id := range []string{"inv-draft-owed", "inv-issued"} {
+			if !strings.Contains(err.Error(), id) {
+				t.Errorf("error %q does not name %s", err, id)
+			}
+		}
+		if got := strings.Join(f.invoicesDeleted, ","); got != "inv-draft-0" {
+			t.Errorf("deleted = %q, want only the zero-total draft", got)
+		}
+	})
+
+	t.Run("pending lines are invoiced first", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.invoices["cust"] = []om.Invoice{invoiceFor("cust", "inv-gathering", om.InvoiceStatusGathering, "0")}
+		if err := c.PrepareInvoicesForCustomerDeletion(context.Background(), "cust"); err != nil {
+			t.Fatalf("PrepareInvoicesForCustomerDeletion: %v", err)
+		}
+		if f.pendingLinesInvoiced != 1 {
+			t.Errorf("pending lines invoiced %d times, want 1", f.pendingLinesInvoiced)
+		}
+		if got := strings.Join(f.invoicesDeleted, ","); got != "inv-gathering" {
+			t.Errorf("deleted = %q, want the resulting zero-total draft", got)
+		}
+	})
+
+	t.Run("no invoices", func(t *testing.T) {
+		c, f := newTestClient(t)
+		if err := c.PrepareInvoicesForCustomerDeletion(context.Background(), "cust"); err != nil {
+			t.Fatalf("PrepareInvoicesForCustomerDeletion: %v", err)
+		}
+		if f.pendingLinesInvoiced != 0 || len(f.invoicesDeleted) != 0 {
+			t.Error("issued writes with nothing to do")
+		}
+	})
+}
+
+func TestIsZeroAmount(t *testing.T) {
+	for amount, want := range map[string]bool{"0": true, "0.00": true, " 0 ": true, "0.01": false, "-1": false, "": false, "abc": false} {
+		if got := isZeroAmount(amount); got != want {
+			t.Errorf("isZeroAmount(%q) = %v, want %v", amount, got, want)
+		}
 	}
 }

@@ -91,6 +91,11 @@ type Client interface {
 	// not the external key — same caveat as
 	// UpsertBillingProfileCustomerOverride.
 	ListInvoices(ctx context.Context, customerID CustomerID) ([]om.Invoice, error)
+	// PrepareInvoicesForCustomerDeletion invoices pending lines and deletes
+	// zero-total drafts so the customer can be deleted. Returns an error
+	// wrapping ErrInvoicesOutstanding while invoices with a balance are not
+	// yet paid, voided, or uncollectible.
+	PrepareInvoicesForCustomerDeletion(ctx context.Context, customerID CustomerID) error
 
 	// Stripe app data (see stripe.go).
 
@@ -171,6 +176,21 @@ type Client interface {
 	// is active (OpenMeter refuses to delete an active plan). Already-deleted
 	// versions and NotFound are treated as success.
 	DeletePlan(ctx context.Context, plan om.Plan) error
+
+	// Subscriptions (see subscription.go).
+
+	// EnsureSubscription converges the customer to exactly one live
+	// subscription on the active version of desired.PlanKey: it creates one,
+	// changes another plan's subscription to it, or migrates an older
+	// version, both immediately. Returns ErrCustomerNotFound,
+	// ErrPlanNotPublished, or ErrCustomerBillingNotReady when it cannot.
+	EnsureSubscription(ctx context.Context, desired DesiredSubscription) (SubscriptionState, error)
+	// ListSubscriptions returns every subscription of the customer, live or
+	// ended. Returns ErrCustomerNotFound when the customer does not exist.
+	ListSubscriptions(ctx context.Context, customerKey CustomerKey) ([]om.Subscription, error)
+	// CancelSubscriptions ends every live subscription of the customer
+	// immediately. A missing customer is treated as success.
+	CancelSubscriptions(ctx context.Context, customerKey CustomerKey) error
 
 	// Usage ingestion (see ingest.go).
 
