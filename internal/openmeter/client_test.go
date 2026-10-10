@@ -95,6 +95,16 @@ type fakeServer struct {
 	// status and ingestBody (see serveIngest).
 	ingestStatus int
 	ingestBody   string
+	// customerUpdateBodies records every accepted customer PUT body, in
+	// order (see serveCustomers).
+	customerUpdateBodies []om.CustomerReplaceUpdate
+	// clockTicks backs tick() (customer_test.go): a strictly increasing
+	// fake clock for customers' CreatedAt/UpdatedAt.
+	clockTicks int
+	// stripeAppNotConfigured makes the Stripe app-data routes answer the
+	// way OpenMeter does when the customer's billing profile has no Stripe
+	// app (see serveStripeAppData).
+	stripeAppNotConfigured bool
 }
 
 func newTestClient(t *testing.T) (Client, *fakeServer) {

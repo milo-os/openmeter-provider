@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
+	"strings"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
 )
@@ -58,34 +60,47 @@ type Address struct {
 	PostalCode string
 }
 
-// wireAddress renders a into the OpenMeter wire shape. Always returns a
-// non-nil *om.Address (a nil a renders as an all-nil-fields object) rather
-// than letting CustomerCreate/CustomerReplaceUpdate's own `omitempty` on
-// BillingAddress drop the key entirely — mirrors the SubjectKeys handling
-// below: an explicit empty value is what actually clears a previously-set
-// address on update, whereas an omitted key's effect on OpenMeter's REPLACE
-// semantics is untested and not something to rely on silently.
+// wireAddress renders a into the OpenMeter wire shape, shaped around how
+// OpenMeter's customer adapter (openmeter/customer/adapter/customer.go,
+// UpdateCustomer) actually applies a replace-PUT:
+//
+//   - billingAddress omitted (nil) clears EVERY address column. So a nil a
+//     renders as nil, which is the only way to remove an address.
+//   - billingAddress present writes each field with SetNillable*: a nil
+//     field is a no-op that keeps the stored value, while a pointer to ""
+//     stores "". Sending nil for an emptied field therefore never cleared
+//     it, and customerNeedsUpdate saw the drift on every reconcile, forever.
+//     Optional fields are sent as explicit pointers, "" included; the
+//     OpenAPI Address schema puts no length/pattern constraint on them.
+//
+// Country is the exception: CountryCode is pattern ^[A-Z]{2}$, so "" would
+// be rejected — it's only sent when set (BillingAddress.Country is required
+// by the CRD, so that's always). PhoneNumber has no Milo counterpart and is
+// left nil, i.e. untouched.
 func wireAddress(a *Address) *om.Address {
-	wire := &om.Address{}
 	if a == nil {
-		return wire
+		return nil
+	}
+	wire := &om.Address{
+		Line1:      stringPtr(a.Line1),
+		Line2:      stringPtr(a.Line2),
+		City:       stringPtr(a.City),
+		State:      stringPtr(a.Region),
+		PostalCode: stringPtr(a.PostalCode),
 	}
 	if a.Country != "" {
 		country := a.Country
 		wire.Country = &country
 	}
-	wire.Line1 = stringPtrOrNil(a.Line1)
-	wire.Line2 = stringPtrOrNil(a.Line2)
-	wire.City = stringPtrOrNil(a.City)
-	wire.State = stringPtrOrNil(a.Region)
-	wire.PostalCode = stringPtrOrNil(a.PostalCode)
 	return wire
 }
 
-// addressFromWire is wireAddress's inverse, normalizing both a nil pointer
-// and a non-nil-but-all-empty-fields object to the same zero Address value
-// so customerNeedsUpdate can compare regardless of which shape the server
-// (or our own wireAddress) happens to use for "no address".
+// addressFromWire is wireAddress's inverse, normalizing a nil pointer, a nil
+// field, and a field stored as "" to the same zero value, so
+// customerNeedsUpdate compares what the address means rather than which
+// shape the server happens to return it in: a cleared field comes back as
+// "" (stored by wireAddress's explicit empty pointer), a never-set one as
+// absent. PhoneNumber is ignored — wireAddress never writes it.
 func addressFromWire(a *om.Address) Address {
 	if a == nil {
 		return Address{}
@@ -122,12 +137,43 @@ func normalizeAddress(a *Address) Address {
 	return *a
 }
 
-// stringPtrOrNil returns nil for an empty string, else a pointer to s.
-func stringPtrOrNil(s string) *string {
-	if s == "" {
-		return nil
-	}
+// stringPtr returns a pointer to a copy of s, "" included.
+func stringPtr(s string) *string {
 	return &s
+}
+
+// ErrSubjectKeyConflict marks a customer create/update OpenMeter rejected
+// because one of the requested usageAttribution.subjectKeys is still
+// attributed to a different, non-deleted customer (OpenMeter keeps a unique
+// index on active customer subject keys — openmeter/ent/schema/customer.go —
+// and reports it as customer.SubjectKeyConflictError, a 409). In this
+// codebase that means a project moved between two BillingAccounts and the
+// new account reconciled before the old one let go of it: a condition that
+// clears on its own, so EnsureCustomer reports it as a TransientError
+// wrapping this sentinel rather than as a permanent 409.
+var ErrSubjectKeyConflict = errors.New("openmeter: subject key is attributed to another customer")
+
+// subjectKeyConflictMarker is the fixed part of OpenMeter's
+// customer.NewSubjectKeyConflictError message ("one or multiple subject
+// keys of [...] are already associated with an different customer in the
+// namespace ..."). The 409 body carries no machine-readable code that
+// distinguishes it from the other customer 409s (key conflicts), so the
+// message is the only discriminator.
+const subjectKeyConflictMarker = "are already associated with an different customer"
+
+// classifyCustomerWrite is classify, plus ErrSubjectKeyConflict detection
+// for the customer create/update endpoints.
+func classifyCustomerWrite(resp *http.Response, body []byte) error {
+	err := classify(resp, body, nil)
+	var perm *PermanentError
+	if errors.As(err, &perm) && perm.StatusCode == http.StatusConflict &&
+		strings.Contains(perm.ResponseBody, subjectKeyConflictMarker) {
+		return &TransientError{
+			Err:        fmt.Errorf("%w: %s", ErrSubjectKeyConflict, perm.ResponseBody),
+			StatusCode: perm.StatusCode,
+		}
+	}
+	return err
 }
 
 // nonNilStrings returns in, or an empty (non-nil) slice if in is nil.
@@ -227,7 +273,7 @@ func (c *client) createCustomer(ctx context.Context, desired DesiredCustomer) (o
 	if err != nil {
 		return om.Customer{}, classify(nil, nil, err)
 	}
-	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
+	if err := classifyCustomerWrite(resp.HTTPResponse, resp.Body); err != nil {
 		return om.Customer{}, err
 	}
 	if resp.JSON201 != nil {
@@ -272,7 +318,7 @@ func (c *client) updateCustomer(ctx context.Context, desired DesiredCustomer) (o
 	if err != nil {
 		return om.Customer{}, classify(nil, nil, err)
 	}
-	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
+	if err := classifyCustomerWrite(resp.HTTPResponse, resp.Body); err != nil {
 		return om.Customer{}, err
 	}
 	if resp.JSON200 != nil {
@@ -324,6 +370,59 @@ func (c *client) DeleteCustomer(ctx context.Context, key CustomerKey) error {
 		return classify(nil, nil, err)
 	}
 	if resp.StatusCode() == 404 {
+		return nil
+	}
+	return classify(resp.HTTPResponse, resp.Body, nil)
+}
+
+// ReleaseCustomerSubjects clears the customer's usageAttribution.subjectKeys
+// and leaves every other field as it is. Used by the BillingAccount
+// finalizer: OpenMeter keeps a unique index on active customer subject keys,
+// so a deleting account's customer — which can linger for weeks waiting on
+// unpaid invoices — would otherwise keep its projects from being attributed
+// to whichever account they moved to (that account's customer create/update
+// gets a 409 until then).
+//
+// A missing customer, or one with no subject keys, is a no-op. OpenMeter
+// refuses to change subject keys while the customer has a subscription
+// active at the time of the request (openmeter/subscription/validators/
+// customer ValidateUpdateCustomer), so callers must cancel subscriptions
+// first; an explicit empty list (rather than an omitted usageAttribution,
+// which the adapter would also treat as "remove all") is sent so that check
+// is applied rather than bypassed.
+//
+// The replace-PUT clears description and metadata when they're omitted
+// (SetOrClearDescription / ClearMetadata in the customer adapter), so both
+// are echoed back from the current customer along with the rest; the
+// address is echoed whole, so wireAddress's nil-clears-everything rule
+// keeps it exactly as stored.
+func (c *client) ReleaseCustomerSubjects(ctx context.Context, key CustomerKey) error {
+	existing, err := c.GetCustomer(ctx, key)
+	switch {
+	case errors.Is(err, ErrCustomerNotFound):
+		return nil
+	case err != nil:
+		return err
+	}
+	if existing.UsageAttribution == nil || len(existing.UsageAttribution.SubjectKeys) == 0 {
+		return nil
+	}
+
+	body := om.CustomerReplaceUpdate{
+		Name:             existing.Name,
+		Key:              existing.Key,
+		Description:      existing.Description,
+		Metadata:         existing.Metadata,
+		PrimaryEmail:     existing.PrimaryEmail,
+		Currency:         existing.Currency,
+		BillingAddress:   existing.BillingAddress,
+		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: []string{}},
+	}
+	resp, err := c.api.UpdateCustomerWithResponse(ctx, string(key), body)
+	if err != nil {
+		return classify(nil, nil, err)
+	}
+	if resp.StatusCode() == http.StatusNotFound {
 		return nil
 	}
 	return classify(resp.HTTPResponse, resp.Body, nil)

@@ -84,6 +84,11 @@ type Client interface {
 	// DeleteCustomer removes a customer by key. NotFound is treated as
 	// success.
 	DeleteCustomer(ctx context.Context, key CustomerKey) error
+	// ReleaseCustomerSubjects clears the customer's usage attribution
+	// (subject keys), leaving every other field unchanged. A missing
+	// customer or one with no subject keys is a no-op. OpenMeter refuses
+	// while a subscription is active, so cancel subscriptions first.
+	ReleaseCustomerSubjects(ctx context.Context, key CustomerKey) error
 
 	// Invoices (see invoice.go).
 
@@ -112,6 +117,11 @@ type Client interface {
 	// required (the initial GetCustomer/EnsureCustomer lookup and the
 	// delete finalizer, which has no id to read without persisting one).
 	EnsureCustomerStripeAppData(ctx context.Context, customerID CustomerID, stripeCustomerID StripeCustomerID, stripeDefaultPaymentMethodID string) error
+	// GetCustomerStripeAppData reads the customer's stored Stripe app data.
+	// Returns ErrStripeAppDataNotFound when there is none, and
+	// ErrStripeAppNotConfigured when the customer's billing profile has no
+	// Stripe app.
+	GetCustomerStripeAppData(ctx context.Context, customerID CustomerID) (om.StripeCustomerAppData, error)
 
 	// Billing profiles (see billingprofile.go).
 

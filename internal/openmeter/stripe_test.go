@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -26,9 +27,15 @@ func (f *fakeServer) serveStripeAppData(w http.ResponseWriter, r *http.Request) 
 	// client reads first and skips a write that would change nothing.
 	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, prefix) && strings.HasSuffix(r.URL.Path, "/stripe") {
 		key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), "/stripe")
+		if f.stripeAppNotConfigured {
+			writeStripeAppNotConfigured(w, key)
+			return true
+		}
 		existing, ok := f.stripeAppData[key]
 		if !ok {
-			w.WriteHeader(http.StatusNotFound)
+			// What OpenMeter answers (app/stripe/adapter/customer.go
+			// GetStripeCustomerData): a 412, not a 404.
+			writePreconditionFailed(w, "customer has no data for stripe app [namespace=default customer.id="+key+"]")
 			return true
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -43,6 +50,10 @@ func (f *fakeServer) serveStripeAppData(w http.ResponseWriter, r *http.Request) 
 	key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), suffix)
 	if key == "" {
 		w.WriteHeader(http.StatusNotFound)
+		return true
+	}
+	if f.stripeAppNotConfigured {
+		writeStripeAppNotConfigured(w, key)
 		return true
 	}
 	f.stripeAppDataWrites++
@@ -68,6 +79,26 @@ func (f *fakeServer) serveStripeAppData(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode([]om.StripeCustomerAppData{f.stripeAppData[key]})
 	return true
+}
+
+// writePreconditionFailed answers with a 412 problem document carrying
+// detail, the shape OpenMeter uses for GenericPreConditionFailedError.
+func writePreconditionFailed(w http.ResponseWriter, detail string) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(http.StatusPreconditionFailed)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":   "about:blank",
+		"title":  "Precondition Failed",
+		"status": http.StatusPreconditionFailed,
+		"detail": detail,
+	})
+}
+
+// writeStripeAppNotConfigured answers the way OpenMeter does when the
+// customer's merged billing profile has no Stripe app
+// (billing/service/customeroverride.go GetCustomerApp).
+func writeStripeAppNotConfigured(w http.ResponseWriter, customerID string) {
+	writePreconditionFailed(w, "error getting customer app: no stripe app found in billing profile for customer "+customerID)
 }
 
 func TestEnsureCustomerStripeAppData_Success(t *testing.T) {
@@ -170,5 +201,96 @@ func TestEnsureCustomerStripeAppData_WritesOnRealDrift(t *testing.T) {
 	}
 	if got := f.stripeAppData["cust-1"]; got.StripeDefaultPaymentMethodId == nil || *got.StripeDefaultPaymentMethodId != "pm_new" {
 		t.Errorf("stored payment method = %v, want pm_new", got.StripeDefaultPaymentMethodId)
+	}
+}
+
+// TestEnsureCustomerStripeAppData_EmptyPaymentMethodClearsStored: once the
+// default payment method goes away, re-upserting the same Stripe customer
+// without one must clear the stored id — otherwise OpenMeter keeps putting
+// a detached card on every Stripe invoice.
+func TestEnsureCustomerStripeAppData_EmptyPaymentMethodClearsStored(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+
+	if err := c.EnsureCustomerStripeAppData(ctx, "cust-1", "cus_x", "pm_old"); err != nil {
+		t.Fatalf("first EnsureCustomerStripeAppData: %v", err)
+	}
+	if err := c.EnsureCustomerStripeAppData(ctx, "cust-1", "cus_x", ""); err != nil {
+		t.Fatalf("clearing EnsureCustomerStripeAppData: %v", err)
+	}
+	got := f.stripeAppData["cust-1"]
+	if got.StripeCustomerId != "cus_x" || got.StripeDefaultPaymentMethodId != nil {
+		t.Errorf("stored = %+v, want cus_x with no payment method", got)
+	}
+	if err := c.EnsureCustomerStripeAppData(ctx, "cust-1", "cus_x", ""); err != nil {
+		t.Fatalf("repeat EnsureCustomerStripeAppData: %v", err)
+	}
+	if f.stripeAppDataWrites != 2 {
+		t.Errorf("issued %d write(s), want 2 (set, clear; the repeat is a no-op)", f.stripeAppDataWrites)
+	}
+}
+
+func TestGetCustomerStripeAppData(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+
+	if _, err := c.GetCustomerStripeAppData(ctx, "cust-1"); !errors.Is(err, ErrStripeAppDataNotFound) {
+		t.Errorf("no app data: err = %v, want ErrStripeAppDataNotFound", err)
+	}
+
+	if err := c.EnsureCustomerStripeAppData(ctx, "cust-1", "cus_x", "pm_x"); err != nil {
+		t.Fatalf("EnsureCustomerStripeAppData: %v", err)
+	}
+	got, err := c.GetCustomerStripeAppData(ctx, "cust-1")
+	if err != nil {
+		t.Fatalf("GetCustomerStripeAppData: %v", err)
+	}
+	if got.StripeCustomerId != "cus_x" || derefOrEmpty(got.StripeDefaultPaymentMethodId) != "pm_x" {
+		t.Errorf("got %+v, want cus_x/pm_x", got)
+	}
+
+	f.stripeAppNotConfigured = true
+	if _, err := c.GetCustomerStripeAppData(ctx, "cust-1"); !errors.Is(err, ErrStripeAppNotConfigured) {
+		t.Errorf("no Stripe app: err = %v, want ErrStripeAppNotConfigured", err)
+	}
+}
+
+// TestEnsureCustomerStripeAppData_NoStripeAppIsRecognizable: when the
+// customer's billing profile uses another app (Sandbox), the 412 must be
+// distinguishable so the controller can report it once instead of failing
+// every sync.
+func TestEnsureCustomerStripeAppData_NoStripeAppIsRecognizable(t *testing.T) {
+	c, f := newTestClient(t)
+	f.stripeAppNotConfigured = true
+
+	err := c.EnsureCustomerStripeAppData(context.Background(), "cust-1", "cus_x", "pm_x")
+	if !errors.Is(err, ErrStripeAppNotConfigured) {
+		t.Fatalf("err = %v, want ErrStripeAppNotConfigured", err)
+	}
+	if !IsPermanent(err) {
+		t.Errorf("err = %T, want it still classified permanent", err)
+	}
+}
+
+// TestEnsureCustomerStripeAppData_OtherPreconditionFailuresStayGeneric: a
+// 412 for any other reason (e.g. an unknown Stripe customer) is a real sync
+// failure and must not be mistaken for "no Stripe app".
+func TestEnsureCustomerStripeAppData_OtherPreconditionFailuresStayGeneric(t *testing.T) {
+	srv := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writePreconditionFailed(w, "stripe customer cus_x not found in stripe account: acct_1")
+	})
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	c, err := NewClient(ts.URL, "")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	err = c.EnsureCustomerStripeAppData(context.Background(), "cust-1", "cus_x", "")
+	if !IsPermanent(err) {
+		t.Fatalf("err = %v, want a PermanentError", err)
+	}
+	if errors.Is(err, ErrStripeAppNotConfigured) || errors.Is(err, ErrStripeAppDataNotFound) {
+		t.Errorf("err = %v, want neither sentinel", err)
 	}
 }
