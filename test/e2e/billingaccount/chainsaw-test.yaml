@@ -11,7 +11,8 @@ spec:
     (both attribution paths — object deletion and a Superseded phase
     transition — must drop a project the same way), update a mutable field
     (contactInfo.email), attach a default payment method and confirm Stripe
-    app data syncs, then delete and confirm the customer, BillingProfile, and
+    app data syncs, lose it again and confirm the stale payment method is
+    cleared, then delete and confirm the customer, BillingProfile, and
     BillingProfile-customer override are all removed.
 
     This cluster runs only openmeter-provider + OpenMeter, not billing's own
@@ -415,6 +416,42 @@ spec:
                 value: ($stripePaymentMethodId)
             content: |
               sh verify-stripe-app-data.sh "$CUSTOMER_KEY" "$STRIPE_CUSTOMER_ID" "$STRIPE_PAYMENT_METHOD_ID"
+
+    - name: lose the default payment method and confirm the stale one is cleared
+      description: |
+        Patch DefaultPaymentMethodReady to False (simulating billing's own
+        controller once the default PaymentMethod is no longer usable).
+        stripe-provider detaches the card in that case, and OpenMeter puts
+        the stored stripeDefaultPaymentMethodId on every Stripe invoice, so
+        the reconciler must re-upsert the same Stripe customer WITHOUT a
+        payment method rather than leave the old one in place.
+        resolve-stripe-customer.sh is re-run only to recover the Stripe
+        customer id (cached from the previous step).
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-billingaccount -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - script:
+            content: |
+              sh resolve-stripe-customer.sh "$NAMESPACE" customerId
+            outputs:
+              - name: stripeCustomerId
+                value: ($stdout)
+        - patch:
+            file: billingaccount-payment-method-not-ready.yaml
+            subresource: status
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+              - name: STRIPE_CUSTOMER_ID
+                value: ($stripeCustomerId)
+            content: |
+              sh verify-stripe-payment-method-cleared.sh "$CUSTOMER_KEY" "$STRIPE_CUSTOMER_ID"
 
     - name: delete the BillingAccount and confirm everything is removed
       description: |
