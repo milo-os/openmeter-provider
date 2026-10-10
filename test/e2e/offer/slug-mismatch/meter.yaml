@@ -1,0 +1,25 @@
+# The MeterDefinition name deliberately differs from spec.meterName.
+#
+# metadata.name is a Kubernetes resource name; spec.meterName is the canonical
+# reverse-DNS identity (metrics.miloapis.com/cpu-usage) from which the OpenMeter
+# meter slug is derived. The OfferReconciler must derive the slug from
+# spec.meterName — a regression that derives it from metadata.name points usage
+# features at a non-existent meter slug and the Offer never converges.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: cpu-usage-meter
+spec:
+  meterName: metrics.miloapis.com/cpu-usage
+  phase: Published
+  displayName: "CPU Usage (slug-mismatch fixture)"
+  measurement:
+    aggregation: Sum
+    unit: count
+    dimensions:
+      - region
+  billing:
+    consumedUnit: count
+    pricingUnit: count
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource

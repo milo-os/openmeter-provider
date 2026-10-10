@@ -1,0 +1,15 @@
+# A Draft Offer that is never published: it must get the finalizer (so a
+# later publish can clean up) but never an OpenMeter plan.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-offer-draft
+  annotations:
+    kubernetes.io/display-name: "E2E Draft Offer"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+  servicePricingRefs:
+    - name: usage-item-multi-region
+      namespace: openmeter-system

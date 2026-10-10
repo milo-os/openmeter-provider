@@ -9,7 +9,7 @@ require (
 	github.com/openmeterio/openmeter v1.0.0-beta.232
 	github.com/prometheus/client_golang v1.24.1
 	github.com/spf13/cobra v1.10.2
-	go.miloapis.com/billing v0.3.1
+	go.miloapis.com/billing v0.3.10
 	go.miloapis.com/stripe-provider v0.0.0-00010101000000-000000000000
 	k8s.io/api v0.35.0
 	k8s.io/apimachinery v0.35.0

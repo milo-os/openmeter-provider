@@ -1,0 +1,20 @@
+# GA Offer used for the delete-convergence suite. Authored as Draft with
+# refs and published with ../publish.sh, then renamed (publishing a second
+# plan version), then deleted; the suite asserts every plan version is
+# removed, its features are archived, and the finalizer releases the object.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-offer-delete
+  annotations:
+    kubernetes.io/display-name: "E2E Delete Offer"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+    - Recurring
+  servicePricingRefs:
+    - name: delete-usage
+      namespace: openmeter-system
+    - name: delete-recurring
+      namespace: openmeter-system

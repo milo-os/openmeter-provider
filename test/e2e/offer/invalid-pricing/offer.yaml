@@ -1,0 +1,15 @@
+# Offer over the overlapping pricing in servicepricings.yaml. Authored as
+# Draft with refs; the suite publishes it with ../publish.sh.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-offer-invalid
+  annotations:
+    kubernetes.io/display-name: "E2E Invalid Pricing Offer"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+  servicePricingRefs:
+    - name: overlapping-usage
+      namespace: openmeter-system

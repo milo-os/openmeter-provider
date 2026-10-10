@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -15,6 +16,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/finalizer"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	om "github.com/openmeterio/openmeter/api/client/go"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 
@@ -28,6 +31,14 @@ type partialFailureOpenMeterClient struct {
 	openmeter.Client // panics on any unimplemented method if called
 
 	deleteCustomerCalls int
+}
+
+func (f *partialFailureOpenMeterClient) GetCustomer(_ context.Context, key openmeter.CustomerKey) (om.Customer, error) {
+	return om.Customer{Id: "id-" + string(key)}, nil
+}
+
+func (f *partialFailureOpenMeterClient) PrepareInvoicesForCustomerDeletion(_ context.Context, _ openmeter.CustomerID) error {
+	return nil
 }
 
 func (f *partialFailureOpenMeterClient) DeleteCustomer(_ context.Context, _ openmeter.CustomerKey) error {
@@ -170,6 +181,13 @@ type allSucceedOpenMeterClient struct {
 	openmeter.Client
 }
 
+func (f *allSucceedOpenMeterClient) GetCustomer(_ context.Context, key openmeter.CustomerKey) (om.Customer, error) {
+	return om.Customer{Id: "id-" + string(key)}, nil
+}
+func (f *allSucceedOpenMeterClient) PrepareInvoicesForCustomerDeletion(_ context.Context, _ openmeter.CustomerID) error {
+	return nil
+}
+
 func (f *allSucceedOpenMeterClient) DeleteCustomer(_ context.Context, _ openmeter.CustomerKey) error {
 	return nil
 }
@@ -178,4 +196,117 @@ func (f *allSucceedOpenMeterClient) DeleteBillingProfileCustomerOverride(_ conte
 }
 func (f *allSucceedOpenMeterClient) DeleteBillingProfile(_ context.Context, _ string) error {
 	return nil
+}
+
+// invoiceGateOpenMeterClient drives the customer-link finalizer's invoice
+// preparation.
+type invoiceGateOpenMeterClient struct {
+	openmeter.Client
+
+	getCustomerErr      error
+	prepareErr          error
+	deleteCustomerCalls int
+}
+
+func (f *invoiceGateOpenMeterClient) GetCustomer(_ context.Context, key openmeter.CustomerKey) (om.Customer, error) {
+	if f.getCustomerErr != nil {
+		return om.Customer{}, f.getCustomerErr
+	}
+	return om.Customer{Id: "id-" + string(key)}, nil
+}
+func (f *invoiceGateOpenMeterClient) PrepareInvoicesForCustomerDeletion(_ context.Context, _ openmeter.CustomerID) error {
+	return f.prepareErr
+}
+func (f *invoiceGateOpenMeterClient) DeleteCustomer(_ context.Context, _ openmeter.CustomerKey) error {
+	f.deleteCustomerCalls++
+	return nil
+}
+
+func reconcileDeletingAccount(t *testing.T, omc openmeter.Client) (reconcile.Result, []string, error) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := billingv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	now := metav1.Now()
+	account := &billingv1alpha1.BillingAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "acme-account", Namespace: "org-a", UID: types.UID("uid-1"),
+			DeletionTimestamp: &now,
+			Finalizers:        []string{CustomerLinkFinalizer},
+		},
+	}
+	k8s := fake.NewClientBuilder().WithScheme(scheme).WithObjects(account).Build()
+	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc}
+	r.Finalizers = finalizer.NewFinalizers()
+	if err := r.Finalizers.Register(CustomerLinkFinalizer, &customerLinkFinalizer{OpenMeterClient: omc}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "acme-account", Namespace: "org-a"}}
+	res, err := r.Reconcile(context.Background(), req)
+
+	var after billingv1alpha1.BillingAccount
+	getErr := k8s.Get(context.Background(), req.NamespacedName, &after)
+	if apierrors.IsNotFound(getErr) {
+		return res, nil, err
+	}
+	if getErr != nil {
+		t.Fatalf("get: %v", getErr)
+	}
+	return res, after.Finalizers, err
+}
+
+func TestCustomerLinkFinalizer_WaitsForOutstandingInvoices(t *testing.T) {
+	omc := &invoiceGateOpenMeterClient{
+		prepareErr: fmt.Errorf("%w: inv-1 (issued, total 12.50 USD)", openmeter.ErrInvoicesOutstanding),
+	}
+
+	res, finalizers, err := reconcileDeletingAccount(t, omc)
+
+	if err != nil {
+		t.Errorf("Reconcile error = %v, want none: waiting on invoices is not a failure", err)
+	}
+	if res.RequeueAfter != permanentRequeueAfter {
+		t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, permanentRequeueAfter)
+	}
+	if !slices.Contains(finalizers, CustomerLinkFinalizer) {
+		t.Error("finalizer released while invoices are outstanding")
+	}
+	if omc.deleteCustomerCalls != 0 {
+		t.Errorf("DeleteCustomer called %d times, want 0", omc.deleteCustomerCalls)
+	}
+}
+
+func TestCustomerLinkFinalizer_DeletesCustomerOnceInvoicesSettle(t *testing.T) {
+	omc := &invoiceGateOpenMeterClient{}
+
+	if _, finalizers, err := reconcileDeletingAccount(t, omc); err != nil || len(finalizers) != 0 {
+		t.Fatalf("err = %v, finalizers = %v; want released", err, finalizers)
+	}
+	if omc.deleteCustomerCalls != 1 {
+		t.Errorf("DeleteCustomer called %d times, want 1", omc.deleteCustomerCalls)
+	}
+}
+
+func TestCustomerLinkFinalizer_CustomerAlreadyGone(t *testing.T) {
+	omc := &invoiceGateOpenMeterClient{getCustomerErr: openmeter.ErrCustomerNotFound}
+
+	if _, finalizers, err := reconcileDeletingAccount(t, omc); err != nil || len(finalizers) != 0 {
+		t.Fatalf("err = %v, finalizers = %v; want released", err, finalizers)
+	}
+	if omc.deleteCustomerCalls != 0 {
+		t.Errorf("DeleteCustomer called %d times, want 0", omc.deleteCustomerCalls)
+	}
+}
+
+func TestCustomerLinkFinalizer_PreparationFailureIsAnError(t *testing.T) {
+	omc := &invoiceGateOpenMeterClient{prepareErr: &openmeter.TransientError{Err: errors.New("unavailable")}}
+
+	_, finalizers, err := reconcileDeletingAccount(t, omc)
+	if err == nil {
+		t.Error("Reconcile error = nil, want the preparation failure surfaced for backoff")
+	}
+	if !slices.Contains(finalizers, CustomerLinkFinalizer) {
+		t.Error("finalizer released after a failed preparation")
+	}
 }

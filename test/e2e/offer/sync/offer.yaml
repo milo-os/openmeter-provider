@@ -1,0 +1,22 @@
+# Authored the way a platform owner authors an Offer: Draft, referencing
+# ServicePricings by name. The suite then publishes it with ../publish.sh,
+# which mimics billing's GA flip and snapshot fill.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-offer-sync
+  annotations:
+    kubernetes.io/display-name: "E2E Comprehensive Offer"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+    - Recurring
+    - OneTime
+  servicePricingRefs:
+    - name: usage-item-multi-region
+      namespace: openmeter-system
+    - name: recurring-base-fee
+      namespace: openmeter-system
+    - name: one-time-setup
+      namespace: openmeter-system

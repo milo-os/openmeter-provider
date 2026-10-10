@@ -1,0 +1,76 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: offer-invalid-pricing
+spec:
+  description: |
+    A GA Offer whose usage rates overlap (matches on two dimensions) cannot
+    be billed without double-counting. The reconciler must surface
+    OpenMeterPlanSynced=False/InvalidPricing, write nothing to OpenMeter, and
+    still release the finalizer on delete.
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-invalid
+              status:
+                phase: Running
+
+    - name: Overlapping rates are rejected without touching OpenMeter
+      try:
+        - apply:
+            file: meter.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: invalid-metric
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - apply:
+            file: servicepricings.yaml
+        - apply:
+            file: offer.yaml
+        - script:
+            timeout: 15s
+            content: bash ../publish.sh e2e-offer-invalid
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-offer-invalid
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "False"
+                    reason: InvalidPricing
+        - script:
+            timeout: 30s
+            content: |
+              OFFER_UID=$(kubectl get offer e2e-offer-invalid -o jsonpath='{.metadata.uid}')
+              bash verify-absent.sh "$OFFER_UID"
+
+    - name: Rejected Offer still deletes cleanly
+      try:
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              name: e2e-offer-invalid
+        - error:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-offer-invalid

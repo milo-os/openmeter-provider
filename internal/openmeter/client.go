@@ -91,6 +91,11 @@ type Client interface {
 	// not the external key — same caveat as
 	// UpsertBillingProfileCustomerOverride.
 	ListInvoices(ctx context.Context, customerID CustomerID) ([]om.Invoice, error)
+	// PrepareInvoicesForCustomerDeletion invoices pending lines and deletes
+	// zero-total drafts so the customer can be deleted. Returns an error
+	// wrapping ErrInvoicesOutstanding while invoices with a balance are not
+	// yet paid, voided, or uncollectible.
+	PrepareInvoicesForCustomerDeletion(ctx context.Context, customerID CustomerID) error
 
 	// Stripe app data (see stripe.go).
 
@@ -129,6 +134,63 @@ type Client interface {
 	// success. customerID must be OpenMeter's internal customer id (a
 	// ULID), same caveat as UpsertBillingProfileCustomerOverride.
 	DeleteBillingProfileCustomerOverride(ctx context.Context, customerID CustomerID) error
+
+	// Features (see feature.go).
+
+	// EnsureFeature creates the feature if absent. An existing active feature
+	// under the same key must already match desired (meter and group-by
+	// filters); features are immutable in OpenMeter, so a mismatch is a
+	// PermanentError rather than a silent reuse of the wrong definition.
+	EnsureFeature(ctx context.Context, desired DesiredFeature) (om.Feature, error)
+	// ListFeatures returns every active (non-archived) feature, optionally
+	// filtered to the features bound to a single meter.
+	ListFeatures(ctx context.Context, meterSlug *string) ([]om.Feature, error)
+	// DeleteFeature archives the feature identified by id or key. OpenMeter
+	// has no hard feature delete in this API generation — DELETE sets
+	// archivedAt. NotFound is treated as success.
+	DeleteFeature(ctx context.Context, idOrKey string) error
+	// ArchiveFeaturesIfUnreferenced archives each member of candidateKeys
+	// that no non-deleted plan version references. Features still referenced
+	// by a plan (including archived versions that may carry subscriptions)
+	// are left active.
+	ArchiveFeaturesIfUnreferenced(ctx context.Context, candidateKeys []string) error
+	// ArchiveUnreferencedMeterFeatures archives every active feature bound to
+	// meterSlug that no non-deleted plan version references. Used by the
+	// MeterDefinition finalizer so the meter can be deleted (OpenMeter rejects
+	// deleting a meter with active features).
+	ArchiveUnreferencedMeterFeatures(ctx context.Context, meterSlug string) error
+
+	// Plans (see plan.go).
+
+	// EnsurePlan converges the plan identified by desired.Key to a published
+	// (active) version whose content matches desired. A matching active
+	// version is a no-op; a pending draft is updated and published; any
+	// other difference creates and publishes a new version, which makes
+	// OpenMeter archive the previous active one.
+	EnsurePlan(ctx context.Context, desired DesiredPlan) (om.Plan, error)
+	// ListPlanVersions returns every version of the plan identified by key,
+	// ordered by ascending version. Deleted versions are included only when
+	// includeDeleted is set. An empty slice means no version exists.
+	ListPlanVersions(ctx context.Context, key string, includeDeleted bool) ([]om.Plan, error)
+	// DeletePlan deletes a single plan version, archiving it first when it
+	// is active (OpenMeter refuses to delete an active plan). Already-deleted
+	// versions and NotFound are treated as success.
+	DeletePlan(ctx context.Context, plan om.Plan) error
+
+	// Subscriptions (see subscription.go).
+
+	// EnsureSubscription converges the customer to exactly one live
+	// subscription on the active version of desired.PlanKey: it creates one,
+	// changes another plan's subscription to it, or migrates an older
+	// version, both immediately. Returns ErrCustomerNotFound,
+	// ErrPlanNotPublished, or ErrCustomerBillingNotReady when it cannot.
+	EnsureSubscription(ctx context.Context, desired DesiredSubscription) (SubscriptionState, error)
+	// ListSubscriptions returns every subscription of the customer, live or
+	// ended. Returns ErrCustomerNotFound when the customer does not exist.
+	ListSubscriptions(ctx context.Context, customerKey CustomerKey) ([]om.Subscription, error)
+	// CancelSubscriptions ends every live subscription of the customer
+	// immediately. A missing customer is treated as success.
+	CancelSubscriptions(ctx context.Context, customerKey CustomerKey) error
 
 	// Usage ingestion (see ingest.go).
 

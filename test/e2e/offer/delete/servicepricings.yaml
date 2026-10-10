@@ -1,0 +1,25 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: delete-usage
+spec:
+  displayName: "Delete Usage"
+  chargeType: Usage
+  currency: USD
+  metric: del-metric
+  pricingUnit: vcpu
+  serviceRef: compute.miloapis.com
+  rates:
+    - flat: "0.05"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: delete-recurring
+spec:
+  displayName: "Delete Recurring"
+  chargeType: Recurring
+  currency: USD
+  amount: "20.00"
+  interval: monthly
+  serviceRef: platform.miloapis.com

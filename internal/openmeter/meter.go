@@ -93,12 +93,14 @@ func valueNeedsProperty(a om.MeterAggregation) bool {
 // underscores, with no dots, slashes, or hyphens. Milo meterNames are
 // reverse-DNS paths such as "compute.miloapis.com/instance/cpu-seconds".
 //
-// The transformation is deterministic and 1:1 for a given input: every '.'
-// and '/' is replaced with '_' and the result is lowercased. The original
-// meterName is always carried verbatim in the meter's eventType, so event
-// routing never depends on the slug encoding.
+// The transformation is deterministic: every '.', '/', and '-' is replaced
+// with '_' and the result is lowercased. It is NOT injective — "a-b" and
+// "a_b" (or "a.b") map to the same slug. Two MeterDefinitions colliding
+// that way surface as a PermanentError from EnsureMeter (their eventTypes
+// disagree) rather than silently sharing a meter. The original meterName is always carried verbatim in the meter's
+// eventType, so event routing never depends on the slug encoding.
 func MeterSlug(meterName string) string {
-	replacer := strings.NewReplacer(".", "_", "/", "_")
+	replacer := strings.NewReplacer(".", "_", "/", "_", "-", "_")
 	return replacer.Replace(strings.ToLower(meterName))
 }
 

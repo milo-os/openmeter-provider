@@ -19,7 +19,7 @@ vars:
   # Billing repo release to pull the MeterDefinition CRD from. The
   # openmeter-provider reconciles billing's MeterDefinition kind, so its CRD
   # must be present in the cluster for the controller to start its watch.
-  BILLING_REPO_REF: "v0.3.5"
+  BILLING_REPO_REF: "v0.3.10"
   # stripe-provider release to pull the StripePaymentMethod CRD from.
   # BillingAccountReconciler's resolveStripeCustomer watches this kind (see
   # stripe_customer.go); without it in the cluster, the controller manager
@@ -551,10 +551,11 @@ tasks:
 
   dev:redeploy:
     desc: Quick rebuild and redeploy for dev environment
-    deps:
-      - dev:build
-      - dev:load
     cmds:
+      # Sequential, not `deps:` — Task runs deps in parallel, so the load
+      # could push the previous image into kind before the build finished.
+      - task: dev:build
+      - task: dev:load
       - |
         set -e
         echo "Redeploying openmeter-provider (dev)..."

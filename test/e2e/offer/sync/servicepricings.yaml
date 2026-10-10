@@ -1,0 +1,51 @@
+# The ServicePricings the sync Offers reference. In production these are
+# fanned out by service-catalog into milo-system; here they live in the test
+# namespace and the Offers reference that namespace explicitly.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: usage-item-multi-region
+spec:
+  displayName: "Compute Usage"
+  chargeType: Usage
+  currency: USD
+  metric: e2e-metric
+  pricingUnit: vcpu
+  serviceRef: compute.miloapis.com
+  rates:
+    - match:
+        dimension: region
+        value: us-east
+      flat: "0.10"
+    - match:
+        dimension: region
+        value: eu-west
+      tiered:
+        - rate: "0.12"
+          upTo: "100"
+        - rate: "0.08"
+    - flat: "0.05" # Catch-all: usage outside us-east and eu-west
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: recurring-base-fee
+spec:
+  displayName: "Monthly Platform Fee"
+  chargeType: Recurring
+  currency: USD
+  amount: "50.00"
+  interval: monthly
+  serviceRef: platform.miloapis.com
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: one-time-setup
+spec:
+  displayName: "Setup Fee"
+  chargeType: OneTime
+  currency: USD
+  amount: "100.00"
+  trigger: BillingAccountActivation
+  serviceRef: platform.miloapis.com

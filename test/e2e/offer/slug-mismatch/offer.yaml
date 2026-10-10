@@ -1,0 +1,18 @@
+# GA Offer whose usage pricing references the reverse-DNS meterName
+# (metrics.miloapis.com/cpu-usage) while the MeterDefinition's metadata.name is
+# different (cpu-usage-meter). This exercises the F1 regression guard: the
+# reconciler must map the metric to the slug derived from spec.meterName.
+# Authored as Draft with refs; the suite publishes it with ../publish.sh.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-slug-mismatch
+  annotations:
+    kubernetes.io/display-name: "E2E Slug Mismatch Offer"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+  servicePricingRefs:
+    - name: usage-item-1
+      namespace: openmeter-system

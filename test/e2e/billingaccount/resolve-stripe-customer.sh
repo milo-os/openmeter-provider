@@ -18,7 +18,8 @@
 #
 # This script runs locally (a chainsaw `script` step, not routed through
 # `kubectl exec`), so Stripe's public API is directly reachable; only the
-# check against OpenMeter itself needs the in-cluster openmeter-query pod.
+# check against OpenMeter itself needs the in-cluster query pod
+# (QUERY_POD, default openmeter-query; other suites pass their own).
 #
 # Cached in /tmp so the two field lookups (one chainsaw script step per
 # field) reuse the same created Stripe customer instead of creating two.
@@ -27,6 +28,7 @@ set -eu
 ns="$1"
 field="$2"
 cache="/tmp/e2e-stripe-customer-${ns}.env"
+query_pod="${QUERY_POD:-openmeter-query}"
 
 resolve() {
   if [ -f "$cache" ]; then
@@ -34,7 +36,7 @@ resolve() {
     return
   fi
 
-  profiles_body="$(kubectl exec -n openmeter-system openmeter-query -- wget -q -O - \
+  profiles_body="$(kubectl exec -n openmeter-system "$query_pod" -- wget -q -O - \
     "http://openmeter-api.openmeter-system.svc.cluster.local/api/v1/billing/profiles?expand=apps" 2>/dev/null || true)"
   # Distinguish "reached OpenMeter, it has no default profile" (fine — fake
   # ids, nothing validates them) from "couldn't reach OpenMeter at all".
@@ -50,7 +52,7 @@ resolve() {
 
   app_type=""
   if [ -n "$default_payment_app_id" ]; then
-    app_body="$(kubectl exec -n openmeter-system openmeter-query -- wget -q -O - \
+    app_body="$(kubectl exec -n openmeter-system "$query_pod" -- wget -q -O - \
       "http://openmeter-api.openmeter-system.svc.cluster.local/api/v1/apps/${default_payment_app_id}" 2>/dev/null || true)"
     app_type="$(echo "$app_body" | jq -r '.type // empty' 2>/dev/null || true)"
   fi
