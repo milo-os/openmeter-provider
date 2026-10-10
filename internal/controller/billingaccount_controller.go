@@ -4,13 +4,21 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -18,6 +26,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	om "github.com/openmeterio/openmeter/api/client/go"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 	stripev1alpha1 "go.miloapis.com/stripe-provider/api/v1alpha1"
@@ -35,7 +45,209 @@ const (
 	// billingAccountControllerName is the controller label value used for
 	// the SetupWithManager "Named" call.
 	billingAccountControllerName = "billingaccount"
+
+	// ForceDeleteAnnotation is the ops escape hatch for a BillingAccount
+	// whose deletion is stuck behind customerLinkFinalizer (e.g. OpenMeter
+	// keeps rejecting a cleanup step with a permanent error, or invoices
+	// will never be settled). Set to "true" on a deleting account, it makes
+	// the finalizer release WITHOUT touching OpenMeter at all: the customer,
+	// its subscriptions, its subject keys and its invoices are all left in
+	// place and have to be cleaned up by hand. In particular the customer
+	// keeps its projects' subject keys, so another account those projects
+	// move to can't take them over until they're cleared in OpenMeter.
+	ForceDeleteAnnotation = "openmeter.miloapis.com/force-delete"
+
+	// syncedRequeueAfter re-runs a successfully synced account periodically.
+	// OpenMeter invoice status changes (issued, paid, overdue) have no event
+	// that reaches this controller, so without it they would only reach the
+	// Milo Invoice on an unrelated BillingAccount/binding/payment-method
+	// event or the manager's 10h resync.
+	syncedRequeueAfter = 10 * time.Minute
+
+	// subjectKeyConflictRequeueAfter retries an account whose projects are
+	// still attributed to another account's customer. The other account
+	// normally lets go within a reconcile or two (it reconciles on the same
+	// binding change, or releases them in its finalizer), so this is short
+	// — but not the 15s transient backoff, since it can also persist (an
+	// orphaned customer left behind by ForceDeleteAnnotation).
+	subjectKeyConflictRequeueAfter = time.Minute
+
+	// customerNameMaxLength is OpenMeter's limit on a customer name (1-256
+	// characters in api/openapi.yaml's CustomerCreate/CustomerReplaceUpdate;
+	// enforced as a rune count by the request validator).
+	customerNameMaxLength = 256
 )
+
+// Event reasons specific to BillingAccount. The generic ones (Synced,
+// SyncFailed, Deleted, DeleteFailed) are shared with MeterDefinition.
+const (
+	// EventReasonWaitingForInvoices: deletion is waiting for outstanding
+	// OpenMeter invoices to be paid, voided or marked uncollectible.
+	// Emitted when the set of outstanding invoices changes, not every poll.
+	EventReasonWaitingForInvoices = "WaitingForInvoices"
+	// EventReasonForceDeleted: ForceDeleteAnnotation released the finalizer
+	// without any OpenMeter cleanup.
+	EventReasonForceDeleted = "ForceDeleted"
+	// EventReasonStripeCustomerMissing: the account is billed by invoice (an
+	// active Invoice BillingArrangement), but OpenMeter has no Stripe
+	// customer for it, so OpenMeter's Stripe app can't invoice it.
+	EventReasonStripeCustomerMissing = "StripeCustomerMissing"
+	// EventReasonStripeAppNotConfigured: the customer's billing profile has
+	// no Stripe app (e.g. a Sandbox install), so Stripe app data can't be
+	// synced.
+	EventReasonStripeAppNotConfigured = "StripeAppNotConfigured"
+	// EventReasonSubjectKeyConflict: one of the account's projects is still
+	// attributed to another OpenMeter customer.
+	EventReasonSubjectKeyConflict = "SubjectKeyConflict"
+
+	// finalizerReasonWaitingForSubscriptions is the FinalizerWaitingError
+	// reason while the customer still has a live subscription.
+	finalizerReasonWaitingForSubscriptions = "WaitingForSubscriptions"
+)
+
+// FinalizerWaitingError reports that a finalizer cannot finish YET, for a
+// reason expected to resolve on its own (an invoice being paid, a
+// subscription ending, another finalizer finishing first) — as opposed to a
+// failure. Any finalizer registered on BillingAccountReconciler.Finalizers
+// can return one (directly or wrapped with %w); Reconcile requeues after
+// RequeueAfter without returning an error, so waiting doesn't show up as
+// error logs, error backoff, or failure metrics.
+//
+// That only applies when EVERY error from Finalizers.Finalize is a
+// FinalizerWaitingError: if any finalizer fails for real in the same pass,
+// the aggregate is returned as an error so the failure isn't masked by a
+// sibling that happens to be waiting. With several waiting finalizers the
+// shortest RequeueAfter wins.
+type FinalizerWaitingError struct {
+	// Reason is a short CamelCase label for what is being waited on (e.g.
+	// "WaitingForInvoices"), used in logs.
+	Reason string
+	// RequeueAfter is when to check again. Zero means transientRequeueAfter.
+	RequeueAfter time.Duration
+	// Err describes the condition in detail. May be nil.
+	Err error
+}
+
+// NewFinalizerWaiting returns a *FinalizerWaitingError; see its doc.
+func NewFinalizerWaiting(reason string, after time.Duration, cause error) error {
+	return &FinalizerWaitingError{Reason: reason, RequeueAfter: after, Err: cause}
+}
+
+// Error implements error.
+func (e *FinalizerWaitingError) Error() string {
+	if e.Err == nil {
+		return "waiting: " + e.Reason
+	}
+	return fmt.Sprintf("waiting: %s: %v", e.Reason, e.Err)
+}
+
+// Unwrap exposes the cause so errors.Is/As still see through it.
+func (e *FinalizerWaitingError) Unwrap() error {
+	return e.Err
+}
+
+// finalizerWaitRequeue reports whether err — typically the aggregate from
+// finalizer.Finalizers.Finalize — consists ENTIRELY of FinalizerWaitingErrors,
+// and if so the shortest RequeueAfter among them.
+func finalizerWaitRequeue(err error) (time.Duration, []string, bool) {
+	waits, ok := collectFinalizerWaits(err, nil)
+	if !ok || len(waits) == 0 {
+		return 0, nil, false
+	}
+	var after time.Duration
+	reasons := make([]string, 0, len(waits))
+	for _, w := range waits {
+		reasons = append(reasons, w.Reason)
+		if w.RequeueAfter > 0 && (after == 0 || w.RequeueAfter < after) {
+			after = w.RequeueAfter
+		}
+	}
+	if after == 0 {
+		after = transientRequeueAfter
+	}
+	return after, reasons, true
+}
+
+// collectFinalizerWaits walks err's tree. Every leaf must be (or be wrapped
+// around) a *FinalizerWaitingError, which is not descended into; ok is false
+// as soon as any branch ends in something else. Aggregates (Finalizers'
+// kerrors.Aggregate, which has no Unwrap) and errors.Join trees are walked
+// member by member, so one waiting member can't vouch for a failing one the
+// way a plain errors.As over the whole aggregate would.
+func collectFinalizerWaits(err error, acc []*FinalizerWaitingError) ([]*FinalizerWaitingError, bool) {
+	if err == nil {
+		return acc, true
+	}
+	if w, ok := err.(*FinalizerWaitingError); ok {
+		return append(acc, w), true
+	}
+	var members []error
+	switch e := err.(type) {
+	case kerrors.Aggregate:
+		members = e.Errors()
+	case interface{ Unwrap() []error }:
+		members = e.Unwrap()
+	default:
+		next := errors.Unwrap(err)
+		if next == nil {
+			return nil, false
+		}
+		return collectFinalizerWaits(next, acc)
+	}
+	if len(members) == 0 {
+		return nil, false
+	}
+	for _, m := range members {
+		var ok bool
+		if acc, ok = collectFinalizerWaits(m, acc); !ok {
+			return nil, false
+		}
+	}
+	return acc, true
+}
+
+// notices remembers the last message reported per key, so a condition that
+// persists across reconciles is reported (event + log) once, and again only
+// when it changes — instead of on every pass. In-memory only: after a
+// restart each persisting condition is reported once more. The zero value
+// is ready to use.
+type notices struct {
+	mu   sync.Mutex
+	last map[string]string
+}
+
+// changed records msg under key and reports whether it differs from the
+// previously recorded message (true the first time a key is seen).
+func (n *notices) changed(key, msg string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.last == nil {
+		n.last = map[string]string{}
+	}
+	if prev, ok := n.last[key]; ok && prev == msg {
+		return false
+	}
+	n.last[key] = msg
+	return true
+}
+
+// forget drops key, so the condition is reported again if it comes back.
+func (n *notices) forget(key string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.last, key)
+}
+
+// forgetPrefix drops every key starting with prefix.
+func (n *notices) forgetPrefix(prefix string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for k := range n.last {
+		if strings.HasPrefix(k, prefix) {
+			delete(n.last, k)
+		}
+	}
+}
 
 // BillingAccountReconciler reconciles a billing.miloapis.com/v1alpha1
 // BillingAccount into an OpenMeter customer via the openmeter.Client. State
@@ -48,7 +260,12 @@ const (
 // invoice_sync.go) and, once the account's default payment method is
 // Active, upserts the customer's Stripe app data (see stripe_customer.go) —
 // unlike amberflo-provider, this is an immediate assignment rather than a
-// scheduled future switch, since OpenMeter has no equivalent concept.
+// scheduled future switch, since OpenMeter has no equivalent concept — and
+// clears the stored default payment method again once there is no usable
+// one.
+//
+// A synced account is re-reconciled every syncedRequeueAfter so OpenMeter
+// invoice status changes reach the Milo Invoices.
 //
 // spec.paymentTerms IS synced, via a per-account BillingProfile (see
 // billingprofile_sync.go) — but only partly: OpenMeter honors netDays
@@ -77,6 +294,12 @@ type BillingAccountReconciler struct {
 	// Log is the reconciler-scoped logger. Each Reconcile call derives a
 	// per-reconcile logger with account/namespace/customerKey values.
 	Log logr.Logger
+
+	// notices de-duplicates per-account events for conditions that persist
+	// across reconciles (StripeCustomerMissing, StripeAppNotConfigured,
+	// SubjectKeyConflict) and records the last synced fingerprint behind
+	// the Synced event. Keyed by "<namespace>/<name>/<kind>".
+	notices notices
 }
 
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch;update;patch
@@ -95,6 +318,7 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	var account billingv1alpha1.BillingAccount
 	if err := r.Get(ctx, req.NamespacedName, &account); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.notices.forgetPrefix(noticePrefix(req.NamespacedName))
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "failed to get BillingAccount")
@@ -127,10 +351,12 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		}
 	}
 	if finalizeErr != nil {
-		if errors.Is(finalizeErr, openmeter.ErrInvoicesOutstanding) {
-			// Not a failure: invoices get paid on the billing provider's
-			// schedule, so poll slowly instead of backing off as an error.
-			return ctrl.Result{RequeueAfter: permanentRequeueAfter}, nil
+		// Waiting (on invoices being paid, subscriptions ending, a sibling
+		// finalizer) is not a failure: requeue quietly. Only when nothing
+		// else in the aggregate failed — see FinalizerWaitingError.
+		if after, reasons, ok := finalizerWaitRequeue(finalizeErr); ok {
+			logger.Info("finalizers waiting; requeueing", "waitingOn", reasons, "requeueAfter", after.String())
+			return ctrl.Result{RequeueAfter: after}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("running finalizers: %w", finalizeErr)
 	}
@@ -154,7 +380,7 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	desired := desiredCustomerFromAccount(&account, customerKey, projects)
 	logger = logger.WithValues("projects", len(desired.SubjectKeys))
 
-	customer, err := r.OpenMeterClient.EnsureCustomer(ctx, desired)
+	customer, subjectConflict, err := r.ensureCustomer(ctx, desired)
 	if err != nil {
 		return r.handleOpenMeterCustomerError(logger, &account, "EnsureCustomer", err)
 	}
@@ -182,21 +408,10 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		syncErrs = append(syncErrs, fmt.Errorf("reconcile billing profile: %w", err))
 	}
 
-	stripe, err := r.resolveStripeCustomer(ctx, &account)
-	switch {
-	case err != nil:
-		syncErrs = append(syncErrs, fmt.Errorf("resolve stripe customer: %w", err))
-	case stripe.CustomerID != "":
-		if err := r.OpenMeterClient.EnsureCustomerStripeAppData(ctx, customerID, stripe.CustomerID, stripe.PaymentMethodID); err != nil {
-			syncErrs = append(syncErrs, fmt.Errorf("ensure customer stripe app data: %w", err))
-		}
+	stripeState, err := r.reconcileStripeAppData(ctx, logger, &account, customerID)
+	if err != nil {
+		syncErrs = append(syncErrs, err)
 	}
-	// stripe.CustomerID == "" means the gate isn't met yet (or the
-	// StripePaymentMethod hasn't reported its id) — deliberately not
-	// calling EnsureCustomerStripeAppData in that case preserves whatever
-	// Stripe app data was already synced, mirroring amberflo-provider's
-	// "preserve previously synced traits" behavior across a transient
-	// DefaultPaymentMethodReady flap.
 
 	if err := r.reconcileInvoices(ctx, &account, customerID); err != nil {
 		syncErrs = append(syncErrs, fmt.Errorf("reconcile invoices: %w", err))
@@ -208,18 +423,135 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		// aggregate classifies as permanent if ANY member is (5m backoff,
 		// checked first) and transient when they all are (15s) — rather
 		// than collapsing to an unclassified error and hot-looping.
+		// Forgetting the last synced state makes the next successful pass
+		// report Synced again, so recovering from a failure is visible.
+		r.notices.forget(noticePrefix(req.NamespacedName) + EventReasonSynced)
 		return r.handleOpenMeterCustomerError(logger, &account, "sync", errors.Join(syncErrs...))
 	}
 
-	logger.Info("reconciled billing account")
-	if r.Recorder != nil {
-		// customerKey (not the response's Customer.Key) — it is always
-		// exactly desired.Key by construction, and this avoids a nil-pointer
-		// deref if a response somehow came back without it.
-		r.Recorder.Eventf(&account, "Normal", EventReasonSynced,
-			"OpenMeter customer %s synced", customerKey)
+	conflictKey := noticePrefix(req.NamespacedName) + EventReasonSubjectKeyConflict
+	if subjectConflict != "" {
+		// Everything else synced; only some projects' attribution is still
+		// held by another customer. Not a SyncFailed: report it once and
+		// retry on a short, fixed schedule (see ensureCustomer).
+		logger.Info("projects still attributed to another OpenMeter customer; synced without them, retrying",
+			"err", subjectConflict, "requeueAfter", subjectKeyConflictRequeueAfter.String())
+		if r.notices.changed(conflictKey, subjectConflict) && r.Recorder != nil {
+			r.Recorder.Eventf(&account, "Warning", EventReasonSubjectKeyConflict,
+				"some projects are still attributed to another OpenMeter customer and were not attributed to this one yet: %s", subjectConflict)
+		}
+		return ctrl.Result{RequeueAfter: subjectKeyConflictRequeueAfter}, nil
 	}
-	return ctrl.Result{}, nil
+	r.notices.forget(conflictKey)
+
+	// Synced is reported on the first successful sync this process sees for
+	// the account, and afterwards only when the synced state actually
+	// changed. billing's own status writes and the periodic requeue below
+	// re-run this reconcile constantly; emitting on every pass buried the
+	// events that matter. Not a GenerationChanged predicate: this reconcile
+	// legitimately reacts to status (DefaultPaymentMethodReady,
+	// paymentArrangement).
+	fingerprint := r.syncFingerprint(ctx, &account, customer, stripeState)
+	if r.notices.changed(noticePrefix(req.NamespacedName)+EventReasonSynced, fingerprint) {
+		logger.Info("reconciled billing account")
+		if r.Recorder != nil {
+			// customerKey (not the response's Customer.Key) — it is always
+			// exactly desired.Key by construction, and this avoids a
+			// nil-pointer deref if a response somehow came back without it.
+			r.Recorder.Eventf(&account, "Normal", EventReasonSynced,
+				"OpenMeter customer %s synced", customerKey)
+		}
+	} else {
+		logger.V(1).Info("billing account already in sync")
+	}
+	return ctrl.Result{RequeueAfter: syncedRequeueAfter}, nil
+}
+
+// noticePrefix is the per-account key prefix for BillingAccountReconciler's
+// notices.
+func noticePrefix(nn types.NamespacedName) string {
+	return nn.String() + "/"
+}
+
+// ensureCustomer is EnsureCustomer with a fallback for
+// openmeter.ErrSubjectKeyConflict: one of desired's projects is still
+// attributed to another customer (it moved here from another account, and
+// that account hasn't let go of it yet). Failing outright would leave this
+// account without a customer — or with a stale one — and block its billing
+// profile, Stripe and invoice sync for as long as the other account holds
+// on, which can be until its outstanding invoices are paid. Instead the
+// customer is synced with only the subject keys it already holds (so every
+// other field still converges, and keys being removed are still removed),
+// and the conflict is returned separately (as its message; "" when there
+// was none) for the caller to retry.
+func (r *BillingAccountReconciler) ensureCustomer(
+	ctx context.Context,
+	desired openmeter.DesiredCustomer,
+) (customer om.Customer, conflict string, err error) {
+	customer, err = r.OpenMeterClient.EnsureCustomer(ctx, desired)
+	if !errors.Is(err, openmeter.ErrSubjectKeyConflict) {
+		return customer, "", err
+	}
+	conflict = err.Error()
+
+	var held []string
+	existing, err := r.OpenMeterClient.GetCustomer(ctx, desired.Key)
+	switch {
+	case errors.Is(err, openmeter.ErrCustomerNotFound):
+		// Create it with no subject keys for now.
+	case err != nil:
+		return om.Customer{}, "", err
+	case existing.UsageAttribution != nil:
+		for _, k := range desired.SubjectKeys {
+			if slices.Contains(existing.UsageAttribution.SubjectKeys, k) {
+				held = append(held, k)
+			}
+		}
+	}
+	fallback := desired
+	fallback.SubjectKeys = held
+	customer, err = r.OpenMeterClient.EnsureCustomer(ctx, fallback)
+	if err != nil {
+		return om.Customer{}, "", err
+	}
+	return customer, conflict, nil
+}
+
+// syncFingerprint summarizes the remote state a successful reconcile
+// converged to: the customer (its UpdatedAt moves on every write), the
+// billing-profile link, the Stripe app data, and the account's Milo
+// Invoices. Two equal fingerprints mean the pass changed nothing worth a
+// Synced event.
+func (r *BillingAccountReconciler) syncFingerprint(
+	ctx context.Context,
+	account *billingv1alpha1.BillingAccount,
+	customer om.Customer,
+	stripeState string,
+) string {
+	parts := []string{
+		customer.Id,
+		customer.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		account.Annotations[BillingProfileIDAnnotation],
+		account.Annotations[OpenMeterCustomerIDAnnotation],
+		stripeState,
+	}
+	var invoices billingv1alpha1.InvoiceList
+	if err := r.List(ctx, &invoices, client.InNamespace(account.Namespace)); err != nil {
+		// Only costs a missed (or extra) Synced event.
+		log.FromContext(ctx).V(1).Info("listing invoices for the sync fingerprint failed", "err", err.Error())
+	} else {
+		var inv []string
+		for i := range invoices.Items {
+			item := &invoices.Items[i]
+			if item.Spec.BillingAccountRef.Name != account.Name {
+				continue
+			}
+			inv = append(inv, fmt.Sprintf("%s=%s/%s", item.Name, item.Status.Phase, item.Status.Total))
+		}
+		sort.Strings(inv)
+		parts = append(parts, inv...)
+	}
+	return strings.Join(parts, "|")
 }
 
 // handleOpenMeterCustomerError classifies the error, emits an event, and
@@ -359,7 +691,26 @@ func desiredCustomerFromAccount(
 			}
 		}
 	}
+	desired.Name = truncateCustomerName(desired.Name)
 	return desired
+}
+
+// truncateCustomerName fits name within OpenMeter's customerNameMaxLength
+// (counted in runes, like the server's validator), so an over-long name is
+// never a permanent 400 on every reconcile. Only the namespace/name fallback
+// can realistically exceed it (a namespace of up to 63 characters plus a
+// name of up to 253); BusinessName/ContactInfo.Name are capped at 256 by
+// the CRD. A truncated name ends in "~" plus 8 hex characters of the full
+// name's SHA-256, so it is deterministic (no update loop) and two long names
+// sharing a prefix still come out different.
+func truncateCustomerName(name string) string {
+	if utf8.RuneCountInString(name) <= customerNameMaxLength {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	suffix := "~" + hex.EncodeToString(sum[:])[:8]
+	runes := []rune(name)
+	return string(runes[:customerNameMaxLength-utf8.RuneCountInString(suffix)]) + suffix
 }
 
 // sortedCopy returns a de-duplicated, sorted copy of in. Nil in => nil out.
@@ -438,7 +789,7 @@ func mapBindingToAccount(_ context.Context, obj client.Object) []reconcile.Reque
 	}}
 }
 
-// customerLinkFinalizer deletes the OpenMeter customer for a BillingAccount
+// customerLinkFinalizer tears down the OpenMeter customer for a BillingAccount
 // being deleted. Registered under CustomerLinkFinalizer via
 // finalizer.Finalizers (see SetupWithManager); the pkg/finalizer helper
 // handles the add-on-create / remove-after-cleanup bookkeeping, and the
@@ -448,72 +799,157 @@ func mapBindingToAccount(_ context.Context, obj client.Object) []reconcile.Reque
 // no Server-Side Apply dance is needed for the finalizer itself.
 //
 // Unlike amberflo-provider — which defaults to soft-disabling via traits,
-// gated behind an AllowCustomerDelete flag / force-delete annotation,
-// because Amberflo has no native customer soft-delete — this always calls
-// DeleteCustomer directly. OpenMeter customers carry their own deletedAt
-// marker and key-based lookups already exclude soft-deleted records (see
+// because Amberflo has no native customer soft-delete — this ends in a
+// DeleteCustomer. OpenMeter customers carry their own deletedAt marker and
+// key-based lookups already exclude soft-deleted records (see
 // openmeter.client.GetCustomer's doc comment), so a hard DELETE here is the
-// correct and only necessary action; there is no equivalent "irreversible
-// billing data loss" risk to gate behind an opt-in flag.
+// correct end state. ForceDeleteAnnotation is the escape hatch for when the
+// teardown can't complete.
 type customerLinkFinalizer struct {
 	OpenMeterClient openmeter.Client
 	Recorder        record.EventRecorder
+
+	// notices de-duplicates WaitingForInvoices events, keyed by account UID.
+	notices notices
 }
 
-// Finalize deletes the OpenMeter customer for account. 404s from OpenMeter
-// are treated as success by DeleteCustomer, mirroring its tolerant-not-found
-// behavior; any other failure keeps the finalizer in place (blocking
-// deletion) and returns the error so controller-runtime's default
-// rate-limited backoff retries it.
+// Finalize tears down the account's OpenMeter customer, in an order that
+// matters:
+//
+//  1. Cancel every live subscription and confirm none is left. Self-
+//     sufficient on purpose: the BillingEntitlement controller also cancels
+//     them when the account is deleting, but nothing guarantees it has run
+//     (or exists) by now. While a subscription is live, OpenMeter keeps
+//     adding gathering lines and — with progressive billing, its default —
+//     each pending-lines pass below would cut yet another small invoice.
+//     OpenMeter also refuses steps 3 and 4 while one is active.
+//  2. Invoice the pending lines (and drop zero-total drafts) via
+//     PrepareInvoicesForCustomerDeletion. This has to precede step 3: a new
+//     invoice snapshots the customer's CURRENT subject keys to compute
+//     usage (billing/service/gatheringinvoicependinglines.go → the invoice
+//     row's customer usage attribution), so releasing them first would bill
+//     the final period's usage as zero.
+//  3. Release the customer's subject keys. OpenMeter keeps a unique index
+//     on active subject keys, and the customer may now wait weeks for its
+//     invoices to be paid; holding the keys that long would block another
+//     account those projects moved to from attributing them (409s).
+//  4. Wait for outstanding invoices — a FinalizerWaitingError, polled every
+//     permanentRequeueAfter, with a WaitingForInvoices event only when the
+//     set of outstanding invoices changes — then delete the customer.
+//
+// Each step is idempotent, so a retry simply re-walks them. 404s from
+// OpenMeter are treated as "already gone". Real failures keep the finalizer
+// in place and return the error, so controller-runtime's rate-limited
+// backoff retries it.
 func (f *customerLinkFinalizer) Finalize(ctx context.Context, obj client.Object) (finalizer.Result, error) {
 	account, ok := obj.(*billingv1alpha1.BillingAccount)
 	if !ok {
 		return finalizer.Result{}, fmt.Errorf("customerLinkFinalizer: object is not a BillingAccount (%T)", obj)
 	}
-	logger := log.FromContext(ctx)
 	customerKey := openmeter.CustomerKey(account.UID)
+	logger := log.FromContext(ctx).WithValues("customerKey", customerKey)
+	invoicesNoticeKey := string(account.UID)
 
-	// OpenMeter refuses to delete a customer with non-final invoices. Ending
-	// a subscription early (the BillingEntitlement controller cancels it as
-	// soon as the account is deleting) leaves a draft invoice for the closed
-	// period behind; zero-total ones are cleared here, while invoices with a
-	// balance hold the finalizer until they are paid.
+	if account.Annotations[ForceDeleteAnnotation] == "true" {
+		logger.Info("force-delete annotation set; releasing the finalizer WITHOUT any OpenMeter cleanup",
+			"annotation", ForceDeleteAnnotation)
+		f.event(account, "Warning", EventReasonForceDeleted, fmt.Sprintf(
+			"%s=true: finalizer released without OpenMeter cleanup; customer %s (its subscriptions, subject keys and invoices) is left in OpenMeter and must be cleaned up by hand",
+			ForceDeleteAnnotation, customerKey))
+		f.notices.forget(invoicesNoticeKey)
+		return finalizer.Result{}, nil
+	}
+
 	customer, err := f.OpenMeterClient.GetCustomer(ctx, customerKey)
 	switch {
 	case errors.Is(err, openmeter.ErrCustomerNotFound):
-		logger.Info("OpenMeter customer already gone", "customerKey", customerKey)
+		logger.Info("OpenMeter customer already gone")
+		f.notices.forget(invoicesNoticeKey)
 		return finalizer.Result{}, nil
 	case err != nil:
-		return finalizer.Result{}, fmt.Errorf("get customer: %w", err)
+		return finalizer.Result{}, f.failed(logger, account, "get customer", err)
 	}
-	if err := f.OpenMeterClient.PrepareInvoicesForCustomerDeletion(ctx, openmeter.CustomerID(customer.Id)); err != nil {
-		if errors.Is(err, openmeter.ErrInvoicesOutstanding) {
-			logger.Info("waiting for outstanding invoices before deleting the customer", "invoices", err.Error())
-		} else {
-			logger.Error(err, "prepare invoices for customer deletion; finalizer blocks deletion")
-		}
-		if f.Recorder != nil {
-			f.Recorder.Eventf(account, "Warning", EventReasonDeleteFailed, "%v", err)
-		}
-		return finalizer.Result{}, err
+	customerID := openmeter.CustomerID(customer.Id)
+
+	// 1. Subscriptions.
+	if err := f.OpenMeterClient.CancelSubscriptions(ctx, customerKey); err != nil {
+		return finalizer.Result{}, f.failed(logger, account, "cancel subscriptions", err)
+	}
+	subs, err := f.OpenMeterClient.ListSubscriptions(ctx, customerKey)
+	switch {
+	case errors.Is(err, openmeter.ErrCustomerNotFound):
+		logger.Info("OpenMeter customer already gone")
+		f.notices.forget(invoicesNoticeKey)
+		return finalizer.Result{}, nil
+	case err != nil:
+		return finalizer.Result{}, f.failed(logger, account, "list subscriptions", err)
+	}
+	if live := liveSubscriptionIDs(subs); len(live) > 0 {
+		logger.Info("waiting for canceled subscriptions to end before tearing down the customer", "subscriptions", live)
+		return finalizer.Result{}, NewFinalizerWaiting(finalizerReasonWaitingForSubscriptions, transientRequeueAfter,
+			fmt.Errorf("subscriptions still live: %s", strings.Join(live, ", ")))
 	}
 
+	// 2. Pending lines → invoices. ErrInvoicesOutstanding is only reported
+	// after the pending lines were invoiced, so it doesn't stop step 3.
+	prepareErr := f.OpenMeterClient.PrepareInvoicesForCustomerDeletion(ctx, customerID)
+	if prepareErr != nil && !errors.Is(prepareErr, openmeter.ErrInvoicesOutstanding) {
+		return finalizer.Result{}, f.failed(logger, account, "prepare invoices for customer deletion", prepareErr)
+	}
+
+	// 3. Subject keys.
+	if err := f.OpenMeterClient.ReleaseCustomerSubjects(ctx, customerKey); err != nil {
+		return finalizer.Result{}, f.failed(logger, account, "release subject keys", err)
+	}
+
+	// 4. Outstanding invoices, then the customer itself.
+	if prepareErr != nil {
+		logger.Info("waiting for outstanding invoices before deleting the customer", "invoices", prepareErr.Error())
+		if f.notices.changed(invoicesNoticeKey, prepareErr.Error()) {
+			f.event(account, "Normal", EventReasonWaitingForInvoices,
+				fmt.Sprintf("OpenMeter customer %s is deleted once its invoices are settled: %v", customerKey, prepareErr))
+		}
+		return finalizer.Result{}, NewFinalizerWaiting(EventReasonWaitingForInvoices, permanentRequeueAfter, prepareErr)
+	}
 	if err := f.OpenMeterClient.DeleteCustomer(ctx, customerKey); err != nil {
-		if openmeter.IsTransient(err) {
-			logger.Info("DeleteCustomer transient failure", "err", err.Error())
-		} else {
-			logger.Error(err, "DeleteCustomer failure; finalizer blocks deletion")
-		}
-		if f.Recorder != nil {
-			f.Recorder.Eventf(account, "Warning", EventReasonDeleteFailed, "%v", err)
-		}
-		return finalizer.Result{}, err
+		return finalizer.Result{}, f.failed(logger, account, "delete customer", err)
 	}
 
-	logger.Info("OpenMeter customer deleted", "customerKey", customerKey)
-	if f.Recorder != nil {
-		f.Recorder.Eventf(account, "Normal", EventReasonDeleted,
-			"OpenMeter customer %s deleted", customerKey)
-	}
+	f.notices.forget(invoicesNoticeKey)
+	logger.Info("OpenMeter customer deleted")
+	f.event(account, "Normal", EventReasonDeleted, fmt.Sprintf("OpenMeter customer %s deleted", customerKey))
 	return finalizer.Result{}, nil
+}
+
+// failed logs and reports a failed teardown step, and returns the error
+// (annotated with the step) for the caller to return.
+func (f *customerLinkFinalizer) failed(logger logr.Logger, account *billingv1alpha1.BillingAccount, step string, err error) error {
+	err = fmt.Errorf("%s: %w", step, err)
+	if openmeter.IsTransient(err) {
+		logger.Info("customer teardown transient failure; finalizer blocks deletion", "err", err.Error())
+	} else {
+		logger.Error(err, "customer teardown failure; finalizer blocks deletion")
+	}
+	f.event(account, "Warning", EventReasonDeleteFailed, err.Error())
+	return err
+}
+
+func (f *customerLinkFinalizer) event(account *billingv1alpha1.BillingAccount, eventType, reason, msg string) {
+	if f.Recorder != nil {
+		f.Recorder.Event(account, eventType, reason, msg)
+	}
+}
+
+// liveSubscriptionIDs returns the ids of subs still live: active, canceled
+// (ending in the future) or scheduled (starting in the future). An
+// immediately canceled subscription is inactive.
+func liveSubscriptionIDs(subs []om.Subscription) []string {
+	var live []string
+	for _, s := range subs {
+		switch s.Status {
+		case om.SubscriptionStatusActive, om.SubscriptionStatusCanceled, om.SubscriptionStatusScheduled:
+			live = append(live, s.Id)
+		}
+	}
+	return live
 }
