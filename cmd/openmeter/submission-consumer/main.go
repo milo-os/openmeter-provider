@@ -9,15 +9,20 @@
 // Mirrors amberflo-provider's cmd/submission-consumer/main.go: a plain
 // func main() (not a cobra subcommand), leader election disabled (multiple
 // replicas may run as independent JetStream pull-consumer workers sharing
-// the same durable consumer), and a manager used only for its cache/metrics/
-// healthz machinery plus mgr.Add(submissionConsumer) to run the consumer as
-// a Runnable.
+// the same durable consumer), and a manager used only for its metrics/healthz
+// machinery plus mgr.Add(submissionConsumer) to run the consumer as a
+// Runnable. The consumer reads no Kubernetes objects (see the
+// internal/submission package doc for why events are not gated on their
+// MeterDefinition).
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
@@ -31,8 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	natsgo "github.com/nats-io/nats.go"
-
-	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 
 	"go.miloapis.com/openmeter-provider/internal/config"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
@@ -57,8 +60,6 @@ func init() {
 
 	utilruntime.Must(config.AddToScheme(scheme))
 	utilruntime.Must(config.RegisterDefaults(scheme))
-
-	utilruntime.Must(billingv1alpha1.AddToScheme(scheme))
 }
 
 func main() {
@@ -99,12 +100,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("server config", "config", serverConfig)
-
 	if serverConfig.OpenMeter == nil {
 		setupLog.Error(fmt.Errorf("openMeter must be configured"), "")
 		os.Exit(1)
 	}
+
+	// Log only non-secret fields: the config carries the OpenMeter API
+	// secret, which must never reach the logs.
+	setupLog.Info("server config",
+		"kubeconfigPath", serverConfig.KubeconfigPath,
+		"openMeterServerURL", serverConfig.OpenMeter.ServerURL,
+		"openMeterAPISecretSet", serverConfig.OpenMeter.APISecret != "",
+		"natsURL", serverConfig.Nats.URL,
+		"submissionBatchSize", serverConfig.SubmissionBatchSize,
+		"submissionRetryAfter", serverConfig.SubmissionRetryAfter.Duration,
+		"submissionAckWait", serverConfig.SubmissionAckWait.Duration,
+		"submissionFetchTimeout", serverConfig.SubmissionFetchTimeout.Duration,
+	)
 	if serverConfig.Nats.URL == "" {
 		setupLog.Error(fmt.Errorf("nats.url must be configured"), "")
 		os.Exit(1)
@@ -164,17 +176,9 @@ func main() {
 	}
 	defer nc.Drain() //nolint:errcheck
 
-	meterCache, cacheErr := submission.NewMeterDefinitionCache(ctx, mgr.GetCache())
-	if cacheErr != nil {
-		setupLog.Error(cacheErr, "unable to create MeterDefinitionCache")
-		os.Exit(1)
-	}
-
 	submissionConsumer := &submission.SubmissionConsumer{
-		Cache:        mgr.GetCache(),
 		NC:           nc,
 		IngestClient: openMeterClient,
-		MeterCache:   meterCache,
 		Logger:       ctrl.Log.WithName("submission-consumer"),
 		FetchBatch:   serverConfig.SubmissionBatchSize,
 		RetryAfter:   serverConfig.SubmissionRetryAfter.Duration,
@@ -190,27 +194,72 @@ func main() {
 		"openMeterServer", serverConfig.OpenMeter.ServerURL,
 	)
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+	// Liveness fails only once the NATS connection is permanently closed
+	// (with unlimited reconnects that means it was closed explicitly), so
+	// the kubelet restarts the pod; readiness also reflects a connection
+	// that is still reconnecting. The consumer's Start returns an error on
+	// a closed connection as well, which stops the manager.
+	if err := mgr.AddHealthzCheck("healthz", natsLivenessCheck(nc)); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", natsReadinessCheck(nc)); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
-		setupLog.Error(err, "unable to start manager")
+		setupLog.Error(err, "manager exited with an error")
 		os.Exit(1)
 	}
 }
 
+// natsReconnectWait is the delay between NATS reconnect attempts.
+const natsReconnectWait = 2 * time.Second
+
+// connectNATS connects to NATS with unlimited reconnects. nats.go's default
+// (60 attempts, 2s apart) permanently closes the connection after a ~2
+// minute outage, which would leave the consumer idle forever.
 func connectNATS(cfg *config.NATSConfig) (*natsgo.Conn, error) {
-	opts := []natsgo.Option{natsgo.Name("submission-consumer")}
+	natsLog := ctrl.Log.WithName("nats")
+	opts := []natsgo.Option{
+		natsgo.Name("submission-consumer"),
+		natsgo.MaxReconnects(-1),
+		natsgo.ReconnectWait(natsReconnectWait),
+		natsgo.DisconnectErrHandler(func(_ *natsgo.Conn, err error) {
+			natsLog.Error(err, "disconnected from NATS; reconnecting")
+		}),
+		natsgo.ReconnectHandler(func(nc *natsgo.Conn) {
+			natsLog.Info("reconnected to NATS", "url", nc.ConnectedUrlRedacted())
+		}),
+		natsgo.ClosedHandler(func(nc *natsgo.Conn) {
+			natsLog.Error(nc.LastError(), "NATS connection closed")
+		}),
+	}
 	if cfg.CAFile != "" || cfg.CertFile != "" || cfg.KeyFile != "" {
 		opts = append(opts, natsgo.RootCAs(cfg.CAFile))
 		opts = append(opts, natsgo.ClientCert(cfg.CertFile, cfg.KeyFile))
 	}
 	return natsgo.Connect(cfg.URL, opts...)
+}
+
+// natsLivenessCheck fails once the NATS connection is permanently closed.
+func natsLivenessCheck(nc *natsgo.Conn) healthz.Checker {
+	return func(_ *http.Request) error {
+		if nc.IsClosed() {
+			return errors.New("NATS connection is closed")
+		}
+		return nil
+	}
+}
+
+// natsReadinessCheck fails while the NATS connection is not connected.
+func natsReadinessCheck(nc *natsgo.Conn) healthz.Checker {
+	return func(_ *http.Request) error {
+		if !nc.IsConnected() {
+			return fmt.Errorf("NATS connection is %s", nc.Status())
+		}
+		return nil
+	}
 }

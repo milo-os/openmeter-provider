@@ -3,8 +3,9 @@ kind: MeterDefinition
 metadata:
   name: e2e-submission-requests
 spec:
-  # No '-' in the path segments so openmeter.MeterSlug's '.'/'/' -> '_'
-  # mapping yields a slug OpenMeter's `^[a-z0-9]+(?:_[a-z0-9]+)*$` accepts.
+  # openmeter.MeterSlug lowercases the meterName and collapses every run of
+  # non-alphanumerics into one '_', so this becomes the slug
+  # e2e_miloapis_com_submission_requests the steps below query.
   meterName: e2e.miloapis.com/submission/requests
   phase: Published
   displayName: Submission Consumer E2E Requests

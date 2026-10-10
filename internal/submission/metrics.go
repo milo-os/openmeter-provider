@@ -28,10 +28,20 @@ var (
 	submissionOnce sync.Once
 
 	// submissionRequestsTotal counts OpenMeter ingest API submission
-	// attempts by outcome. Labels:
-	//   status="success"   — 2xx response, event acked.
-	//   status="transient" — 5xx/429/network, event nacked for retry.
-	//   status="permanent" — 4xx (non-429), event acked and dropped.
+	// attempts by outcome (see the outcome* constants in submission.go).
+	// Labels:
+	//   status="success"      — 2xx response, event acked.
+	//   status="transient"    — 5xx/429/network, event nacked for retry.
+	//   status="permanent"    — event malformed, missing its subject, or
+	//                           rejected by OpenMeter as invalid (400/422);
+	//                           acked and dropped.
+	//   status="config_error" — OpenMeter refused the request for a reason
+	//                           that is not the event's (401/403/404/...,
+	//                           i.e. a bad secret or URL); nacked for retry.
+	//                           Any sustained rate needs operator action.
+	//   status="max_deliveries_exceeded" — JetStream stopped redelivering a
+	//                           message after maxDeliver attempts; its usage
+	//                           was NOT submitted and must be replayed.
 	submissionRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "billing_submission_requests_total",
@@ -62,7 +72,7 @@ func init() {
 }
 
 // recordSubmission increments the submission counter with the given status
-// label. Valid labels: "success", "transient", "permanent".
+// label (one of the outcome* constants).
 func recordSubmission(status string) {
 	submissionRequestsTotal.WithLabelValues(status).Inc()
 }
