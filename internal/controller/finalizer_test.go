@@ -71,6 +71,31 @@ func (f *partialFailureOpenMeterClient) DeleteBillingProfile(_ context.Context, 
 	return errors.New("profile is referenced by customer overrides")
 }
 
+func (f *partialFailureOpenMeterClient) CustomerIDsByKey(_ context.Context, key openmeter.CustomerKey) ([]openmeter.CustomerID, error) {
+	return accountCustomerIDs(key), nil
+}
+
+func (f *partialFailureOpenMeterClient) GetBillingProfile(_ context.Context, id string) (om.BillingProfile, error) {
+	return accountProfile(id), nil
+}
+
+func (f *partialFailureOpenMeterClient) FindBillingProfilesByAccountKey(_ context.Context, _ openmeter.CustomerKey) ([]om.BillingProfile, error) {
+	return []om.BillingProfile{accountProfile("profile-123")}, nil
+}
+
+// accountCustomerIDs and accountProfile answer the billing-profile
+// finalizer's ownership lookups for the "uid-1" account used below.
+func accountCustomerIDs(key openmeter.CustomerKey) []openmeter.CustomerID {
+	if key != "uid-1" {
+		return nil
+	}
+	return []openmeter.CustomerID{"01M23AAAXB1MDSQTY0WWY9P0G8"}
+}
+
+func accountProfile(id string) om.BillingProfile {
+	return om.BillingProfile{Id: id, Metadata: &om.Metadata{"billingAccountKey": "uid-1"}}
+}
+
 // TestReconcile_PersistsSucceededFinalizerWhenSiblingFails is the regression
 // test for a bug review found and the production logs had been showing all
 // along: "OpenMeter customer deleted" repeating for the same account, pass
@@ -176,8 +201,17 @@ func TestReconcile_RemovesAllFinalizersWhenCleanupSucceeds(t *testing.T) {
 	_ = r.Finalizers.Register(BillingProfileFinalizer, &billingProfileFinalizer{OpenMeterClient: omc})
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "acme-account", Namespace: "org-a"}}
-	if _, err := r.Reconcile(context.Background(), req); err != nil {
-		t.Fatalf("Reconcile: %v", err)
+	// The billing-profile finalizer waits for the customer-link finalizer
+	// (pkg/finalizer runs them in random order), so a second pass may be
+	// needed; a waiting pass is not a failure.
+	for pass := 1; pass <= 2; pass++ {
+		_, err := r.Reconcile(context.Background(), req)
+		if err == nil {
+			break
+		}
+		if pass == 2 || !errors.Is(err, errWaitingForCustomerLink) {
+			t.Fatalf("Reconcile pass %d: %v", pass, err)
+		}
 	}
 
 	// Once the last finalizer is dropped the API server completes the
@@ -222,6 +256,15 @@ func (f *allSucceedOpenMeterClient) DeleteBillingProfileCustomerOverride(_ conte
 }
 func (f *allSucceedOpenMeterClient) DeleteBillingProfile(_ context.Context, _ string) error {
 	return nil
+}
+func (f *allSucceedOpenMeterClient) CustomerIDsByKey(_ context.Context, key openmeter.CustomerKey) ([]openmeter.CustomerID, error) {
+	return accountCustomerIDs(key), nil
+}
+func (f *allSucceedOpenMeterClient) GetBillingProfile(_ context.Context, id string) (om.BillingProfile, error) {
+	return accountProfile(id), nil
+}
+func (f *allSucceedOpenMeterClient) FindBillingProfilesByAccountKey(_ context.Context, _ openmeter.CustomerKey) ([]om.BillingProfile, error) {
+	return []om.BillingProfile{accountProfile("profile-123")}, nil
 }
 
 // teardownOpenMeterClient drives the customer-link finalizer's teardown

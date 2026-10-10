@@ -105,6 +105,12 @@ type fakeServer struct {
 	// way OpenMeter does when the customer's billing profile has no Stripe
 	// app (see serveStripeAppData).
 	stripeAppNotConfigured bool
+	// deletedCustomers are soft-deleted customers: invisible to the
+	// key-based routes, listed only with includeDeleted (see
+	// serveCustomerList in billingprofile_test.go).
+	deletedCustomers []om.Customer
+	// billingProfileSeq orders billing profile creation (createdAt).
+	billingProfileSeq int
 	// pendingLines describes, per customer id, what invoicing the
 	// customer's gathering invoice would bill (see serveInvoices).
 	pendingLines map[string]fakePendingLines
@@ -113,6 +119,11 @@ type fakeServer struct {
 	// ignoreInvoiceCustomerFilter makes the invoice list ignore the
 	// customers query param, to exercise ListInvoices' own filter.
 	ignoreInvoiceCustomerFilter bool
+	// billingProfileListCalls counts billing profile list requests;
+	// billingProfileListHook, when set, runs before each one is answered
+	// (tests use it to mutate profiles mid-walk).
+	billingProfileListCalls int
+	billingProfileListHook  func(f *fakeServer, page int)
 	// pendingLinesStatus, when non-zero, fails the invoice-pending-lines
 	// action with that status.
 	pendingLinesStatus int
@@ -164,6 +175,10 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Same reason: /api/v1/customers/{key}/subscriptions.
 	if f.serveSubscriptions(w, r) {
+		return
+	}
+	// Same reason: the bare /api/v1/customers list route.
+	if f.serveCustomerList(w, r) {
 		return
 	}
 	if f.serveCustomers(w, r) {

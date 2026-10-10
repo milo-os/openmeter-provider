@@ -125,10 +125,13 @@ type Client interface {
 
 	// Billing profiles (see billingprofile.go).
 
-	// EnsureBillingProfile creates the billing profile identified by
-	// existingID if it is empty or no longer exists, or updates it in
-	// place to match desired's Workflow fields.
-	EnsureBillingProfile(ctx context.Context, existingID string, desired DesiredBillingProfile) (om.BillingProfile, error)
+	// EnsureBillingProfile adopts the billing profile identified by
+	// existingID once its metadata proves it belongs to
+	// desired.AccountKey (falling back to a lookup by account key, then to
+	// creating one), and converges it to the default profile's settings
+	// with desired's overrides. The result reports a refused existingID
+	// and app drift for the caller to surface.
+	EnsureBillingProfile(ctx context.Context, existingID string, desired DesiredBillingProfile) (EnsureBillingProfileResult, error)
 	// GetBillingProfile fetches a billing profile by id. Returns
 	// ErrBillingProfileNotFound when absent.
 	GetBillingProfile(ctx context.Context, id string) (om.BillingProfile, error)
@@ -212,6 +215,12 @@ type Client interface {
 	// Billing-account cleanup and invoice projection lookups (see
 	// billingprofile.go and invoice.go).
 
+	// FindBillingProfilesByAccountKey returns every live, non-default
+	// billing profile whose metadata tags it as accountKey's, oldest first.
+	FindBillingProfilesByAccountKey(ctx context.Context, accountKey CustomerKey) ([]om.BillingProfile, error)
+	// CustomerIDsByKey returns the internal id of every customer, live or
+	// soft-deleted, whose external key is exactly key.
+	CustomerIDsByKey(ctx context.Context, key CustomerKey) ([]CustomerID, error)
 	// ListInvoicesIncludingDeleted is ListInvoices plus the customer's
 	// deleted invoices, so a caller can tell "deleted" from "gone".
 	ListInvoicesIncludingDeleted(ctx context.Context, customerID CustomerID) ([]om.Invoice, error)
