@@ -54,9 +54,46 @@ spec:
     # Long-term storage + analytics for metering events.
     clickhouse:
       enabled: true
-    # Caching / short-lived state (RateLimiter, dedupe, etc.).
+    # Caching / short-lived state (RateLimiter, dedupe, etc.). Also backs the
+    # sink-worker's cross-flush event deduplication configured below.
     redis:
       enabled: true
+
+    # OpenMeter application config (rendered into the chart's config.yaml and
+    # deep-merged with the Kafka/ClickHouse/Postgres/Svix wiring the chart
+    # generates for the bundled dependencies).
+    config:
+      sink:
+        # Cross-flush event deduplication. OpenMeter's default
+        # (sink.dedupe.enabled: false, app/config/sink.go) only drops
+        # duplicates that land in the SAME sink flush (~2s / 500 messages),
+        # so a JetStream redelivery or an operator replay of an already
+        # ingested usage event would be billed twice. With this enabled the
+        # sink-worker checks every event's (namespace, source, id) against
+        # redis BEFORE writing it to ClickHouse and records it only AFTER the
+        # write succeeded, so a failed write is retried, never lost.
+        #
+        # Deliberately only `sink.dedupe`, NOT the top-level `dedupe` (ingest
+        # API) deduplicator: that one marks an event as seen before it is
+        # durably queued (openmeter/ingest DeduplicatingCollector), so a
+        # retried submission after a failed Kafka write would be silently
+        # dropped; and pointed at the same redis database it would pre-mark
+        # every event, making this sink dedupe discard ALL usage. OpenMeter's
+        # own quickstart (quickstart/config.yaml) enables sink dedupe only.
+        dedupe:
+          enabled: true
+          driver: redis
+          config:
+            # The chart's bundled Bitnami Redis (nameOverride: redis), the
+            # same master service the chart wires Svix to.
+            address: openmeter-redis-master:6379
+            database: 0
+            # Must outlive billing's replay window: the pipeline accepts and
+            # replays events up to 30 days old (billing
+            # docs/enhancements/usage-pipeline.md), and JetStream retention
+            # is at least that long. 768h (32d) is OpenMeter's own
+            # recommended value (config.example.yaml).
+            expiration: 768h
     # Primary metadata/store database for OpenMeter and its sub-processes.
     postgresql:
       enabled: true
