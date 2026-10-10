@@ -88,6 +88,13 @@ type fakeServer struct {
 	// ingestedEvents accumulates every CloudEvent ever POSTed to the
 	// ingest route, in submission order, across all calls.
 	ingestedEvents []cloudevents.Event
+
+	// meterWrites counts meter creates and updates (see serveMeters).
+	meterWrites int
+	// ingestStatus, when non-zero, makes the ingest route answer with that
+	// status and ingestBody (see serveIngest).
+	ingestStatus int
+	ingestBody   string
 }
 
 func newTestClient(t *testing.T) (Client, *fakeServer) {

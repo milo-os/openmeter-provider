@@ -4,7 +4,9 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -33,6 +35,10 @@ const (
 	EventReasonSyncFailed   = "SyncFailed"
 	EventReasonDeleted      = "Deleted"
 	EventReasonDeleteFailed = "DeleteFailed"
+	// EventReasonDeleteSkipped is emitted when the finalizer releases a
+	// MeterDefinition without deleting the OpenMeter meter under its slug,
+	// because that meter belongs to a different meterName (slug collision).
+	EventReasonDeleteSkipped = "DeleteSkipped"
 
 	// syncReason* prefixes tag the failure reasons surfaced in events and
 	// logs so operators can grep a stable prefix.
@@ -46,6 +52,12 @@ const (
 	// so a leftover is retried without a pod restart.
 	transientRequeueAfter = 15 * time.Second
 	permanentRequeueAfter = 5 * time.Minute
+
+	// meterResyncInterval is the periodic re-check of a successfully synced
+	// meter. Nothing on the Kubernetes side changes when an OpenMeter meter
+	// is deleted or edited out of band, so without it such drift would never
+	// be repaired.
+	meterResyncInterval = 30 * time.Minute
 
 	// meterControllerName is the controller label value used for the
 	// SetupWithManager "Named" call.
@@ -107,12 +119,23 @@ func (r *MeterDefinitionReconciler) Reconcile(ctx context.Context, req reconcile
 	// equivalent block in billingaccount_controller.go. Only one finalizer
 	// is registered here today, but the ordering is the correct shape and
 	// costs nothing.
+	//
+	// The change is persisted as a merge patch of metadata.finalizers
+	// (with an optimistic lock), not a full Update: MeterDefinition is owned
+	// by billing, and a full Update from this binary's compiled-in type
+	// would strip any spec field added by a newer billing API version.
+	base := md.DeepCopy()
 	finalizeResult, finalizeErr := r.Finalizers.Finalize(ctx, &md)
 	if finalizeResult.Updated {
-		if err := r.Update(ctx, &md); err != nil {
-			if apierrors.IsConflict(err) {
+		patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+		if err := r.Patch(ctx, &md, patch); err != nil {
+			switch {
+			case apierrors.IsConflict(err):
 				logger.Info("conflict persisting finalizer change; requeueing")
 				return ctrl.Result{Requeue: true}, nil
+			case apierrors.IsNotFound(err):
+				// Our finalizer was the last one; the object is gone.
+				return ctrl.Result{}, nil
 			}
 			return ctrl.Result{}, fmt.Errorf("persisting finalizer change: %w", err)
 		}
@@ -129,31 +152,45 @@ func (r *MeterDefinitionReconciler) Reconcile(ctx context.Context, req reconcile
 		return ctrl.Result{}, nil
 	}
 
+	// Every phase (Draft, Published, Deprecated, Retired) keeps its meter:
+	// OpenMeter stores events regardless of meter state, and the submission
+	// consumer forwards late events for Deprecated/Retired meters, which
+	// must stay queryable for billing. The meter is only removed when the
+	// MeterDefinition itself is deleted (see meterLinkFinalizer).
 	desired, err := desiredMeter(&md)
 	if err != nil {
-		// Only reachable if the aggregation mapping falls behind the CRD's
-		// enum (see openmeter.MeterAggregation) — a code bug, not a data
-		// problem. Route through the same permanent-error handling as an
-		// EnsureMeter failure so it gets an event and a periodic requeue
-		// rather than wedging or silently miscategorizing usage.
+		// Reachable for a dimension set OpenMeter cannot represent (two
+		// dimensions sanitizing to the same group-by key, or a name no
+		// JSONPath form can address), or if the aggregation mapping falls
+		// behind the CRD's enum (a code bug). Route through the same
+		// permanent-error handling as an EnsureMeter failure so it gets an
+		// event and a periodic requeue rather than wedging or silently
+		// miscategorizing usage.
 		return r.handleOpenMeterError(logger, &md, "desiredMeter", err)
 	}
 	logger = logger.WithValues("aggregation", desired.Aggregation)
 
-	meter, err := r.OpenMeterClient.EnsureMeter(ctx, desired)
+	meter, changed, err := r.OpenMeterClient.EnsureMeter(ctx, desired)
 	if err != nil {
 		return r.handleOpenMeterError(logger, &md, "EnsureMeter", err)
 	}
 
+	if !changed {
+		// Billing rewrites the MeterDefinition's status on its own schedule,
+		// and every write triggers a reconcile; only a real change is worth
+		// a log line and an event.
+		logger.V(1).Info("meter definition already in sync")
+		return ctrl.Result{RequeueAfter: meterResyncInterval}, nil
+	}
 	logger.Info("reconciled meter definition",
 		"aggregation", desired.Aggregation,
 		"groupBy", len(desired.GroupBy),
 	)
 	if r.Recorder != nil {
 		r.Recorder.Eventf(&md, "Normal", EventReasonSynced,
-			"OpenMeter meter %s synced (active)", meter.Slug)
+			"OpenMeter meter %s synced", meter.Slug)
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: meterResyncInterval}, nil
 }
 
 // handleOpenMeterError classifies the error, emits an event, and decides
@@ -202,46 +239,60 @@ func (r *MeterDefinitionReconciler) handleOpenMeterError(
 //
 // The slug is derived from the canonical reverse-DNS meterName (D2); the
 // eventType is the full meterName, so ingest keys on the canonical
-// identifier. GroupBy maps every declared dimension (plus the always-present
-// project_name system dimension) to its JSONPath in the event data, so
-// OpenMeter can group by them on query. The value comes from data.value.
+// identifier. GroupBy maps every declared dimension plus every system
+// dimension the billing pipeline injects (status.systemDimensions, falling
+// back to project_name before billing has populated it) to its JSONPath in
+// the event data, keyed by openmeter.GroupByKey, so OpenMeter can group by
+// them on query. The valueProperty depends on the aggregation (see
+// openmeter.MeterValueProperty).
 func desiredMeter(md *billingv1alpha1.MeterDefinition) (openmeter.DesiredMeter, error) {
 	aggregation, err := openmeter.MeterAggregation(md.Spec.Measurement.Aggregation)
 	if err != nil {
 		return openmeter.DesiredMeter{}, err
 	}
 
-	description := md.Spec.DisplayName
-	if description == "" {
-		description = md.Spec.MeterName
+	name := md.Spec.DisplayName
+	if name == "" {
+		name = md.Spec.MeterName
 	}
+	description := name
 	if md.Spec.Description != "" {
 		description = md.Spec.Description
 	}
 
-	groupBy := make(map[string]string, len(md.Spec.Measurement.Dimensions)+1)
-	for _, dim := range md.Spec.Measurement.Dimensions {
-		groupBy[dim] = "$.dimensions." + dim
+	dimensions := append(slices.Clone(md.Spec.Measurement.Dimensions), systemDimensions(md)...)
+	groupBy, err := openmeter.MeterGroupBy(dimensions)
+	if err != nil {
+		return openmeter.DesiredMeter{}, err
 	}
-	// project_name is injected on every valid event by the billing consumer;
-	// expose it as a group-by dimension so queries can segment by project
-	// without it being declared on the MeterDefinition.
-	groupBy[billingv1alpha1.SystemDimensionProjectName] = "$.dimensions." + billingv1alpha1.SystemDimensionProjectName
 
 	return openmeter.DesiredMeter{
 		Slug:          openmeter.MeterSlug(md.Spec.MeterName),
 		EventType:     md.Spec.MeterName,
 		Aggregation:   aggregation,
+		Name:          name,
 		Description:   description,
 		GroupBy:       groupBy,
-		ValueProperty: "$.value",
+		ValueProperty: openmeter.MeterValueProperty(md.Spec.Measurement.Aggregation),
 	}, nil
 }
 
+// systemDimensions returns the dimension keys the billing pipeline injects
+// on every valid event of md (status.systemDimensions). Before billing's
+// controller has written the status, it falls back to project_name, which
+// billing v0.3.10 always injects, so a new meter can segment by project from
+// the start.
+func systemDimensions(md *billingv1alpha1.MeterDefinition) []string {
+	if len(md.Status.SystemDimensions) > 0 {
+		return md.Status.SystemDimensions
+	}
+	return []string{billingv1alpha1.SystemDimensionProjectName}
+}
+
 // SetupWithManager registers the reconciler with mgr, wiring a watch on
-// billing.miloapis.com/MeterDefinition. There is no periodic resync and no
-// cross-resource watch — spec fields we care about are immutable (except
-// DisplayName and Description), so relying on the object watch is sufficient.
+// billing.miloapis.com/MeterDefinition. Successful reconciles also requeue
+// every meterResyncInterval, so a meter deleted or edited directly in
+// OpenMeter is repaired without a MeterDefinition change.
 func (r *MeterDefinitionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Client == nil {
 		r.Client = mgr.GetClient()
@@ -270,18 +321,22 @@ func (r *MeterDefinitionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // meterLinkFinalizer removes the OpenMeter meter for a MeterDefinition being
 // deleted. Registered under MeterFinalizer via finalizer.Finalizers (see
 // SetupWithManager); the pkg/finalizer helper handles the add-on-create /
-// remove-after-cleanup bookkeeping, and the caller persists via a plain
-// client.Update — see customerLinkFinalizer's doc comment in
-// billingaccount_controller.go for why that's sufficient without
-// Server-Side Apply.
+// remove-after-cleanup bookkeeping, and the caller persists it as a merge
+// patch of metadata.finalizers.
 type meterLinkFinalizer struct {
 	OpenMeterClient openmeter.Client
 	Recorder        record.EventRecorder
 }
 
-// Finalize removes the OpenMeter meter for md's slug. 404s from OpenMeter
-// are treated as success by DeleteMeter, mirroring its tolerant-not-found
-// behavior; any other failure keeps the finalizer in place (blocking
+// Finalize removes the OpenMeter meter for md's slug — but only if that
+// meter is md's own. Slugs are not injective (see openmeter.MeterSlug), so
+// the meter under md's slug may belong to another MeterDefinition whose
+// meterName collides; deleting it (and archiving its features) would break
+// that other meter. The meter's eventType is the full meterName, so it
+// identifies the owner unambiguously.
+//
+// OpenMeter's own not-found answer (from GetMeter or DeleteMeter) counts as
+// success; any other failure keeps the finalizer in place (blocking
 // deletion) and returns the error so controller-runtime's default
 // rate-limited backoff retries it.
 func (f *meterLinkFinalizer) Finalize(ctx context.Context, obj client.Object) (finalizer.Result, error) {
@@ -292,6 +347,29 @@ func (f *meterLinkFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 	logger := log.FromContext(ctx)
 	slug := openmeter.MeterSlug(md.Spec.MeterName)
 
+	meter, err := f.OpenMeterClient.GetMeter(ctx, slug)
+	switch {
+	case errors.Is(err, openmeter.ErrMeterNotFound):
+		logger.Info("OpenMeter meter already absent", "slug", slug)
+		if f.Recorder != nil {
+			f.Recorder.Eventf(md, "Normal", EventReasonDeleted,
+				"OpenMeter meter %s already absent", slug)
+		}
+		return finalizer.Result{}, nil
+	case err != nil:
+		return finalizer.Result{}, f.deleteFailed(logger, md, "GetMeter", err)
+	}
+	if meter.EventType != md.Spec.MeterName {
+		logger.Info("OpenMeter meter under this slug belongs to another meterName; leaving it in place",
+			"slug", slug, "meterEventType", meter.EventType)
+		if f.Recorder != nil {
+			f.Recorder.Eventf(md, "Warning", EventReasonDeleteSkipped,
+				"OpenMeter meter %s belongs to meterName %q, not %q; not deleting it",
+				slug, meter.EventType, md.Spec.MeterName)
+		}
+		return finalizer.Result{}, nil
+	}
+
 	// Archive the meter's features that no live plan references before the
 	// meter itself is deleted. OpenMeter rejects deleting a meter that still
 	// has active features (409 conflict), which would wedge this finalizer
@@ -300,20 +378,11 @@ func (f *meterLinkFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 	// the MeterDefinition cannot go while another Offer's plan still depends
 	// on its meter, which is the correct dependency ordering.
 	if err := f.OpenMeterClient.ArchiveUnreferencedMeterFeatures(ctx, slug); err != nil {
-		logger.Error(err, "ArchiveUnreferencedMeterFeatures failure; finalizer blocks deletion")
-		return finalizer.Result{}, err
+		return finalizer.Result{}, f.deleteFailed(logger, md, "ArchiveUnreferencedMeterFeatures", err)
 	}
 
 	if err := f.OpenMeterClient.DeleteMeter(ctx, slug); err != nil {
-		if openmeter.IsTransient(err) {
-			logger.Info("DeleteMeter transient failure", "err", err.Error())
-		} else {
-			logger.Error(err, "DeleteMeter failure; finalizer blocks deletion")
-		}
-		if f.Recorder != nil {
-			f.Recorder.Eventf(md, "Warning", EventReasonDeleteFailed, "%v", err)
-		}
-		return finalizer.Result{}, err
+		return finalizer.Result{}, f.deleteFailed(logger, md, "DeleteMeter", err)
 	}
 
 	logger.Info("OpenMeter meter deleted", "slug", slug)
@@ -322,4 +391,18 @@ func (f *meterLinkFinalizer) Finalize(ctx context.Context, obj client.Object) (f
 			"OpenMeter meter %s deleted", slug)
 	}
 	return finalizer.Result{}, nil
+}
+
+// deleteFailed logs and records a failed cleanup step and returns err, so
+// the finalizer stays in place and the reconcile is retried with backoff.
+func (f *meterLinkFinalizer) deleteFailed(logger logr.Logger, md *billingv1alpha1.MeterDefinition, operation string, err error) error {
+	if openmeter.IsTransient(err) {
+		logger.Info(operation+" transient failure; finalizer blocks deletion", "err", err.Error())
+	} else {
+		logger.Error(err, operation+" failure; finalizer blocks deletion")
+	}
+	if f.Recorder != nil {
+		f.Recorder.Eventf(md, "Warning", EventReasonDeleteFailed, "%s: %v", operation, err)
+	}
+	return err
 }

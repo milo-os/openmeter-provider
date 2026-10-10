@@ -62,13 +62,15 @@ type Client interface {
 	// Meters (see meter.go).
 
 	// EnsureMeter creates the meter if absent, or updates it in place to
-	// match desired's mutable fields (description, groupBy). Returns a
-	// PermanentError if an existing meter's immutable fields
-	// (eventType/aggregation/valueProperty) disagree with desired.
-	EnsureMeter(ctx context.Context, desired DesiredMeter) (om.Meter, error)
+	// match desired's mutable fields (name, description, groupBy); changed
+	// reports whether either write happened. Returns a PermanentError if an
+	// existing meter's immutable fields (eventType/aggregation/
+	// valueProperty) disagree with desired.
+	EnsureMeter(ctx context.Context, desired DesiredMeter) (meter om.Meter, changed bool, err error)
 	// GetMeter fetches a meter by slug. Returns ErrMeterNotFound when absent.
 	GetMeter(ctx context.Context, slug string) (om.Meter, error)
-	// DeleteMeter removes a meter by slug. NotFound is treated as success.
+	// DeleteMeter removes a meter by slug. OpenMeter's own not-found answer
+	// is treated as success; a 404 from anything else is a PermanentError.
 	DeleteMeter(ctx context.Context, slug string) error
 
 	// Customers (see customer.go).

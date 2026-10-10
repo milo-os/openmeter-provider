@@ -86,8 +86,10 @@ spec:
         Create a MeterDefinition with measurement.aggregation=UniqueCount.
         Confirm the finalizer is attached, then poll OpenMeter for the meter
         and confirm aggregation=UNIQUE_COUNT, a valueProperty IS present
-        (unlike Count, OpenMeter requires one here too), and groupBy contains
-        "project_id".
+        (unlike Count, OpenMeter requires one here too) and is
+        "$.resource.uid" — UniqueCount counts distinct emitting resources,
+        not distinct quantities (see openmeter.MeterValueProperty) — and
+        groupBy contains "project_id".
       try:
         - apply:
             file: unique-count.yaml
@@ -101,7 +103,7 @@ spec:
                 (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
         - script:
             timeout: 35s
-            content: sh verify-meter.sh e2e_miloapis_com_agg_uniquecount UNIQUE_COUNT yes project_id
+            content: sh verify-meter.sh e2e_miloapis_com_agg_uniquecount UNIQUE_COUNT '$.resource.uid' project_id
 
     - name: Max aggregation converges to MAX with a valueProperty
       description: |
