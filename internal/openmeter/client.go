@@ -208,6 +208,13 @@ type Client interface {
 
 	// SubmitUsageBatch ingests already-validated CloudEvents into OpenMeter.
 	SubmitUsageBatch(ctx context.Context, events []cloudevents.Event) error
+
+	// Billing-account cleanup and invoice projection lookups (see
+	// billingprofile.go and invoice.go).
+
+	// ListInvoicesIncludingDeleted is ListInvoices plus the customer's
+	// deleted invoices, so a caller can tell "deleted" from "gone".
+	ListInvoicesIncludingDeleted(ctx context.Context, customerID CustomerID) ([]om.Invoice, error)
 }
 
 // client is the concrete implementation of Client. Its methods are spread

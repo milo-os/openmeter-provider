@@ -105,6 +105,20 @@ type fakeServer struct {
 	// way OpenMeter does when the customer's billing profile has no Stripe
 	// app (see serveStripeAppData).
 	stripeAppNotConfigured bool
+	// pendingLines describes, per customer id, what invoicing the
+	// customer's gathering invoice would bill (see serveInvoices).
+	pendingLines map[string]fakePendingLines
+	// invoiceSeq generates ids for invoices the fake creates.
+	invoiceSeq int
+	// ignoreInvoiceCustomerFilter makes the invoice list ignore the
+	// customers query param, to exercise ListInvoices' own filter.
+	ignoreInvoiceCustomerFilter bool
+	// pendingLinesStatus, when non-zero, fails the invoice-pending-lines
+	// action with that status.
+	pendingLinesStatus int
+	// deleteInvoiceAsync leaves deleted drafts in delete.in_progress
+	// instead of completing the deletion within the request.
+	deleteInvoiceAsync bool
 }
 
 func newTestClient(t *testing.T) (Client, *fakeServer) {
@@ -120,6 +134,7 @@ func newTestClient(t *testing.T) (Client, *fakeServer) {
 		featureByID:             map[string]string{},
 		plans:                   map[string]om.Plan{},
 		subscriptions:           map[string]om.Subscription{},
+		pendingLines:            map[string]fakePendingLines{},
 	}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
