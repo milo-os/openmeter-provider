@@ -11,11 +11,11 @@ import (
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
-	"k8s.io/apimachinery/pkg/types"
 	"github.com/go-logr/logr"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	dto "github.com/prometheus/client_model/go"
+	"k8s.io/apimachinery/pkg/types"
 
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )

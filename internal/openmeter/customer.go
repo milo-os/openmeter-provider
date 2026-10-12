@@ -230,9 +230,9 @@ func existingSubjectKeys(c om.Customer) []string {
 func (c *client) createCustomer(ctx context.Context, desired DesiredCustomer) (om.Customer, error) {
 	key := string(desired.Key)
 	body := om.CustomerCreate{
-		Name:             desired.Name,
-		Key:              &key,
-		BillingAddress:   wireAddress(desired.Address),
+		Name:           desired.Name,
+		Key:            &key,
+		BillingAddress: wireAddress(desired.Address),
 		// No subject keys: usage is attributed by the customer key.
 		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: []string{}},
 	}
@@ -278,10 +278,10 @@ func (c *client) updateCustomer(ctx context.Context, existing om.Customer, desir
 	// customerNeedsUpdate for how that's kept from looping).
 	key := string(desired.Key)
 	body := om.CustomerReplaceUpdate{
-		Name:             desired.Name,
-		Key:              &key,
-		PrimaryEmail:     &desired.Email,
-		BillingAddress:   wireAddress(desired.Address),
+		Name:           desired.Name,
+		Key:            &key,
+		PrimaryEmail:   &desired.Email,
+		BillingAddress: wireAddress(desired.Address),
 		// Sent back unchanged: OpenMeter refuses subject-key changes while
 		// the customer has a live subscription.
 		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: existingSubjectKeys(existing)},
