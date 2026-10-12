@@ -1,0 +1,14 @@
+# Long-lived helper pod used to reach the openmeter-api ClusterIP service
+# from inside the cluster network via `kubectl exec`. curl rather than
+# busybox: this suite POSTs (invoice actions, the relayed Stripe webhook)
+# and needs the response body and status code of failed requests.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: openmeter-query-inv
+spec:
+  restartPolicy: Never
+  containers:
+    - name: query
+      image: curlimages/curl:8.10.1
+      command: ["sleep", "3600"]

@@ -1,0 +1,12 @@
+# Binds the project the usage is published for to the account, as in a
+# real org: billing only attributes a project's usage to an account it is
+# bound to.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccountBinding
+metadata:
+  name: e2e-inv-binding
+spec:
+  billingAccountRef:
+    name: e2e-inv-account
+  projectRef:
+    name: e2e-invoice

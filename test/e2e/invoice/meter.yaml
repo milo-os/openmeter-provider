@@ -1,0 +1,52 @@
+# Three meters, one per thing the customer pays for, so the invoice has one
+# line each.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: inv-vcpu-hours
+spec:
+  meterName: inv-vcpu-hours
+  phase: Published
+  displayName: "vCPU hours"
+  measurement:
+    aggregation: Sum
+    unit: "{vCPU-hour}"
+  billing:
+    consumedUnit: "{vCPU-hour}"
+    pricingUnit: "{vCPU-hour}"
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: inv-storage-gb-months
+spec:
+  meterName: inv-storage-gb-months
+  phase: Published
+  displayName: "Block storage GB-months"
+  measurement:
+    aggregation: Sum
+    unit: "{GB-month}"
+  billing:
+    consumedUnit: "{GB-month}"
+    pricingUnit: "{GB-month}"
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: inv-egress-gb
+spec:
+  meterName: inv-egress-gb
+  phase: Published
+  displayName: "Network egress GB"
+  measurement:
+    aggregation: Sum
+    unit: GBy
+  billing:
+    consumedUnit: GBy
+    pricingUnit: GBy
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource

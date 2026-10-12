@@ -35,7 +35,7 @@ fi
 now="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
 
 event=$(cat <<EOF
-{"specversion":"1.0","id":"${id}","type":"${meter_type}","source":"/e2e/submission-test","subject":"projects/${project}","billingaccountref":"${BILLING_ACCOUNT:-e2e-submission-account}","datacontenttype":"application/json","time":"${now}","data":{"value":"${value}"}}
+{"specversion":"1.0","id":"${id}","type":"${meter_type}","source":"/e2e/submission-test","subject":"projects/${project}","billingaccountref":"${BILLING_ACCOUNT:-e2e-submission-account}","datacontenttype":"application/json","time":"${now}","data":{"value":"${value}","dimensions":{"project_name":"${project}"}}}
 EOF
 )
 

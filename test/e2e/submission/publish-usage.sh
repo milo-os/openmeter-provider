@@ -19,7 +19,8 @@ set -eu
 # Like billing's attribution stage, every published event carries the
 # BillingAccount it is billed to in the billingaccountref extension; the
 # submission consumer resolves it to the account UID and uses that as the
-# subject OpenMeter attributes usage by. Override with BILLING_ACCOUNT.
+# subject OpenMeter attributes usage by. Override with BILLING_ACCOUNT. The
+# project is also in data.dimensions.project_name, where billing puts it.
 
 project="$1"
 meter_type="$2"
@@ -44,7 +45,7 @@ for value in "$@"; do
   id="e2e-submission-$$-${seq_no}-${value}"
 
   event=$(cat <<EOF
-{"specversion":"1.0","id":"${id}","type":"${meter_type}","source":"/e2e/submission-test","subject":"projects/${project}","billingaccountref":"${BILLING_ACCOUNT:-e2e-submission-account}","datacontenttype":"application/json","time":"${now}","data":{"value":"${value}"}}
+{"specversion":"1.0","id":"${id}","type":"${meter_type}","source":"/e2e/submission-test","subject":"projects/${project}","billingaccountref":"${BILLING_ACCOUNT:-e2e-submission-account}","datacontenttype":"application/json","time":"${now}","data":{"value":"${value}","dimensions":{"project_name":"${project}"}}}
 EOF
 )
 

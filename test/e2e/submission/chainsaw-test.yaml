@@ -61,7 +61,7 @@ spec:
               kubectl exec -n nats-system "$NATS_POD" -- \
                 nats --server nats://nats:4222 \
                 stream purge billing-usage \
-                --filter "billing.usage.e2e-submission.>" -f || true
+                --subject "billing.usage.e2e-submission.>" -f || true
               echo "Purged stale billing.usage.e2e-submission.> messages."
 
     - name: start the OpenMeter query pod

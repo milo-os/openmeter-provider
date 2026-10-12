@@ -1,10 +1,9 @@
 # Status patch simulating what billing's own BillingAccountBinding
 # controller would do (not present in this e2e cluster, which runs only
-# openmeter-provider + OpenMeter itself). BillingAccountReconciler's
-# aggregateActiveBindingProjects only counts bindings whose status.phase is
-# Active, so this is required for the binding to actually affect the
-# OpenMeter customer's usage attribution — which is what makes the usage
-# events published straight onto NATS actually attribute to this customer.
+# openmeter-provider + OpenMeter itself). The binding no longer changes the
+# OpenMeter customer (usage is attributed by account, not by project subject
+# keys); it is here so the setup matches a real org, where a project's usage
+# is only attributed to an account it is bound to.
 apiVersion: billing.miloapis.com/v1alpha1
 kind: BillingAccountBinding
 metadata:

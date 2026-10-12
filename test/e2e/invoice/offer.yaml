@@ -1,0 +1,19 @@
+# Authored as Draft with refs and published with ../offer/publish.sh
+# (billing's publish flow; its operator does not run in e2e).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-inv-offer
+  annotations:
+    kubernetes.io/display-name: "E2E Invoice Offer"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+  servicePricingRefs:
+    - name: inv-compute
+      namespace: openmeter-system
+    - name: inv-storage
+      namespace: openmeter-system
+    - name: inv-egress
+      namespace: openmeter-system
