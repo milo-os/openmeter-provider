@@ -851,10 +851,16 @@ func (f *customerLinkFinalizer) Finalize(ctx context.Context, obj client.Object)
 	invoicesNoticeKey := string(account.UID)
 
 	if account.Annotations[ForceDeleteAnnotation] == "true" {
-		logger.Info("force-delete annotation set; releasing the finalizer WITHOUT any OpenMeter cleanup",
+		// Annotations are writable by whoever can edit the account, so the
+		// escape hatch must never leave a subscription billing a deleted
+		// account: canceling is attempted first, best effort.
+		if err := f.OpenMeterClient.CancelSubscriptions(ctx, customerKey); err != nil {
+			logger.Error(err, "force-delete: canceling subscriptions failed; releasing anyway")
+		}
+		logger.Info("force-delete annotation set; releasing the finalizer without the remaining OpenMeter cleanup",
 			"annotation", ForceDeleteAnnotation)
 		f.event(account, "Warning", EventReasonForceDeleted, fmt.Sprintf(
-			"%s=true: finalizer released without OpenMeter cleanup; customer %s (its subscriptions, subject keys and invoices) is left in OpenMeter and must be cleaned up by hand",
+			"%s=true: finalizer released after a best-effort subscription cancel; customer %s (its subject keys and invoices) is left in OpenMeter and must be cleaned up by hand",
 			ForceDeleteAnnotation, customerKey))
 		f.notices.forget(invoicesNoticeKey)
 		return finalizer.Result{}, nil

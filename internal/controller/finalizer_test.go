@@ -559,17 +559,22 @@ func TestCustomerLinkFinalizer_PreparationFailureIsAnError(t *testing.T) {
 }
 
 // TestCustomerLinkFinalizer_ForceDelete: the escape hatch releases the
-// finalizer without touching OpenMeter, and says so.
+// finalizer even when the teardown is wedged, after a best-effort
+// subscription cancel (the annotation is customer-writable, so it must never
+// leave a subscription billing a deleted account), and says so.
 func TestCustomerLinkFinalizer_ForceDelete(t *testing.T) {
-	omc := &teardownOpenMeterClient{getCustomerErr: &openmeter.PermanentError{Err: errors.New("wedged"), StatusCode: 400}}
+	omc := &teardownOpenMeterClient{
+		getCustomerErr: &openmeter.PermanentError{Err: errors.New("wedged"), StatusCode: 400},
+		cancelErr:      &openmeter.TransientError{Err: errors.New("unavailable")},
+	}
 	h := newDeletingAccountHarness(t, omc, map[string]string{ForceDeleteAnnotation: "true"}, nil)
 
 	_, finalizers, err := h.reconcile(t)
 	if err != nil || len(finalizers) != 0 {
 		t.Fatalf("err = %v, finalizers = %v; want released", err, finalizers)
 	}
-	if len(omc.calls) != 0 {
-		t.Errorf("OpenMeter calls = %v, want none", omc.calls)
+	if want := []string{"CancelSubscriptions"}; !slices.Equal(omc.calls, want) {
+		t.Errorf("OpenMeter calls = %v, want %v (cancel attempted, nothing else)", omc.calls, want)
 	}
 	if n := countEvents(h.events(), EventReasonForceDeleted); n != 1 {
 		t.Errorf("%d ForceDeleted events, want 1", n)
