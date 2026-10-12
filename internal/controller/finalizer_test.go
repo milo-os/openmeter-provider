@@ -142,8 +142,16 @@ func TestReconcile_PersistsSucceededFinalizerWhenSiblingFails(t *testing.T) {
 
 	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "acme-account", Namespace: "org-a"}}
 
-	// First pass: the customer cleanup succeeds, the profile cleanup fails.
-	if _, err := r.Reconcile(context.Background(), req); err == nil {
+	// The customer cleanup succeeds and the profile cleanup fails. The
+	// billing-profile finalizer waits (quietly) while the customer-link
+	// finalizer is still present, and pkg/finalizer runs them in random
+	// order, so the failure surfaces on the first or the second pass.
+	surfaced := false
+	for pass := 1; pass <= 2 && !surfaced; pass++ {
+		_, err := r.Reconcile(context.Background(), req)
+		surfaced = err != nil
+	}
+	if !surfaced {
 		t.Fatal("Reconcile: expected the wedged billing-profile finalizer to surface an error")
 	}
 
@@ -205,12 +213,12 @@ func TestReconcile_RemovesAllFinalizersWhenCleanupSucceeds(t *testing.T) {
 	// (pkg/finalizer runs them in random order), so a second pass may be
 	// needed; a waiting pass is not a failure.
 	for pass := 1; pass <= 2; pass++ {
-		_, err := r.Reconcile(context.Background(), req)
-		if err == nil {
-			break
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("Reconcile pass %d: %v (a waiting finalizer must requeue quietly)", pass, err)
 		}
-		if pass == 2 || !errors.Is(err, errWaitingForCustomerLink) {
-			t.Fatalf("Reconcile pass %d: %v", pass, err)
+		var cur billingv1alpha1.BillingAccount
+		if err := k8s.Get(context.Background(), req.NamespacedName, &cur); apierrors.IsNotFound(err) || len(cur.Finalizers) == 0 {
+			break
 		}
 	}
 

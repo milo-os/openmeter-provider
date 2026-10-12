@@ -310,8 +310,8 @@ func (f *syncOpenMeterClient) GetCustomer(_ context.Context, key openmeter.Custo
 	return c, nil
 }
 
-func (f *syncOpenMeterClient) EnsureBillingProfile(_ context.Context, _ string, _ openmeter.DesiredBillingProfile) (om.BillingProfile, error) {
-	return om.BillingProfile{Id: "profile-1"}, nil
+func (f *syncOpenMeterClient) EnsureBillingProfile(_ context.Context, _ string, _ openmeter.DesiredBillingProfile) (openmeter.EnsureBillingProfileResult, error) {
+	return openmeter.EnsureBillingProfileResult{Profile: om.BillingProfile{Id: "profile-1"}}, nil
 }
 
 func (f *syncOpenMeterClient) UpsertBillingProfileCustomerOverride(_ context.Context, _ openmeter.CustomerID, _ string) error {
@@ -319,6 +319,10 @@ func (f *syncOpenMeterClient) UpsertBillingProfileCustomerOverride(_ context.Con
 }
 
 func (f *syncOpenMeterClient) ListInvoices(_ context.Context, _ openmeter.CustomerID) ([]om.Invoice, error) {
+	return nil, nil
+}
+
+func (f *syncOpenMeterClient) ListInvoicesIncludingDeleted(_ context.Context, _ openmeter.CustomerID) ([]om.Invoice, error) {
 	return nil, nil
 }
 

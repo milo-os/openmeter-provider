@@ -757,6 +757,7 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	if err := r.Finalizers.Register(BillingProfileFinalizer, &billingProfileFinalizer{
 		OpenMeterClient: r.OpenMeterClient,
+		Recorder:        r.Recorder,
 	}); err != nil {
 		return fmt.Errorf("registering finalizer: %w", err)
 	}

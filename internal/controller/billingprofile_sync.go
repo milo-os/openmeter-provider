@@ -63,8 +63,8 @@ const (
 
 // errWaitingForCustomerLink is billingProfileFinalizer's answer while the
 // account still carries CustomerLinkFinalizer. It is not a failure — the
-// cleanup is simply not due yet — and is wrapped by the integration step
-// into the controller's "finalizer waiting" requeue error.
+// cleanup is simply not due yet — so it is returned wrapped in a
+// FinalizerWaitingError, which Reconcile turns into a quiet requeue.
 var errWaitingForCustomerLink = errors.New("waiting for the OpenMeter customer to be deleted before removing its billing profile")
 
 // desiredBillingProfileFromAccount translates a BillingAccount's payment
@@ -208,7 +208,9 @@ func (f *billingProfileFinalizer) Finalize(ctx context.Context, obj client.Objec
 		return finalizer.Result{}, fmt.Errorf("billingProfileFinalizer: object is not a BillingAccount (%T)", obj)
 	}
 	if controllerutil.ContainsFinalizer(account, CustomerLinkFinalizer) {
-		return finalizer.Result{}, errWaitingForCustomerLink
+		// Slow requeue: removing CustomerLinkFinalizer updates the object,
+		// which triggers the next pass immediately anyway.
+		return finalizer.Result{}, NewFinalizerWaiting("WaitingForCustomerLink", permanentRequeueAfter, errWaitingForCustomerLink)
 	}
 	accountKey := openmeter.CustomerKey(account.UID)
 
