@@ -49,9 +49,13 @@ const (
 	// whose deletion is stuck behind customerLinkFinalizer (e.g. OpenMeter
 	// keeps rejecting a cleanup step with a permanent error, or invoices
 	// will never be settled). Set to "true" on a deleting account, it makes
-	// the finalizer release WITHOUT touching OpenMeter at all: the customer,
+	// the finalizer release without the rest of the teardown: the customer,
 	// its subject keys and its invoices are left in place and have to be
-	// cleaned up by hand (subscriptions are still canceled, best effort).
+	// cleaned up by hand. Two things are still done, best effort: its
+	// subscriptions are canceled, and its Stripe app data is removed, since
+	// OpenMeter links a Stripe customer to one live customer only and the
+	// left-behind customer would otherwise keep a new account for the same
+	// Stripe customer from being billed.
 	ForceDeleteAnnotation = "openmeter.miloapis.com/force-delete"
 
 	// syncedRequeueAfter re-runs a successfully synced account periodically.
@@ -693,10 +697,16 @@ func (f *customerLinkFinalizer) Finalize(ctx context.Context, obj client.Object)
 		if err := f.OpenMeterClient.CancelSubscriptions(ctx, customerKey); err != nil {
 			logger.Error(err, "force-delete: canceling subscriptions failed; releasing anyway")
 		}
+		// The customer stays behind, so its Stripe customer is unlinked:
+		// a new account for the same Stripe customer could not be billed
+		// otherwise.
+		if err := f.OpenMeterClient.DeleteCustomerStripeAppData(ctx, customerKey); err != nil {
+			logger.Error(err, "force-delete: removing the customer's Stripe app data failed; releasing anyway")
+		}
 		logger.Info("force-delete annotation set; releasing the finalizer without the remaining OpenMeter cleanup",
 			"annotation", ForceDeleteAnnotation)
 		f.event(account, "Warning", EventReasonForceDeleted, fmt.Sprintf(
-			"%s=true: finalizer released after a best-effort subscription cancel; customer %s (its subject keys and invoices) is left in OpenMeter and must be cleaned up by hand",
+			"%s=true: finalizer released after a best-effort subscription cancel and Stripe unlink; customer %s (its subject keys and invoices) is left in OpenMeter and must be cleaned up by hand",
 			ForceDeleteAnnotation, customerKey))
 		f.notices.forget(invoicesNoticeKey)
 		return finalizer.Result{}, nil

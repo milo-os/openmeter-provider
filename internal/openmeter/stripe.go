@@ -142,6 +142,34 @@ func (c *client) GetCustomerStripeAppData(ctx context.Context, customerID Custom
 	return *resp.JSON200, nil
 }
 
+// DeleteCustomerStripeAppData implements Client. It reads the stored data
+// first because the delete endpoint is per app, and the read is what names
+// the Stripe app the data belongs to (its id field is the app id).
+func (c *client) DeleteCustomerStripeAppData(ctx context.Context, customerKey CustomerKey) error {
+	if customerKey == "" {
+		return &PermanentError{Err: errors.New("customerKey is required")}
+	}
+	// The endpoint takes an id or a key (customerIdOrKey).
+	data, err := c.GetCustomerStripeAppData(ctx, CustomerID(customerKey))
+	switch {
+	case errors.Is(err, ErrStripeAppDataNotFound), errors.Is(err, ErrStripeAppNotConfigured):
+		return nil
+	case err != nil:
+		return err
+	case data.Id == nil || *data.Id == "":
+		return &TransientError{Err: fmt.Errorf("stripe app data of customer %s names no app", customerKey)}
+	}
+
+	resp, err := c.api.DeleteCustomerAppDataWithResponse(ctx, string(customerKey), *data.Id)
+	if err != nil {
+		return classify(nil, nil, err)
+	}
+	if resp.StatusCode() == http.StatusNotFound {
+		return nil
+	}
+	return classify(resp.HTTPResponse, resp.Body, nil)
+}
+
 // derefOrEmpty returns the pointed-to string, or "" when the pointer is nil.
 func derefOrEmpty(s *string) string {
 	if s == nil {
