@@ -37,6 +37,8 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
+	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
+
 	"go.miloapis.com/openmeter-provider/internal/config"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
 	"go.miloapis.com/openmeter-provider/internal/submission"
@@ -57,6 +59,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(billingv1alpha1.AddToScheme(scheme))
 
 	utilruntime.Must(config.AddToScheme(scheme))
 	utilruntime.Must(config.RegisterDefaults(scheme))
@@ -176,9 +179,18 @@ func main() {
 	}
 	defer nc.Drain() //nolint:errcheck
 
+	// Usage events are attributed to the BillingAccount billing stamped on
+	// them; the resolver reads accounts and bindings from the manager's
+	// cache (see submission.CachedAccountResolver).
+	if err := submission.AddIndexes(ctx, mgr.GetFieldIndexer()); err != nil {
+		setupLog.Error(err, "unable to add field indexes")
+		os.Exit(1)
+	}
+
 	submissionConsumer := &submission.SubmissionConsumer{
 		NC:           nc,
 		IngestClient: openMeterClient,
+		Accounts:     &submission.CachedAccountResolver{Reader: mgr.GetClient()},
 		Logger:       ctrl.Log.WithName("submission-consumer"),
 		FetchBatch:   serverConfig.SubmissionBatchSize,
 		RetryAfter:   serverConfig.SubmissionRetryAfter.Duration,

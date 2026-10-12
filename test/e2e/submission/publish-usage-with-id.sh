@@ -14,6 +14,11 @@
 # Usage: publish-usage-with-id.sh <project> <meter-type> <id> <value>
 set -eu
 
+# Like billing's attribution stage, every published event carries the
+# BillingAccount it is billed to in the billingaccountref extension; the
+# submission consumer resolves it to the account UID and uses that as the
+# subject OpenMeter attributes usage by. Override with BILLING_ACCOUNT.
+
 project="$1"
 meter_type="$2"
 id="$3"
@@ -30,7 +35,7 @@ fi
 now="$(date -u '+%Y-%m-%dT%H:%M:%S.000Z')"
 
 event=$(cat <<EOF
-{"specversion":"1.0","id":"${id}","type":"${meter_type}","source":"/e2e/submission-test","subject":"projects/${project}","datacontenttype":"application/json","time":"${now}","data":{"value":"${value}"}}
+{"specversion":"1.0","id":"${id}","type":"${meter_type}","source":"/e2e/submission-test","subject":"projects/${project}","billingaccountref":"${BILLING_ACCOUNT:-e2e-submission-account}","datacontenttype":"application/json","time":"${now}","data":{"value":"${value}"}}
 EOF
 )
 

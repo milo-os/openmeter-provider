@@ -8,10 +8,17 @@
 // mechanics, ack/nack semantics, and Prometheus metric names), simplified
 // where OpenMeter's own model makes amberflo-provider's steps unnecessary:
 //
-//   - No BillingAccountCache / customerID resolution. OpenMeter attributes
-//     usage to a customer server-side by matching a CloudEvent's Subject
-//     against Customer.UsageAttribution.SubjectKeys (confirmed in
-//     OpenMeter's own source — no client-side lookup is involved).
+//   - Attribution by billing account. OpenMeter attributes a usage event to
+//     the customer whose key (or one of whose usageAttribution subject keys)
+//     equals the event's subject. Billing emits events with subject
+//     "projects/<name>" and stamps the BillingAccount it attributed them to
+//     in the billingaccountref extension; the consumer resolves that account
+//     (AccountResolver) and rewrites the subject to its UID — the OpenMeter
+//     customer key. Customers therefore need no subject keys, which matters
+//     because OpenMeter refuses subject-key changes while a customer has a
+//     live subscription: attributing by project would freeze an account's
+//     project set the moment it subscribes. The project stays available as
+//     the project_name dimension billing injects into the event data.
 //   - No UsageRecord wire-shape translation. OpenMeter's ingest API accepts
 //     CloudEvents directly (cloudevents.Event is a type alias for the same
 //     event.Event the OpenMeter SDK's request body uses), so validated
@@ -109,6 +116,10 @@ const (
 	// is not the event's fault (401/403/404/405/415, ...), i.e. a bad
 	// secret or URL. NAKed for retry; never dropped.
 	outcomeConfigError = "config_error"
+	// outcomeUnattributed: the event's BillingAccount could not be resolved
+	// (not in the cache yet, or the event lacks billing's attribution).
+	// NAKed for retry; never dropped.
+	outcomeUnattributed = "unattributed"
 	// outcomeMaxDeliveries: JetStream gave up redelivering a message after
 	// maxDeliver attempts. The usage was NOT submitted.
 	outcomeMaxDeliveries = "max_deliveries_exceeded"
@@ -122,6 +133,10 @@ type SubmissionConsumer struct {
 
 	// IngestClient submits validated events to OpenMeter.
 	IngestClient openmeter.Client
+
+	// Accounts resolves the BillingAccount each event is billed to; its UID
+	// becomes the event's subject. Required.
+	Accounts AccountResolver
 
 	// Logger is the structured logger.
 	Logger logr.Logger
@@ -162,6 +177,9 @@ func (c *SubmissionConsumer) minAckWait() time.Duration {
 // an error — making the manager exit so the pod restarts — when the NATS
 // connection is permanently closed or the durable consumer disappears.
 func (c *SubmissionConsumer) Start(ctx context.Context) error {
+	if c.Accounts == nil {
+		return errors.New("submission consumer: Accounts resolver is required")
+	}
 	if c.FetchBatch <= 0 {
 		c.FetchBatch = 1
 	}
@@ -386,6 +404,25 @@ func (c *SubmissionConsumer) validateEvent(msg jetstream.Msg) (*cloudevents.Even
 	return &ce, nil
 }
 
+// attribute rewrites ce's subject to the UID of the BillingAccount billing
+// attributed it to, the account's OpenMeter customer key. Any failure is
+// retryable: the account may simply not be in the cache yet, and dropping
+// the event would lose billable usage. An event billing never attributed
+// (no billingaccountref) keeps being retried until it exhausts its
+// deliveries, which is logged at error level.
+func (c *SubmissionConsumer) attribute(ctx context.Context, ce *cloudevents.Event) error {
+	project, accountName, err := attributionTarget(ce.Subject(), ce.Extensions())
+	if err != nil {
+		return err
+	}
+	uid, err := c.Accounts.ResolveAccountUID(ctx, project, accountName)
+	if err != nil {
+		return err
+	}
+	ce.SetSubject(string(uid))
+	return nil
+}
+
 // processMessages processes a batch of JetStream messages: validates them,
 // submits valid ones in a bulk request to OpenMeter, and settles each
 // message according to the outcome (see the package doc). When OpenMeter
@@ -401,6 +438,12 @@ func (c *SubmissionConsumer) processMessages(ctx context.Context, msgs []jetstre
 			// validateEvent only returns permanentValidationError.
 			recordSubmission(outcomePermanent)
 			c.ack(msg)
+			continue
+		}
+		if err := c.attribute(ctx, ce); err != nil {
+			c.Logger.Error(err, "usage event not attributed to a billing account yet; nacking for retry",
+				"eventID", ce.ID(), "type", ce.Type(), "subject", ce.Subject())
+			c.nak(msg, outcomeUnattributed)
 			continue
 		}
 		validatedEvents = append(validatedEvents, *ce)

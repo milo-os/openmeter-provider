@@ -10,13 +10,6 @@ import (
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 )
 
-// BindingBillingAccountRefField is the field index for listing
-// BillingAccountBindings by the billing account they reference. The
-// BillingAccountReconciler uses it to re-fetch the project set for a given
-// account so the OpenMeter customer's usage attribution stays consistent as
-// bindings come and go.
-const BindingBillingAccountRefField = ".spec.billingAccountRef.name"
-
 // EntitlementBillingAccountRefField and EntitlementOfferRefField index
 // BillingEntitlements by the billing account and Offer they reference, so
 // the BillingEntitlementReconciler can map account and Offer events to the
@@ -35,13 +28,6 @@ func AddIndexers(ctx context.Context, fi client.FieldIndexer) error {
 		field   string
 		extract client.IndexerFunc
 	}{
-		{&billingv1alpha1.BillingAccountBinding{}, BindingBillingAccountRefField, func(obj client.Object) []string {
-			binding, ok := obj.(*billingv1alpha1.BillingAccountBinding)
-			if !ok {
-				return nil
-			}
-			return []string{binding.Spec.BillingAccountRef.Name}
-		}},
 		{&billingv1alpha1.BillingEntitlement{}, EntitlementBillingAccountRefField, entitlementBillingAccountRef},
 		{&billingv1alpha1.BillingEntitlement{}, EntitlementOfferRefField, entitlementOfferRef},
 	}
