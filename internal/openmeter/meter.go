@@ -605,4 +605,3 @@ func (c *client) DeleteMeter(ctx context.Context, slug string) error {
 	}
 	return classify(resp.HTTPResponse, resp.Body, nil)
 }
-
