@@ -7,7 +7,11 @@
 # `kubectl exec` on the openmeter-query pod (the app pods are distroless and
 # offer no shell/curl of their own).
 #
-# Usage: verify-meter.sh <slug> <want-aggregation> <yes|no: want valueProperty> [want-groupby-key]
+# Usage: verify-meter.sh <slug> <want-aggregation> <yes|no|JSONPATH> [want-groupby-key]
+#
+# The third argument is "yes" for the default "$.value" valueProperty, "no"
+# for none (Count), or the exact JSONPath expected (e.g. '$.resource.uid'
+# for UniqueCount).
 set -eu
 
 slug="$1"
@@ -22,11 +26,17 @@ for i in $(seq 1 12); do
 
   ok=1
   echo "$body" | grep -q "\"aggregation\":\"${want_agg}\"" || ok=0
-  if [ "$want_value_property" = "yes" ]; then
-    echo "$body" | grep -q '"valueProperty":"\$\.value"' || ok=0
-  else
-    echo "$body" | grep -q '"valueProperty"' && ok=0
-  fi
+  case "$want_value_property" in
+    yes)
+      echo "$body" | grep -q '"valueProperty":"\$\.value"' || ok=0
+      ;;
+    no)
+      echo "$body" | grep -q '"valueProperty"' && ok=0
+      ;;
+    *)
+      echo "$body" | grep -qF "\"valueProperty\":\"${want_value_property}\"" || ok=0
+      ;;
+  esac
   if [ -n "$want_groupby_key" ]; then
     echo "$body" | grep -q "\"${want_groupby_key}\":" || ok=0
   fi

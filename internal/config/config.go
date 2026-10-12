@@ -47,13 +47,15 @@ type OpenMeterProviderOperator struct {
 	// submit in a single batch to OpenMeter. Defaults to 10.
 	SubmissionBatchSize int `json:"submissionBatchSize,omitempty"`
 
-	// SubmissionRetryAfter is the default duration to wait before retrying
-	// a failed transient submission or on a MeterDefinition cache miss.
+	// SubmissionRetryAfter is the base delay before redelivering a failed
+	// transient submission; it doubles per delivery, capped at 10 minutes.
 	// Defaults to 5s.
 	SubmissionRetryAfter metav1.Duration `json:"submissionRetryAfter,omitempty"`
 
 	// SubmissionAckWait is the durable consumer's ack wait duration.
-	// Defaults to 30s.
+	// Defaults to 30s; the consumer raises it at startup to at least twice
+	// the time one fetch plus one OpenMeter call can take, so a message is
+	// never redelivered while it is still being submitted.
 	SubmissionAckWait metav1.Duration `json:"submissionAckWait,omitempty"`
 
 	// SubmissionFetchTimeout is the consumer pull batch fetch timeout.

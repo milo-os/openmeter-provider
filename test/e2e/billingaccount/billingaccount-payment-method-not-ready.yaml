@@ -1,0 +1,17 @@
+# Status patch simulating billing's own controller flipping
+# DefaultPaymentMethodReady to False (e.g. the default PaymentMethod was
+# removed or degraded). This cluster runs only openmeter-provider, so
+# nothing else would ever set this. With no usable default payment method,
+# reconcileStripeAppData must clear the stored stripeDefaultPaymentMethodId
+# (stripe-provider detaches the card) while keeping the Stripe customer.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-billingaccount
+status:
+  conditions:
+    - type: DefaultPaymentMethodReady
+      status: "False"
+      reason: PaymentMethodNotFound
+      message: e2e-simulated unusable payment method
+      lastTransitionTime: "2024-01-02T00:00:00Z"

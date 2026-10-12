@@ -514,6 +514,42 @@ func TestBuildOfferMapping_ProjectNameDimensionAllowed(t *testing.T) {
 	mustMapping(t, offer)
 }
 
+// TestBuildOfferMapping_FilterKeysUseMeterGroupByKey: feature filters must
+// be keyed by the same sanitized group-by key the MeterDefinition
+// controller gives the meter (openmeter.GroupByKey), or OpenMeter rejects
+// the feature for filtering on an unknown group-by.
+func TestBuildOfferMapping_FilterKeysUseMeterGroupByKey(t *testing.T) {
+	meters := map[string]meterInfo{
+		"compute.miloapis.com/cpu": {
+			Name:       "compute.miloapis.com/cpu",
+			Slug:       cpuSlug,
+			Dimensions: []string{"resource.type"},
+		},
+	}
+	offer := baseOffer()
+	offer.Spec.ServicePricings = []billingv1alpha1.ServicePricingSnapshot{
+		usagePricing("usage",
+			matchRate("resource.type", "vm", "1"),
+			billingv1alpha1.PricingRate{Flat: "2"},
+		),
+	}
+	m, err := buildOfferMapping(offer, meters)
+	if err != nil {
+		t.Fatalf("buildOfferMapping: %v", err)
+	}
+	if len(m.Features) != 2 {
+		t.Fatalf("features = %d, want 2", len(m.Features))
+	}
+	for _, f := range m.Features {
+		if _, ok := f.AdvancedMeterGroupByFilters["resource_type"]; !ok {
+			t.Errorf("feature %q filters = %v, want keyed by %q", f.Key, f.AdvancedMeterGroupByFilters, "resource_type")
+		}
+		if _, raw := f.AdvancedMeterGroupByFilters["resource.type"]; raw {
+			t.Errorf("feature %q filters keyed by the raw dimension name", f.Key)
+		}
+	}
+}
+
 func TestBuildOfferMapping_Deterministic(t *testing.T) {
 	h1, err := mustMapping(t, cpuOffer()).Plan.SpecHash()
 	if err != nil {

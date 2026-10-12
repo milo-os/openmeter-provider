@@ -88,6 +88,48 @@ type fakeServer struct {
 	// ingestedEvents accumulates every CloudEvent ever POSTed to the
 	// ingest route, in submission order, across all calls.
 	ingestedEvents []cloudevents.Event
+
+	// meterWrites counts meter creates and updates (see serveMeters).
+	meterWrites int
+	// ingestStatus, when non-zero, makes the ingest route answer with that
+	// status and ingestBody (see serveIngest).
+	ingestStatus int
+	ingestBody   string
+	// customerUpdateBodies records every accepted customer PUT body, in
+	// order (see serveCustomers).
+	customerUpdateBodies []om.CustomerReplaceUpdate
+	// clockTicks backs tick() (customer_test.go): a strictly increasing
+	// fake clock for customers' CreatedAt/UpdatedAt.
+	clockTicks int
+	// stripeAppNotConfigured makes the Stripe app-data routes answer the
+	// way OpenMeter does when the customer's billing profile has no Stripe
+	// app (see serveStripeAppData).
+	stripeAppNotConfigured bool
+	// deletedCustomers are soft-deleted customers: invisible to the
+	// key-based routes, listed only with includeDeleted (see
+	// serveCustomerList in billingprofile_test.go).
+	deletedCustomers []om.Customer
+	// billingProfileSeq orders billing profile creation (createdAt).
+	billingProfileSeq int
+	// pendingLines describes, per customer id, what invoicing the
+	// customer's gathering invoice would bill (see serveInvoices).
+	pendingLines map[string]fakePendingLines
+	// invoiceSeq generates ids for invoices the fake creates.
+	invoiceSeq int
+	// ignoreInvoiceCustomerFilter makes the invoice list ignore the
+	// customers query param, to exercise ListInvoices' own filter.
+	ignoreInvoiceCustomerFilter bool
+	// billingProfileListCalls counts billing profile list requests;
+	// billingProfileListHook, when set, runs before each one is answered
+	// (tests use it to mutate profiles mid-walk).
+	billingProfileListCalls int
+	billingProfileListHook  func(f *fakeServer, page int)
+	// pendingLinesStatus, when non-zero, fails the invoice-pending-lines
+	// action with that status.
+	pendingLinesStatus int
+	// deleteInvoiceAsync leaves deleted drafts in delete.in_progress
+	// instead of completing the deletion within the request.
+	deleteInvoiceAsync bool
 }
 
 func newTestClient(t *testing.T) (Client, *fakeServer) {
@@ -103,6 +145,7 @@ func newTestClient(t *testing.T) (Client, *fakeServer) {
 		featureByID:             map[string]string{},
 		plans:                   map[string]om.Plan{},
 		subscriptions:           map[string]om.Subscription{},
+		pendingLines:            map[string]fakePendingLines{},
 	}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
@@ -132,6 +175,10 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Same reason: /api/v1/customers/{key}/subscriptions.
 	if f.serveSubscriptions(w, r) {
+		return
+	}
+	// Same reason: the bare /api/v1/customers list route.
+	if f.serveCustomerList(w, r) {
 		return
 	}
 	if f.serveCustomers(w, r) {

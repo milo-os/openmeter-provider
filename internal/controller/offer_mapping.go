@@ -236,18 +236,22 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 			sp.Name, dimension, meter.Name, meter.Dimensions)
 	}
 
+	// Feature filters are keyed by the meter's group-by key for the
+	// dimension, which the MeterDefinition controller derives with the same
+	// openmeter.GroupByKey (identity for plain identifiers like "region").
+	filterKey := openmeter.GroupByKey(dimension)
 	for _, rate := range sp.Spec.Rates {
 		var filters map[string]om.FilterString
 		var label string
 		switch {
 		case rate.Match != nil:
 			value := rate.Match.Value
-			filters = map[string]om.FilterString{dimension: {Eq: &value}}
+			filters = map[string]om.FilterString{filterKey: {Eq: &value}}
 			label = fmt.Sprintf("%s=%s", dimension, value)
 		case len(matched) > 0:
 			others := slices.Clone(matched)
 			slices.Sort(others)
-			filters = map[string]om.FilterString{dimension: {Nin: &others}}
+			filters = map[string]om.FilterString{filterKey: {Nin: &others}}
 			label = fmt.Sprintf("%s not in (%s)", dimension, strings.Join(others, ", "))
 		}
 
