@@ -81,7 +81,7 @@ func TestDesiredCustomerFromAccount_NamePrecedence(t *testing.T) {
 			account := baseBillingAccount()
 			account.Spec.ContactInfo = tt.contactInfo
 
-			desired := desiredCustomerFromAccount(account, "uid-1", nil)
+			desired := desiredCustomerFromAccount(account, "uid-1")
 			if desired.Name != tt.wantCustName {
 				t.Errorf("Name = %q, want %q", desired.Name, tt.wantCustName)
 			}
@@ -104,8 +104,8 @@ func TestDesiredCustomerFromAccount_NamespaceDisambiguatesIdenticalNames(t *test
 	orgB.Namespace = "org-b"
 	orgB.UID = types.UID("uid-b")
 
-	nameA := desiredCustomerFromAccount(orgA, openmeter.CustomerKey(orgA.UID), nil).Name
-	nameB := desiredCustomerFromAccount(orgB, openmeter.CustomerKey(orgB.UID), nil).Name
+	nameA := desiredCustomerFromAccount(orgA, openmeter.CustomerKey(orgA.UID)).Name
+	nameB := desiredCustomerFromAccount(orgB, openmeter.CustomerKey(orgB.UID)).Name
 	if nameA == nameB {
 		t.Errorf("identically-named accounts in different namespaces produced the same customer Name %q", nameA)
 	}
@@ -117,7 +117,7 @@ func TestDesiredCustomerFromAccount_NamespaceDisambiguatesIdenticalNames(t *test
 func TestDesiredCustomerFromAccount_Address(t *testing.T) {
 	t.Run("no contactInfo means no address", func(t *testing.T) {
 		account := baseBillingAccount()
-		desired := desiredCustomerFromAccount(account, "uid-1", nil)
+		desired := desiredCustomerFromAccount(account, "uid-1")
 		if desired.Address != nil {
 			t.Errorf("Address = %+v, want nil", desired.Address)
 		}
@@ -126,7 +126,7 @@ func TestDesiredCustomerFromAccount_Address(t *testing.T) {
 	t.Run("contactInfo without address means no address", func(t *testing.T) {
 		account := baseBillingAccount()
 		account.Spec.ContactInfo = &billingv1alpha1.BillingContactInfo{Email: "a@example.com"}
-		desired := desiredCustomerFromAccount(account, "uid-1", nil)
+		desired := desiredCustomerFromAccount(account, "uid-1")
 		if desired.Address != nil {
 			t.Errorf("Address = %+v, want nil", desired.Address)
 		}
@@ -145,7 +145,7 @@ func TestDesiredCustomerFromAccount_Address(t *testing.T) {
 				PostalCode: "95014",
 			},
 		}
-		desired := desiredCustomerFromAccount(account, "uid-1", nil)
+		desired := desiredCustomerFromAccount(account, "uid-1")
 		if desired.Address == nil {
 			t.Fatal("Address is nil, want populated")
 		}
@@ -158,44 +158,6 @@ func TestDesiredCustomerFromAccount_Address(t *testing.T) {
 			t.Errorf("Address = %+v, want full field-by-field match", desired.Address)
 		}
 	})
-}
-
-func bindingFor(projectName string, phase billingv1alpha1.BillingAccountBindingPhase) billingv1alpha1.BillingAccountBinding {
-	return billingv1alpha1.BillingAccountBinding{
-		Spec:   billingv1alpha1.BillingAccountBindingSpec{ProjectRef: billingv1alpha1.ProjectRef{Name: projectName}},
-		Status: billingv1alpha1.BillingAccountBindingStatus{Phase: phase},
-	}
-}
-
-// TestProjectsFromActiveBindings_PrefixesProjectSubjectKey is the
-// regression test for a bug that would have silently broken usage
-// attribution end to end: billing/emission/cloudevents.go's toCloudEvent
-// sets a validated usage CloudEvent's subject to "projects/<name>", and
-// OpenMeter attributes usage to a customer by exact string match against
-// Customer.UsageAttribution.SubjectKeys (no normalization — confirmed in
-// OpenMeter's own source). Syncing bare project names here would mean
-// every usage event silently fails to attribute to any customer, with
-// nothing erroring anywhere to surface it.
-func TestProjectsFromActiveBindings_PrefixesProjectSubjectKey(t *testing.T) {
-	got := projectsFromActiveBindings([]billingv1alpha1.BillingAccountBinding{
-		bindingFor("project-alpha", billingv1alpha1.BillingAccountBindingPhaseActive),
-	})
-	want := []string{"projects/project-alpha"}
-	if len(got) != 1 || got[0] != want[0] {
-		t.Errorf("projectsFromActiveBindings() = %v, want %v (must match billing/emission/cloudevents.go's ce.SetSubject(\"projects/\" + name) exactly)", got, want)
-	}
-}
-
-func TestProjectsFromActiveBindings_IgnoresInactiveAndEmpty(t *testing.T) {
-	got := projectsFromActiveBindings([]billingv1alpha1.BillingAccountBinding{
-		bindingFor("project-superseded", billingv1alpha1.BillingAccountBindingPhaseSuperseded),
-		bindingFor("", billingv1alpha1.BillingAccountBindingPhaseActive),
-		bindingFor("project-active", billingv1alpha1.BillingAccountBindingPhaseActive),
-	})
-	want := []string{"projects/project-active"}
-	if len(got) != 1 || got[0] != want[0] {
-		t.Errorf("projectsFromActiveBindings() = %v, want %v", got, want)
-	}
 }
 
 // TestTruncateCustomerName: OpenMeter caps customer names at 256
@@ -237,7 +199,7 @@ func TestTruncateCustomerName(t *testing.T) {
 	account := baseBillingAccount()
 	account.Namespace = strings.Repeat("n", 63)
 	account.Name = strings.Repeat("x", 253)
-	if n := utf8.RuneCountInString(desiredCustomerFromAccount(account, "uid-1", nil).Name); n > customerNameMaxLength {
+	if n := utf8.RuneCountInString(desiredCustomerFromAccount(account, "uid-1").Name); n > customerNameMaxLength {
 		t.Errorf("desired name length = %d, want <= %d", n, customerNameMaxLength)
 	}
 }
@@ -247,10 +209,7 @@ func TestTruncateCustomerName(t *testing.T) {
 type syncOpenMeterClient struct {
 	openmeter.Client
 
-	customers map[openmeter.CustomerKey]om.Customer
-	// conflicting subject keys are rejected with ErrSubjectKeyConflict, as
-	// if attributed to another customer.
-	conflicting []string
+	customers   map[openmeter.CustomerKey]om.Customer
 	ensureCalls []openmeter.DesiredCustomer
 	writes      int
 
@@ -269,24 +228,21 @@ func newSyncOpenMeterClient() *syncOpenMeterClient {
 
 func (f *syncOpenMeterClient) EnsureCustomer(_ context.Context, desired openmeter.DesiredCustomer) (om.Customer, error) {
 	f.ensureCalls = append(f.ensureCalls, desired)
-	for _, k := range desired.SubjectKeys {
-		if slices.Contains(f.conflicting, k) {
-			return om.Customer{}, &openmeter.TransientError{
-				Err: fmt.Errorf("%w: %s", openmeter.ErrSubjectKeyConflict, k), StatusCode: 409,
-			}
-		}
-	}
 	existing, ok := f.customers[desired.Key]
 	email := desired.Email
+	// Like the real client: subject keys are never set or changed.
+	attribution := &om.CustomerUsageAttribution{SubjectKeys: []string{}}
+	if ok && existing.UsageAttribution != nil {
+		attribution = existing.UsageAttribution
+	}
 	want := om.Customer{
 		Id:               "id-" + string(desired.Key),
 		Name:             desired.Name,
 		PrimaryEmail:     &email,
-		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: append([]string{}, desired.SubjectKeys...)},
+		UsageAttribution: attribution,
 		UpdatedAt:        existing.UpdatedAt,
 	}
-	if ok && existing.Name == want.Name && derefString(existing.PrimaryEmail) == email &&
-		slices.Equal(existing.UsageAttribution.SubjectKeys, want.UsageAttribution.SubjectKeys) {
+	if ok && existing.Name == want.Name && derefString(existing.PrimaryEmail) == email {
 		return existing, nil
 	}
 	f.writes++
@@ -373,9 +329,6 @@ func newSyncHarness(t *testing.T, account *billingv1alpha1.BillingAccount, objs 
 	account.Finalizers = []string{CustomerLinkFinalizer}
 	k8s := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(append([]client.Object{account}, objs...)...).
-		WithIndex(&billingv1alpha1.BillingAccountBinding{}, BindingBillingAccountRefField, func(obj client.Object) []string {
-			return []string{obj.(*billingv1alpha1.BillingAccountBinding).Spec.BillingAccountRef.Name}
-		}).
 		Build()
 	omc := newSyncOpenMeterClient()
 	recorder := record.NewFakeRecorder(100)
@@ -455,70 +408,29 @@ func activeBinding(account *billingv1alpha1.BillingAccount, project string) *bil
 	}
 }
 
-// TestReconcile_SubjectKeyConflictSyncsTheRest: a project still attributed
-// to another account's customer must not block this account's customer,
-// billing profile, Stripe and invoice sync. The customer is synced with the
-// keys it already holds, and the conflict is retried shortly and reported
-// once.
-func TestReconcile_SubjectKeyConflictSyncsTheRest(t *testing.T) {
+// TestReconcile_ProjectBindingsDoNotTouchTheCustomer: usage is attributed by
+// customer key (the submission consumer rewrites each event's subject to the
+// account UID), so project bindings never reach the OpenMeter customer —
+// OpenMeter refuses subject-key changes while a customer is subscribed, which
+// would otherwise freeze the account's project set. Legacy keys stay as they
+// are.
+func TestReconcile_ProjectBindingsDoNotTouchTheCustomer(t *testing.T) {
 	account := baseBillingAccount()
-	h := newSyncHarness(t, account, activeBinding(account, "held"), activeBinding(account, "moved"))
+	h := newSyncHarness(t, account, activeBinding(account, "web"), activeBinding(account, "api"))
 	email := ""
 	h.omc.customers["uid-1"] = om.Customer{
 		Id: "id-uid-1", Name: "org-a/acme-account", PrimaryEmail: &email,
-		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: []string{"projects/held"}},
-	}
-	h.omc.conflicting = []string{"projects/moved"}
-
-	for range 2 {
-		res := h.reconcile(t)
-		if res.RequeueAfter != subjectKeyConflictRequeueAfter {
-			t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, subjectKeyConflictRequeueAfter)
-		}
-	}
-	last := h.omc.ensureCalls[len(h.omc.ensureCalls)-1]
-	if !slices.Equal(last.SubjectKeys, []string{"projects/held"}) {
-		t.Errorf("fallback subject keys = %v, want only the held one", last.SubjectKeys)
-	}
-	var current billingv1alpha1.BillingAccount
-	if err := h.k8s.Get(context.Background(), h.req.NamespacedName, &current); err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if current.Annotations[BillingProfileIDAnnotation] != "profile-1" {
-		t.Error("billing profile not synced while a subject key conflicted")
-	}
-	events := h.events()
-	if n := countEvents(events, EventReasonSubjectKeyConflict); n != 1 {
-		t.Errorf("%d SubjectKeyConflict events across 2 passes, want 1: %v", n, events)
-	}
-	if n := countEvents(events, EventReasonSyncFailed); n != 0 {
-		t.Errorf("%d SyncFailed events, want 0: %v", n, events)
+		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: []string{"projects/legacy"}},
 	}
 
-	// Once the other customer lets go, the key is attributed here.
-	h.omc.conflicting = nil
 	if res := h.reconcile(t); res.RequeueAfter != syncedRequeueAfter {
-		t.Errorf("RequeueAfter = %v, want %v once the conflict cleared", res.RequeueAfter, syncedRequeueAfter)
+		t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, syncedRequeueAfter)
 	}
-	if got := h.omc.customers["uid-1"].UsageAttribution.SubjectKeys; !slices.Equal(got, []string{"projects/held", "projects/moved"}) {
-		t.Errorf("subject keys = %v, want both", got)
+	if h.omc.writes != 0 {
+		t.Errorf("bindings caused %d customer write(s), want 0", h.omc.writes)
 	}
-}
-
-// TestReconcile_SubjectKeyConflictOnCreate: same, for an account whose
-// customer doesn't exist yet — it is created without the conflicting keys.
-func TestReconcile_SubjectKeyConflictOnCreate(t *testing.T) {
-	account := baseBillingAccount()
-	h := newSyncHarness(t, account, activeBinding(account, "moved"))
-	h.omc.conflicting = []string{"projects/moved"}
-
-	h.reconcile(t)
-	c, ok := h.omc.customers["uid-1"]
-	if !ok {
-		t.Fatal("customer not created")
-	}
-	if len(c.UsageAttribution.SubjectKeys) != 0 {
-		t.Errorf("subject keys = %v, want none yet", c.UsageAttribution.SubjectKeys)
+	if got := h.omc.customers["uid-1"].UsageAttribution.SubjectKeys; !slices.Equal(got, []string{"projects/legacy"}) {
+		t.Errorf("subject keys = %v, want the legacy keys untouched", got)
 	}
 }
 

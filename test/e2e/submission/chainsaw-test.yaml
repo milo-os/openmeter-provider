@@ -61,7 +61,7 @@ spec:
               kubectl exec -n nats-system "$NATS_POD" -- \
                 nats --server nats://nats:4222 \
                 stream purge billing-usage \
-                --filter "billing.usage.e2e-submission.>" -f || true
+                --subject "billing.usage.e2e-submission.>" -f || true
               echo "Purged stale billing.usage.e2e-submission.> messages."
 
     - name: start the OpenMeter query pod
@@ -111,11 +111,13 @@ spec:
         project "e2e-submission" and patch its status.phase to Active
         (simulating billing's own controller, not present in this e2e
         cluster — see the test-level description). Capture the
-        BillingAccount's UID (OpenMeter's external customer key) and poll the
-        customer to confirm usageAttribution.subjectKeys actually includes
-        "projects/e2e-submission" before publishing any events — this is
-        the attribution the published CloudEvents' subject must match
-        exactly for OpenMeter to attribute usage to this customer at all.
+        BillingAccount's UID (OpenMeter's external customer key) and poll
+        until the customer exists. Usage is attributed by customer key: the
+        submission consumer rewrites each event's subject to the account UID
+        (resolved from billing's billingaccountref extension), so the
+        customer must NOT gain "projects/e2e-submission" as a subject key —
+        binding a project never changes the customer (OpenMeter would refuse
+        that change once the customer is subscribed).
 
         Note: this step does NOT hand its $customerKey output to later
         steps — chainsaw script `outputs` are scoped to the step (`try:`
@@ -145,13 +147,17 @@ spec:
               url="http://openmeter-api.openmeter-system.svc.cluster.local/api/v1/customers/${CUSTOMER_KEY}"
               for i in $(seq 1 12); do
                 body=$(kubectl exec -n openmeter-system openmeter-query -- wget -q -O - "$url" 2>/dev/null || true)
-                if echo "$body" | grep -q '"projects/e2e-submission"'; then
-                  echo "customer ${CUSTOMER_KEY} attributed to projects/e2e-submission: ${body}"
+                if echo "$body" | grep -q '"key":"'"${CUSTOMER_KEY}"'"'; then
+                  if echo "$body" | grep -q '"projects/e2e-submission"'; then
+                    echo "customer ${CUSTOMER_KEY} has the project as a subject key; usage must be attributed by customer key only: ${body}"
+                    exit 1
+                  fi
+                  echo "customer ${CUSTOMER_KEY} exists with no project subject keys: ${body}"
                   exit 0
                 fi
                 sleep 2
               done
-              echo "customer ${CUSTOMER_KEY} never gained subjectKeys=projects/e2e-submission"
+              echo "customer ${CUSTOMER_KEY} never appeared"
               echo "last response: ${body}"
               exit 1
 
@@ -164,14 +170,14 @@ spec:
 
         Publishes three usage CloudEvents (values 100, 250, 150 — sum 500)
         directly onto billing.usage.e2e-submission.valid via the nats-box
-        pod's `nats pub`, with subject "projects/e2e-submission" matching
-        the customer's usageAttribution.subjectKeys exactly. Then polls
-        OpenMeter's meter query endpoint, scoped to this customer's own
-        internal id, until the summed value converges to 500 — the
-        end-to-end proof that SubmissionConsumer picked the events up from
-        its durable JetStream pull consumer, forwarded them via
-        SubmitUsageBatch, and OpenMeter attributed them to this specific
-        customer.
+        pod's `nats pub`, shaped like billing's output: subject
+        "projects/e2e-submission" plus the billingaccountref extension. Then
+        polls OpenMeter's meter query endpoint, scoped to this customer's own
+        internal id and to subject = the account UID, until the summed value
+        converges to 500 — the end-to-end proof that SubmissionConsumer
+        picked the events up, rewrote their subject to the account UID,
+        forwarded them, and OpenMeter attributed them to this customer by its
+        key.
       try:
         - script:
             content: |
@@ -213,6 +219,8 @@ spec:
             # this much under CI's resource-constrained OpenMeter install.
             timeout: 480s
             env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
               - name: OPENMETER_CUSTOMER_ID
                 value: ($openMeterCustomerId)
               - name: START_TIME
@@ -220,7 +228,7 @@ spec:
               - name: TOTAL_PUBLISHED
                 value: ($totalPublished)
             content: |
-              sh verify-usage.sh e2e_miloapis_com_submission_requests "$OPENMETER_CUSTOMER_ID" projects/e2e-submission "$TOTAL_PUBLISHED" "$START_TIME"
+              sh verify-usage.sh e2e_miloapis_com_submission_requests "$OPENMETER_CUSTOMER_ID" "$CUSTOMER_KEY" "$TOTAL_PUBLISHED" "$START_TIME"
 
     - name: publish a duplicate event and confirm OpenMeter deduplicates by (source, id)
       description: |
@@ -287,12 +295,14 @@ spec:
             # the duplicate is published; see the step description.
             timeout: 480s
             env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
               - name: OPENMETER_CUSTOMER_ID
                 value: ($openMeterCustomerId)
               - name: START_TIME
                 value: ($startTime)
             content: |
-              sh verify-usage.sh e2e_miloapis_com_submission_requests "$OPENMETER_CUSTOMER_ID" projects/e2e-submission 777 "$START_TIME"
+              sh verify-usage.sh e2e_miloapis_com_submission_requests "$OPENMETER_CUSTOMER_ID" "$CUSTOMER_KEY" 777 "$START_TIME"
         - script:
             timeout: 30s
             env:
@@ -307,12 +317,14 @@ spec:
         - script:
             timeout: 480s
             env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
               - name: OPENMETER_CUSTOMER_ID
                 value: ($openMeterCustomerId)
               - name: START_TIME
                 value: ($startTime)
             content: |
-              sh verify-usage.sh e2e_miloapis_com_submission_requests "$OPENMETER_CUSTOMER_ID" projects/e2e-submission 778 "$START_TIME"
+              sh verify-usage.sh e2e_miloapis_com_submission_requests "$OPENMETER_CUSTOMER_ID" "$CUSTOMER_KEY" 778 "$START_TIME"
 
     - name: clean up the BillingAccount, binding, and MeterDefinition
       description: |

@@ -1,0 +1,21 @@
+# Contact details as a real customer would fill them in. stripe-provider
+# copies them onto the Stripe customer (see stripe-customer.sh), and Stripe
+# prints them as the invoice's billing details.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-inv-account
+spec:
+  currencyCode: USD
+  contactInfo:
+    name: Ada Lovelace
+    businessName: Acme Cloud Inc.
+    email: billing@acme-cloud.example
+    address:
+      line1: 354 Oyster Point Blvd
+      city: South San Francisco
+      region: CA
+      postalCode: "94080"
+      country: US
+  defaultPaymentMethodRef:
+    name: e2e-inv-payment-method

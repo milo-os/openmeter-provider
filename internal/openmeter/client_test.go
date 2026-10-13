@@ -84,6 +84,7 @@ type fakeServer struct {
 	customerUpdates       int
 	billingProfileUpdates int
 	stripeAppDataWrites   int
+	stripeAppDataDeletes  []string
 
 	// ingestedEvents accumulates every CloudEvent ever POSTed to the
 	// ingest route, in submission order, across all calls.

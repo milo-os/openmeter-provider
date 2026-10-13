@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -44,6 +45,17 @@ func (f *fakeServer) serveStripeAppData(w http.ResponseWriter, r *http.Request) 
 		return true
 	}
 
+	// DELETE /api/v1/customers/{key}/apps/{appId}
+	if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, prefix) && strings.Contains(r.URL.Path, suffix+"/") {
+		key, appID, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, prefix), suffix+"/")
+		f.stripeAppDataDeletes = append(f.stripeAppDataDeletes, key+"/"+appID)
+		if existing, ok := f.stripeAppData[key]; ok && derefOrEmpty(existing.Id) == appID {
+			delete(f.stripeAppData, key)
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return true
+	}
+
 	if r.Method != http.MethodPut || !strings.HasPrefix(r.URL.Path, prefix) || !strings.HasSuffix(r.URL.Path, suffix) {
 		return false
 	}
@@ -69,6 +81,8 @@ func (f *fakeServer) serveStripeAppData(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		f.stripeAppData[key] = om.StripeCustomerAppData{
+			// The real server reports the Stripe app's id here.
+			Id:                           ptr(fakeStripeAppID),
 			Type:                         om.StripeCustomerAppDataType(stripeItem.Type),
 			StripeCustomerId:             stripeItem.StripeCustomerId,
 			StripeDefaultPaymentMethodId: stripeItem.StripeDefaultPaymentMethodId,
@@ -80,6 +94,9 @@ func (f *fakeServer) serveStripeAppData(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode([]om.StripeCustomerAppData{f.stripeAppData[key]})
 	return true
 }
+
+// fakeStripeAppID is the id the fake server gives its Stripe app.
+const fakeStripeAppID = "app-stripe-1"
 
 // writePreconditionFailed answers with a 412 problem document carrying
 // detail, the shape OpenMeter uses for GenericPreConditionFailedError.
@@ -292,5 +309,38 @@ func TestEnsureCustomerStripeAppData_OtherPreconditionFailuresStayGeneric(t *tes
 	}
 	if errors.Is(err, ErrStripeAppNotConfigured) || errors.Is(err, ErrStripeAppDataNotFound) {
 		t.Errorf("err = %v, want neither sentinel", err)
+	}
+}
+
+// TestDeleteCustomerStripeAppData: deleting is per app, so the client reads
+// which app holds the data and deletes it there. Nothing stored, or no Stripe
+// app at all, is already the wanted state.
+func TestDeleteCustomerStripeAppData(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+
+	if err := c.EnsureCustomerStripeAppData(ctx, "cust-1", "cus_x", "pm_x"); err != nil {
+		t.Fatalf("EnsureCustomerStripeAppData: %v", err)
+	}
+	if err := c.DeleteCustomerStripeAppData(ctx, "cust-1"); err != nil {
+		t.Fatalf("DeleteCustomerStripeAppData: %v", err)
+	}
+	if want := []string{"cust-1/" + fakeStripeAppID}; !slices.Equal(f.stripeAppDataDeletes, want) {
+		t.Errorf("deletes = %v, want %v", f.stripeAppDataDeletes, want)
+	}
+	if _, err := c.GetCustomerStripeAppData(ctx, "cust-1"); !errors.Is(err, ErrStripeAppDataNotFound) {
+		t.Errorf("after delete: err = %v, want ErrStripeAppDataNotFound", err)
+	}
+
+	// Nothing stored any more: no delete is sent.
+	if err := c.DeleteCustomerStripeAppData(ctx, "cust-1"); err != nil {
+		t.Errorf("second delete: %v", err)
+	}
+	f.stripeAppNotConfigured = true
+	if err := c.DeleteCustomerStripeAppData(ctx, "cust-1"); err != nil {
+		t.Errorf("no Stripe app: %v", err)
+	}
+	if len(f.stripeAppDataDeletes) != 1 {
+		t.Errorf("deletes = %v, want only the first", f.stripeAppDataDeletes)
 	}
 }

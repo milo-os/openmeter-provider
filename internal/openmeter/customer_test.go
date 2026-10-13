@@ -265,12 +265,20 @@ func (f *fakeServer) serveCustomers(w http.ResponseWriter, r *http.Request) bool
 
 func baseDesiredCustomer() DesiredCustomer {
 	return DesiredCustomer{
-		Key:         "ba-uid-1",
-		Name:        "acme-prod",
-		Email:       "billing@acme.example",
-		Currency:    "USD",
-		SubjectKeys: []string{"project-a", "project-b"},
+		Key:      "ba-uid-1",
+		Name:     "acme-prod",
+		Email:    "billing@acme.example",
+		Currency: "USD",
 	}
+}
+
+// seedLegacySubjectKeys gives a stored customer subject keys, the way
+// customers created before attribution by customer key still carry their
+// projects.
+func seedLegacySubjectKeys(f *fakeServer, key CustomerKey, keys ...string) {
+	stored := f.customers[string(key)]
+	stored.UsageAttribution = &om.CustomerUsageAttribution{SubjectKeys: keys}
+	f.customers[string(key)] = stored
 }
 
 func TestEnsureCustomer_CreatesWhenAbsent(t *testing.T) {
@@ -290,8 +298,9 @@ func TestEnsureCustomer_CreatesWhenAbsent(t *testing.T) {
 	if got.PrimaryEmail == nil || *got.PrimaryEmail != desired.Email {
 		t.Errorf("PrimaryEmail = %v, want %q", got.PrimaryEmail, desired.Email)
 	}
-	if got.UsageAttribution == nil || len(got.UsageAttribution.SubjectKeys) != 2 {
-		t.Errorf("UsageAttribution = %v, want SubjectKeys=%v", got.UsageAttribution, desired.SubjectKeys)
+	// Usage is attributed by the customer key, so no subject keys.
+	if got.UsageAttribution == nil || len(got.UsageAttribution.SubjectKeys) != 0 {
+		t.Errorf("UsageAttribution = %v, want no subject keys", got.UsageAttribution)
 	}
 	if _, ok := f.customers[string(desired.Key)]; !ok {
 		t.Errorf("customer %q not stored", desired.Key)
@@ -327,7 +336,6 @@ func TestEnsureCustomer_UpdatesMutableFields(t *testing.T) {
 
 	desired.Name = "acme-prod-renamed"
 	desired.Email = "new-billing@acme.example"
-	desired.SubjectKeys = []string{"project-a"}
 	got, err := c.EnsureCustomer(context.Background(), desired)
 	if err != nil {
 		t.Fatalf("second EnsureCustomer: %v", err)
@@ -335,8 +343,8 @@ func TestEnsureCustomer_UpdatesMutableFields(t *testing.T) {
 	if got.Name != desired.Name {
 		t.Errorf("Name = %q, want %q", got.Name, desired.Name)
 	}
-	if stored := f.customers[string(desired.Key)]; stored.UsageAttribution == nil || len(stored.UsageAttribution.SubjectKeys) != 1 {
-		t.Errorf("SubjectKeys not updated: %v", stored.UsageAttribution)
+	if f.customerUpdates != 1 {
+		t.Errorf("customerUpdates = %d, want 1", f.customerUpdates)
 	}
 }
 
@@ -438,45 +446,37 @@ func assertCustomerConverged(t *testing.T, c Client, f *fakeServer, desired Desi
 	}
 }
 
-// TestEnsureCustomer_SubjectKeyConflictIsTransient: a project still
-// attributed to another customer (it moved accounts and the old account
-// hasn't let go yet) clears on its own, so it must not be reported as a
-// permanent 409.
-func TestEnsureCustomer_SubjectKeyConflictIsTransient(t *testing.T) {
-	c, _ := newTestClient(t)
-	other := baseDesiredCustomer()
-	other.Key = "ba-uid-old"
-	other.SubjectKeys = []string{"projects/moved"}
-	if _, err := c.EnsureCustomer(context.Background(), other); err != nil {
-		t.Fatalf("EnsureCustomer(old): %v", err)
+// TestEnsureCustomer_PreservesLegacySubjectKeys: customers created before
+// attribution by customer key carry "projects/<name>" subject keys. Updates
+// must send them back unchanged — OpenMeter refuses subject-key changes while
+// the customer has a live subscription, and usage ingested under those
+// subjects must stay attributed — and they must never cause an update.
+func TestEnsureCustomer_PreservesLegacySubjectKeys(t *testing.T) {
+	c, f := newTestClient(t)
+	desired := baseDesiredCustomer()
+	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
+		t.Fatalf("EnsureCustomer: %v", err)
+	}
+	seedLegacySubjectKeys(f, desired.Key, "projects/a", "projects/b")
+
+	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
+		t.Fatalf("EnsureCustomer (no drift): %v", err)
+	}
+	if f.customerUpdates != 0 {
+		t.Fatalf("legacy subject keys alone caused %d update(s), want 0", f.customerUpdates)
 	}
 
-	t.Run("create", func(t *testing.T) {
-		desired := baseDesiredCustomer()
-		desired.Key = "ba-uid-new"
-		desired.SubjectKeys = []string{"projects/moved"}
-		_, err := c.EnsureCustomer(context.Background(), desired)
-		if !errors.Is(err, ErrSubjectKeyConflict) {
-			t.Fatalf("err = %v, want ErrSubjectKeyConflict", err)
-		}
-		if !IsTransient(err) || IsPermanent(err) {
-			t.Errorf("err = %T %v, want a TransientError only", err, err)
-		}
-	})
-
-	t.Run("update", func(t *testing.T) {
-		desired := baseDesiredCustomer()
-		desired.Key = "ba-uid-existing"
-		desired.SubjectKeys = nil
-		if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
-			t.Fatalf("EnsureCustomer(existing): %v", err)
-		}
-		desired.SubjectKeys = []string{"projects/moved"}
-		_, err := c.EnsureCustomer(context.Background(), desired)
-		if !errors.Is(err, ErrSubjectKeyConflict) || !IsTransient(err) {
-			t.Fatalf("err = %v, want a transient ErrSubjectKeyConflict", err)
-		}
-	})
+	desired.Name = "acme-renamed"
+	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
+		t.Fatalf("EnsureCustomer (rename): %v", err)
+	}
+	last := f.customerUpdateBodies[len(f.customerUpdateBodies)-1]
+	if last.UsageAttribution == nil || !slices.Equal(last.UsageAttribution.SubjectKeys, []string{"projects/a", "projects/b"}) {
+		t.Errorf("PUT usageAttribution = %+v, want the legacy keys sent back unchanged", last.UsageAttribution)
+	}
+	if stored := f.customers[string(desired.Key)]; !slices.Equal(stored.UsageAttribution.SubjectKeys, []string{"projects/a", "projects/b"}) {
+		t.Errorf("stored subject keys = %v, want unchanged", stored.UsageAttribution.SubjectKeys)
+	}
 }
 
 // TestReleaseCustomerSubjects_ClearsOnlySubjectKeys: the finalizer's release
@@ -489,6 +489,7 @@ func TestReleaseCustomerSubjects_ClearsOnlySubjectKeys(t *testing.T) {
 	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
 		t.Fatalf("EnsureCustomer: %v", err)
 	}
+	seedLegacySubjectKeys(f, desired.Key, "projects/a", "projects/b")
 	stored := f.customers[string(desired.Key)]
 	description := "set outside this controller"
 	stored.Description = &description
@@ -518,13 +519,6 @@ func TestReleaseCustomerSubjects_ClearsOnlySubjectKeys(t *testing.T) {
 	if last.UsageAttribution == nil || last.UsageAttribution.SubjectKeys == nil {
 		t.Errorf("PUT usageAttribution = %+v, want an explicit empty list", last.UsageAttribution)
 	}
-
-	// The released key is free for another customer now.
-	other := baseDesiredCustomer()
-	other.Key = "ba-uid-other"
-	if _, err := c.EnsureCustomer(context.Background(), other); err != nil {
-		t.Errorf("EnsureCustomer(other) after release: %v", err)
-	}
 }
 
 func TestReleaseCustomerSubjects_NoopCases(t *testing.T) {
@@ -533,7 +527,6 @@ func TestReleaseCustomerSubjects_NoopCases(t *testing.T) {
 		t.Errorf("missing customer: %v", err)
 	}
 	desired := baseDesiredCustomer()
-	desired.SubjectKeys = nil
 	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
 		t.Fatalf("EnsureCustomer: %v", err)
 	}
@@ -545,45 +538,14 @@ func TestReleaseCustomerSubjects_NoopCases(t *testing.T) {
 	}
 }
 
-// TestEnsureCustomer_ClearsSubjectKeysWhenUnbound guards the "explicit
-// empty list, not omitted" choice in createCustomer/updateCustomer: if a
-// BillingAccount's last project binding is removed, SubjectKeys must
-// actually clear server-side rather than leaving the stale attribution in
-// place because an empty slice was omitted from the request.
-func TestEnsureCustomer_ClearsSubjectKeysWhenUnbound(t *testing.T) {
+// TestEnsureCustomer_CreateSendsEmptySubjectKeys guards a regression
+// observed against a real OpenMeter instance: its schema rejects a JSON null
+// for usageAttribution.subjectKeys ("Value is not nullable") while accepting
+// an empty array, so a create must send an explicit empty list. The fake
+// server's validateUsageAttribution enforces the same rule.
+func TestEnsureCustomer_CreateSendsEmptySubjectKeys(t *testing.T) {
 	c, f := newTestClient(t)
 	desired := baseDesiredCustomer()
-	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
-		t.Fatalf("first EnsureCustomer: %v", err)
-	}
-
-	desired.SubjectKeys = nil
-	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
-		t.Fatalf("second EnsureCustomer: %v", err)
-	}
-	stored := f.customers[string(desired.Key)]
-	if stored.UsageAttribution == nil {
-		t.Fatal("UsageAttribution is nil, want an explicit empty SubjectKeys")
-	}
-	if len(stored.UsageAttribution.SubjectKeys) != 0 {
-		t.Errorf("SubjectKeys = %v, want empty", stored.UsageAttribution.SubjectKeys)
-	}
-}
-
-// TestEnsureCustomer_CreateWithNilSubjectKeys guards the exact regression
-// observed against a real OpenMeter instance: a brand-new BillingAccount
-// with zero project bindings produces DesiredCustomer.SubjectKeys == nil
-// (sortedCopy(nil) returns nil, not []string{}). OpenMeter's schema rejects
-// a JSON null for usageAttribution.subjectKeys ("Value is not nullable")
-// even though it accepts an empty array — a nil Go slice marshals to null,
-// so createCustomer/updateCustomer must normalize it before it reaches the
-// wire. The fake server's validateUsageAttribution enforces the same rule
-// the real API does, so this fails the same way a regression would in
-// production.
-func TestEnsureCustomer_CreateWithNilSubjectKeys(t *testing.T) {
-	c, f := newTestClient(t)
-	desired := baseDesiredCustomer()
-	desired.SubjectKeys = nil
 
 	if _, err := c.EnsureCustomer(context.Background(), desired); err != nil {
 		t.Fatalf("EnsureCustomer: %v", err)

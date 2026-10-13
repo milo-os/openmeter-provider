@@ -3,6 +3,8 @@
 package openmeter
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -118,7 +120,7 @@ func classify(resp *http.Response, bodyBytes []byte, networkErr error) error {
 	}
 
 	status := resp.StatusCode
-	bodySnippet := strings.TrimSpace(string(bodyBytes))
+	bodySnippet := strings.TrimSpace(string(withoutProblemInstance(bodyBytes)))
 	// Cap body snippet to avoid pathological sizes leaking into logs.
 	const maxBody = 4096
 	if len(bodySnippet) > maxBody {
@@ -178,6 +180,33 @@ func classify(resp *http.Response, bodyBytes []byte, networkErr error) error {
 			ResponseBody: bodySnippet,
 		}
 	}
+}
+
+// withoutProblemInstance drops the "instance" member from an RFC 9457
+// problem body. OpenMeter sets it to a per-request id
+// ("urn:request:<pod>/<id>-<seq>"), so keeping it would make the same
+// failure produce a different error text on every call. Controllers write
+// that text into status conditions; a condition that changes on every
+// reconcile is patched every time, and the patch's watch event triggers the
+// next reconcile at once, bypassing RequeueAfter. Bodies that are not JSON
+// objects, or have no instance, are returned unchanged.
+func withoutProblemInstance(body []byte) []byte {
+	var problem map[string]json.RawMessage
+	if err := json.Unmarshal(body, &problem); err != nil {
+		return body
+	}
+	if _, ok := problem["instance"]; !ok {
+		return body
+	}
+	delete(problem, "instance")
+	// No HTML escaping: callers match substrings of the body text.
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(problem); err != nil {
+		return body
+	}
+	return bytes.TrimSpace(out.Bytes())
 }
 
 // parseRetryAfter parses a Retry-After header value. Per HTTP spec this may

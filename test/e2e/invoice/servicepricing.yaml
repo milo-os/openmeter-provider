@@ -1,0 +1,46 @@
+# One usage price per meter. The displayName is what the customer reads on
+# the Stripe invoice: OpenMeter titles each line
+# "<displayName>: usage in period (<quantity> x <unit price>)".
+# Lines: 25 x $0.04 + 50 x $0.02 + 10 x $0.09 = $2.90 (Stripe charges at
+# least $0.50 per invoice).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-compute
+spec:
+  displayName: "Compute: vCPU hours"
+  chargeType: Usage
+  currency: USD
+  metric: inv-vcpu-hours
+  pricingUnit: "{vCPU-hour}"
+  serviceRef: compute.miloapis.com
+  rates:
+    - flat: "0.04"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-storage
+spec:
+  displayName: "Block storage: GB-months"
+  chargeType: Usage
+  currency: USD
+  metric: inv-storage-gb-months
+  pricingUnit: "{GB-month}"
+  serviceRef: storage.miloapis.com
+  rates:
+    - flat: "0.02"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-egress
+spec:
+  displayName: "Network egress: GB"
+  chargeType: Usage
+  currency: USD
+  metric: inv-egress-gb
+  pricingUnit: GBy
+  serviceRef: networking.miloapis.com
+  rates:
+    - flat: "0.09"

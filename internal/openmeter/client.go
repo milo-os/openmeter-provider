@@ -122,6 +122,11 @@ type Client interface {
 	// ErrStripeAppNotConfigured when the customer's billing profile has no
 	// Stripe app.
 	GetCustomerStripeAppData(ctx context.Context, customerID CustomerID) (om.StripeCustomerAppData, error)
+	// DeleteCustomerStripeAppData removes the customer's Stripe app data,
+	// so its Stripe customer can be linked to another customer (OpenMeter
+	// links each Stripe customer to one live customer only). Nothing
+	// stored, no Stripe app, or no such customer is success.
+	DeleteCustomerStripeAppData(ctx context.Context, customerKey CustomerKey) error
 
 	// Billing profiles (see billingprofile.go).
 

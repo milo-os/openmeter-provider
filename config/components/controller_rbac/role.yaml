@@ -14,15 +14,6 @@ rules:
 - apiGroups:
   - billing.miloapis.com
   resources:
-  - billingaccountbindings
-  - paymentmethods
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - billing.miloapis.com
-  resources:
   - billingaccounts
   - billingentitlements
   - meterdefinitions
@@ -62,6 +53,14 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - billing.miloapis.com
+  resources:
+  - paymentmethods
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - stripe.billing.miloapis.com

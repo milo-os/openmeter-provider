@@ -15,6 +15,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	dto "github.com/prometheus/client_model/go"
+	"k8s.io/apimachinery/pkg/types"
 
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )
@@ -96,6 +97,8 @@ func buildCloudEventJSON(t *testing.T, id, ceType, subject string, value int64) 
 	ce.SetType(ceType)
 	ce.SetSource("test-source")
 	ce.SetSubject(subject)
+	// Every event on the .valid stream carries billing's attribution.
+	ce.SetExtension(billingAccountRefExtension, testAccountName)
 	ce.SetTime(time.Now().UTC())
 	if err := ce.SetData(cloudevents.ApplicationJSON, map[string]any{"value": fmt.Sprintf("%d", value)}); err != nil {
 		t.Fatalf("SetData: %v", err)
@@ -123,11 +126,30 @@ func asMsgs(msgs ...*fakeMsg) []jetstream.Msg {
 	return out
 }
 
+const (
+	testAccountName = "acme"
+	testAccountUID  = "uid-acme"
+)
+
+// fakeAccountResolver resolves (project, account name) pairs from a map.
+type fakeAccountResolver struct {
+	uids map[string]types.UID // "project/accountName" -> UID
+}
+
+func (f *fakeAccountResolver) ResolveAccountUID(_ context.Context, project, accountName string) (types.UID, error) {
+	if uid, ok := f.uids[project+"/"+accountName]; ok {
+		return uid, nil
+	}
+	return "", fmt.Errorf("%w: %s/%s", ErrAccountUnresolved, project, accountName)
+}
+
 // newTestConsumer returns a SubmissionConsumer for processMessages tests.
+// Events of project proj-1 attributed to account acme resolve to uid-acme.
 func newTestConsumer(t *testing.T, ingestClient openmeter.Client) *SubmissionConsumer {
 	t.Helper()
 	return &SubmissionConsumer{
 		IngestClient: ingestClient,
+		Accounts:     &fakeAccountResolver{uids: map[string]types.UID{"proj-1/" + testAccountName: testAccountUID}},
 		Logger:       logr.Discard(),
 		FetchBatch:   1,
 		RetryAfter:   5 * time.Second,
@@ -176,8 +198,53 @@ func TestProcessMessages_HappyPath(t *testing.T) {
 	if got.Type() != meterName {
 		t.Errorf("Type: got %q want %q", got.Type(), meterName)
 	}
-	if got.Subject() != "projects/proj-1" {
-		t.Errorf("Subject: got %q want %q", got.Subject(), "projects/proj-1")
+	// The subject is the account UID, the OpenMeter customer key.
+	if got.Subject() != testAccountUID {
+		t.Errorf("Subject: got %q want %q", got.Subject(), testAccountUID)
+	}
+}
+
+// TestProcessMessages_UnattributedEventsAreRetried: an event whose account
+// can't be resolved (not cached yet, or billing never attributed it) is
+// NAKed — never submitted under the wrong subject, never dropped — while the
+// rest of the batch goes through.
+func TestProcessMessages_UnattributedEventsAreRetried(t *testing.T) {
+	ingest := &fakeIngestClient{}
+	consumer := newTestConsumer(t, ingest)
+
+	good := newMsg(t, "evt-good")
+	unknownProject := &fakeMsg{
+		data:    buildCloudEventJSON(t, "evt-unknown", "compute.miloapis.com/cpu", "projects/proj-unknown", 1),
+		subject: "billing.usage.proj-unknown.valid",
+	}
+	ce := cloudevents.NewEvent()
+	ce.SetID("evt-noref")
+	ce.SetType("compute.miloapis.com/cpu")
+	ce.SetSource("test-source")
+	ce.SetSubject("projects/proj-1")
+	noRef, err := ce.MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	missingRef := &fakeMsg{data: noRef, subject: "billing.usage.proj-1.valid"}
+	badSubject := &fakeMsg{
+		data:    buildCloudEventJSON(t, "evt-badsubject", "compute.miloapis.com/cpu", "proj-1", 1),
+		subject: "billing.usage.proj-1.valid",
+	}
+
+	before := counterValue(t, outcomeUnattributed)
+	consumer.processMessages(context.Background(), asMsgs(good, unknownProject, missingRef, badSubject))
+
+	if !good.acked || len(ingest.received) != 1 || ingest.received[0].Subject() != testAccountUID {
+		t.Fatalf("good event: acked=%v submitted=%v", good.acked, ingest.received)
+	}
+	for name, m := range map[string]*fakeMsg{"unknown project": unknownProject, "missing billingaccountref": missingRef, "subject without projects/": badSubject} {
+		if m.acked || !m.naked {
+			t.Errorf("%s: acked=%v naked=%v, want NAKed for retry", name, m.acked, m.naked)
+		}
+	}
+	if got := counterValue(t, outcomeUnattributed) - before; got != 3 {
+		t.Errorf("unattributed counter += %v, want 3", got)
 	}
 }
 

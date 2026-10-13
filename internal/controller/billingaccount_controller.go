@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -50,11 +49,13 @@ const (
 	// whose deletion is stuck behind customerLinkFinalizer (e.g. OpenMeter
 	// keeps rejecting a cleanup step with a permanent error, or invoices
 	// will never be settled). Set to "true" on a deleting account, it makes
-	// the finalizer release WITHOUT touching OpenMeter at all: the customer,
-	// its subscriptions, its subject keys and its invoices are all left in
-	// place and have to be cleaned up by hand. In particular the customer
-	// keeps its projects' subject keys, so another account those projects
-	// move to can't take them over until they're cleared in OpenMeter.
+	// the finalizer release without the rest of the teardown: the customer,
+	// its subject keys and its invoices are left in place and have to be
+	// cleaned up by hand. Two things are still done, best effort: its
+	// subscriptions are canceled, and its Stripe app data is removed, since
+	// OpenMeter links a Stripe customer to one live customer only and the
+	// left-behind customer would otherwise keep a new account for the same
+	// Stripe customer from being billed.
 	ForceDeleteAnnotation = "openmeter.miloapis.com/force-delete"
 
 	// syncedRequeueAfter re-runs a successfully synced account periodically.
@@ -63,14 +64,6 @@ const (
 	// Milo Invoice on an unrelated BillingAccount/binding/payment-method
 	// event or the manager's 10h resync.
 	syncedRequeueAfter = 10 * time.Minute
-
-	// subjectKeyConflictRequeueAfter retries an account whose projects are
-	// still attributed to another account's customer. The other account
-	// normally lets go within a reconcile or two (it reconciles on the same
-	// binding change, or releases them in its finalizer), so this is short
-	// — but not the 15s transient backoff, since it can also persist (an
-	// orphaned customer left behind by ForceDeleteAnnotation).
-	subjectKeyConflictRequeueAfter = time.Minute
 
 	// customerNameMaxLength is OpenMeter's limit on a customer name (1-256
 	// characters in api/openapi.yaml's CustomerCreate/CustomerReplaceUpdate;
@@ -96,9 +89,6 @@ const (
 	// no Stripe app (e.g. a Sandbox install), so Stripe app data can't be
 	// synced.
 	EventReasonStripeAppNotConfigured = "StripeAppNotConfigured"
-	// EventReasonSubjectKeyConflict: one of the account's projects is still
-	// attributed to another OpenMeter customer.
-	EventReasonSubjectKeyConflict = "SubjectKeyConflict"
 
 	// finalizerReasonWaitingForSubscriptions is the FinalizerWaitingError
 	// reason while the customer still has a live subscription.
@@ -296,15 +286,14 @@ type BillingAccountReconciler struct {
 	Log logr.Logger
 
 	// notices de-duplicates per-account events for conditions that persist
-	// across reconciles (StripeCustomerMissing, StripeAppNotConfigured,
-	// SubjectKeyConflict) and records the last synced fingerprint behind
+	// across reconciles (StripeCustomerMissing, StripeAppNotConfigured) and
+	// records the last synced fingerprint behind
 	// the Synced event. Keyed by "<namespace>/<name>/<kind>".
 	notices notices
 }
 
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts/finalizers,verbs=update
-// +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccountbindings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoices,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=paymentmethods,verbs=get;list;watch
@@ -369,18 +358,12 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		return ctrl.Result{}, nil
 	}
 
-	// Aggregate the project list from Active BillingAccountBindings
-	// referencing this account. Recomputed every reconcile — there is no
-	// stashed intermediate state.
-	projects, err := r.aggregateActiveBindingProjects(ctx, &account)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("aggregate active binding projects: %w", err)
-	}
+	// Usage is attributed by customer key (the submission consumer sets
+	// each event's subject to the account UID), so the account's project
+	// bindings play no part in the customer.
+	desired := desiredCustomerFromAccount(&account, customerKey)
 
-	desired := desiredCustomerFromAccount(&account, customerKey, projects)
-	logger = logger.WithValues("projects", len(desired.SubjectKeys))
-
-	customer, subjectConflict, err := r.ensureCustomer(ctx, desired)
+	customer, err := r.OpenMeterClient.EnsureCustomer(ctx, desired)
 	if err != nil {
 		return r.handleOpenMeterCustomerError(logger, &account, "EnsureCustomer", err)
 	}
@@ -429,21 +412,6 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		return r.handleOpenMeterCustomerError(logger, &account, "sync", errors.Join(syncErrs...))
 	}
 
-	conflictKey := noticePrefix(req.NamespacedName) + EventReasonSubjectKeyConflict
-	if subjectConflict != "" {
-		// Everything else synced; only some projects' attribution is still
-		// held by another customer. Not a SyncFailed: report it once and
-		// retry on a short, fixed schedule (see ensureCustomer).
-		logger.Info("projects still attributed to another OpenMeter customer; synced without them, retrying",
-			"err", subjectConflict, "requeueAfter", subjectKeyConflictRequeueAfter.String())
-		if r.notices.changed(conflictKey, subjectConflict) && r.Recorder != nil {
-			r.Recorder.Eventf(&account, "Warning", EventReasonSubjectKeyConflict,
-				"some projects are still attributed to another OpenMeter customer and were not attributed to this one yet: %s", subjectConflict)
-		}
-		return ctrl.Result{RequeueAfter: subjectKeyConflictRequeueAfter}, nil
-	}
-	r.notices.forget(conflictKey)
-
 	// Synced is reported on the first successful sync this process sees for
 	// the account, and afterwards only when the synced state actually
 	// changed. billing's own status writes and the periodic requeue below
@@ -471,50 +439,6 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 // notices.
 func noticePrefix(nn types.NamespacedName) string {
 	return nn.String() + "/"
-}
-
-// ensureCustomer is EnsureCustomer with a fallback for
-// openmeter.ErrSubjectKeyConflict: one of desired's projects is still
-// attributed to another customer (it moved here from another account, and
-// that account hasn't let go of it yet). Failing outright would leave this
-// account without a customer — or with a stale one — and block its billing
-// profile, Stripe and invoice sync for as long as the other account holds
-// on, which can be until its outstanding invoices are paid. Instead the
-// customer is synced with only the subject keys it already holds (so every
-// other field still converges, and keys being removed are still removed),
-// and the conflict is returned separately (as its message; "" when there
-// was none) for the caller to retry.
-func (r *BillingAccountReconciler) ensureCustomer(
-	ctx context.Context,
-	desired openmeter.DesiredCustomer,
-) (customer om.Customer, conflict string, err error) {
-	customer, err = r.OpenMeterClient.EnsureCustomer(ctx, desired)
-	if !errors.Is(err, openmeter.ErrSubjectKeyConflict) {
-		return customer, "", err
-	}
-	conflict = err.Error()
-
-	var held []string
-	existing, err := r.OpenMeterClient.GetCustomer(ctx, desired.Key)
-	switch {
-	case errors.Is(err, openmeter.ErrCustomerNotFound):
-		// Create it with no subject keys for now.
-	case err != nil:
-		return om.Customer{}, "", err
-	case existing.UsageAttribution != nil:
-		for _, k := range desired.SubjectKeys {
-			if slices.Contains(existing.UsageAttribution.SubjectKeys, k) {
-				held = append(held, k)
-			}
-		}
-	}
-	fallback := desired
-	fallback.SubjectKeys = held
-	customer, err = r.OpenMeterClient.EnsureCustomer(ctx, fallback)
-	if err != nil {
-		return om.Customer{}, "", err
-	}
-	return customer, conflict, nil
 }
 
 // syncFingerprint summarizes the remote state a successful reconcile
@@ -595,53 +519,6 @@ func (r *BillingAccountReconciler) handleOpenMeterCustomerError(
 	}
 }
 
-// aggregateActiveBindingProjects lists every BillingAccountBinding
-// referencing the given account via the BindingBillingAccountRefField
-// indexer, filters to status.phase == Active, collects the project names,
-// and returns the deterministic sorted+deduped result.
-func (r *BillingAccountReconciler) aggregateActiveBindingProjects(
-	ctx context.Context,
-	account *billingv1alpha1.BillingAccount,
-) ([]string, error) {
-	var bindings billingv1alpha1.BillingAccountBindingList
-	if err := r.List(ctx, &bindings,
-		client.InNamespace(account.Namespace),
-		client.MatchingFields{BindingBillingAccountRefField: account.Name},
-	); err != nil {
-		return nil, err
-	}
-	return projectsFromActiveBindings(bindings.Items), nil
-}
-
-// projectSubjectKeyPrefix must match billing/emission/cloudevents.go's
-// toCloudEvent exactly: ce.SetSubject("projects/" + ev.Project.Name). The
-// submission consumer forwards that CloudEvent's subject to OpenMeter
-// unmodified, and OpenMeter attributes usage to a customer by exact string
-// match against Customer.UsageAttribution.SubjectKeys (confirmed in
-// OpenMeter's own source — CustomerUsageAttribution.GetValues does no
-// normalization). A bare project name here would never match, so every
-// usage event would silently fail to attribute to any customer.
-const projectSubjectKeyPrefix = "projects/"
-
-// projectsFromActiveBindings extracts the project subject keys from
-// bindings whose status.phase is Active, drops empty entries,
-// de-duplicates, and sorts. See projectSubjectKeyPrefix for why these are
-// prefixed rather than bare project names.
-func projectsFromActiveBindings(items []billingv1alpha1.BillingAccountBinding) []string {
-	projects := make([]string, 0, len(items))
-	for i := range items {
-		b := &items[i]
-		if b.Status.Phase != billingv1alpha1.BillingAccountBindingPhaseActive {
-			continue
-		}
-		if b.Spec.ProjectRef.Name == "" {
-			continue
-		}
-		projects = append(projects, projectSubjectKeyPrefix+b.Spec.ProjectRef.Name)
-	}
-	return sortedCopy(projects)
-}
-
 // desiredCustomerFromAccount translates a BillingAccount into the
 // openmeter-client DesiredCustomer shape.
 //
@@ -664,13 +541,11 @@ func projectsFromActiveBindings(items []billingv1alpha1.BillingAccountBinding) [
 func desiredCustomerFromAccount(
 	account *billingv1alpha1.BillingAccount,
 	customerKey openmeter.CustomerKey,
-	projects []string,
 ) openmeter.DesiredCustomer {
 	desired := openmeter.DesiredCustomer{
-		Key:         customerKey,
-		Name:        account.Namespace + "/" + account.Name,
-		Currency:    account.Spec.CurrencyCode,
-		SubjectKeys: sortedCopy(projects),
+		Key:      customerKey,
+		Name:     account.Namespace + "/" + account.Name,
+		Currency: account.Spec.CurrencyCode,
 	}
 	if ci := account.Spec.ContactInfo; ci != nil {
 		desired.Email = ci.Email
@@ -713,30 +588,9 @@ func truncateCustomerName(name string) string {
 	return string(runes[:customerNameMaxLength-utf8.RuneCountInString(suffix)]) + suffix
 }
 
-// sortedCopy returns a de-duplicated, sorted copy of in. Nil in => nil out.
-func sortedCopy(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	sort.Strings(out)
-	return out
-}
-
 // SetupWithManager registers the reconciler with mgr, wiring a watch on
-// BillingAccount and a map-func watch that enqueues the parent
-// BillingAccount when one of its bindings changes.
+// BillingAccount and map-func watches that enqueue the parent BillingAccount
+// when one of its payment methods changes.
 func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Client == nil {
 		r.Client = mgr.GetClient()
@@ -765,9 +619,6 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(billingAccountControllerName).
 		For(&billingv1alpha1.BillingAccount{}).
-		Watches(&billingv1alpha1.BillingAccountBinding{},
-			handler.EnqueueRequestsFromMapFunc(mapBindingToAccount),
-		).
 		Watches(&billingv1alpha1.PaymentMethod{},
 			handler.EnqueueRequestsFromMapFunc(mapPaymentMethodToAccount),
 		).
@@ -775,19 +626,6 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.mapStripePaymentMethodToAccount),
 		).
 		Complete(r)
-}
-
-func mapBindingToAccount(_ context.Context, obj client.Object) []reconcile.Request {
-	binding, ok := obj.(*billingv1alpha1.BillingAccountBinding)
-	if !ok {
-		return nil
-	}
-	return []reconcile.Request{{
-		NamespacedName: types.NamespacedName{
-			Name:      binding.Spec.BillingAccountRef.Name,
-			Namespace: binding.Namespace,
-		},
-	}}
 }
 
 // customerLinkFinalizer tears down the OpenMeter customer for a BillingAccount
@@ -830,10 +668,11 @@ type customerLinkFinalizer struct {
 //     usage (billing/service/gatheringinvoicependinglines.go → the invoice
 //     row's customer usage attribution), so releasing them first would bill
 //     the final period's usage as zero.
-//  3. Release the customer's subject keys. OpenMeter keeps a unique index
-//     on active subject keys, and the customer may now wait weeks for its
-//     invoices to be paid; holding the keys that long would block another
-//     account those projects moved to from attributing them (409s).
+//  3. Release the customer's subject keys. Only customers created before
+//     usage was attributed by customer key carry any (their projects'
+//     "projects/<name>"); dropping them once the final invoice is cut keeps
+//     a customer that may wait weeks on unpaid invoices from holding
+//     subjects it no longer bills.
 //  4. Wait for outstanding invoices — a FinalizerWaitingError, polled every
 //     permanentRequeueAfter, with a WaitingForInvoices event only when the
 //     set of outstanding invoices changes — then delete the customer.
@@ -858,10 +697,16 @@ func (f *customerLinkFinalizer) Finalize(ctx context.Context, obj client.Object)
 		if err := f.OpenMeterClient.CancelSubscriptions(ctx, customerKey); err != nil {
 			logger.Error(err, "force-delete: canceling subscriptions failed; releasing anyway")
 		}
+		// The customer stays behind, so its Stripe customer is unlinked:
+		// a new account for the same Stripe customer could not be billed
+		// otherwise.
+		if err := f.OpenMeterClient.DeleteCustomerStripeAppData(ctx, customerKey); err != nil {
+			logger.Error(err, "force-delete: removing the customer's Stripe app data failed; releasing anyway")
+		}
 		logger.Info("force-delete annotation set; releasing the finalizer without the remaining OpenMeter cleanup",
 			"annotation", ForceDeleteAnnotation)
 		f.event(account, "Warning", EventReasonForceDeleted, fmt.Sprintf(
-			"%s=true: finalizer released after a best-effort subscription cancel; customer %s (its subject keys and invoices) is left in OpenMeter and must be cleaned up by hand",
+			"%s=true: finalizer released after a best-effort subscription cancel and Stripe unlink; customer %s (its subject keys and invoices) is left in OpenMeter and must be cleaned up by hand",
 			ForceDeleteAnnotation, customerKey))
 		f.notices.forget(invoicesNoticeKey)
 		return finalizer.Result{}, nil

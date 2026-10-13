@@ -1,11 +1,19 @@
-# The submission consumer forwards every validated usage event to OpenMeter
-# without reading any Milo resource (it used to watch MeterDefinitions to
-# gate submissions on meter state; billing has already validated the events
-# and OpenMeter stores them whatever the meter's state). The role is kept,
-# empty, so the binding and kustomization stay stable if a read is needed
-# again.
+# The submission consumer attributes each usage event to the BillingAccount
+# billing stamped on it (the billingaccountref extension) and rewrites the
+# event's subject to that account's UID, the OpenMeter customer key. It reads
+# BillingAccounts, and BillingAccountBindings to tell apart same-named
+# accounts in different namespaces (see internal/submission/attribution.go).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: openmeter-provider-submission-consumer
-rules: []
+rules:
+- apiGroups:
+  - billing.miloapis.com
+  resources:
+  - billingaccounts
+  - billingaccountbindings
+  verbs:
+  - get
+  - list
+  - watch

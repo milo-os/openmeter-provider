@@ -3,7 +3,9 @@
 package openmeter
 
 import (
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +50,47 @@ func TestClassify_ServerErrorsAndRateLimitsAreTransient(t *testing.T) {
 				t.Errorf("status %d classified %T, want TransientError", status, err)
 			}
 		})
+	}
+}
+
+// TestClassify_ProblemInstanceIsDropped: OpenMeter gives every problem
+// response a per-request instance id. With it in the error text, the same
+// failure read differently on every call, and the BillingEntitlement
+// controller's condition message changed on every reconcile: each status
+// patch re-triggered the reconcile at once (~50/s against OpenMeter while
+// an account had no payment method).
+func TestClassify_ProblemInstanceIsDropped(t *testing.T) {
+	body := func(seq string) []byte {
+		return []byte(`{"type":"about:blank","title":"Conflict","status":409,"detail":"conflict error: invalid billing setup: customer has no data for stripe app <x> & co","instance":"urn:request:openmeter-api-58668987d8-shcgz/wndS4FINFt-` + seq + `"}`)
+	}
+	resp := &http.Response{StatusCode: http.StatusConflict, Header: http.Header{}}
+
+	first := classifySubscription(resp, body("018939"))
+	second := classifySubscription(resp, body("018942"))
+	if first.Error() != second.Error() {
+		t.Fatalf("same failure, different errors:\n%v\n%v", first, second)
+	}
+	if strings.Contains(first.Error(), "urn:request") {
+		t.Errorf("error still carries the request instance: %v", first)
+	}
+	if !errors.Is(first, ErrCustomerBillingNotReady) {
+		t.Errorf("err = %v, want ErrCustomerBillingNotReady", first)
+	}
+	// The detail text is kept verbatim, unescaped, for substring matching.
+	if !strings.Contains(first.Error(), "customer has no data for stripe app <x> & co") {
+		t.Errorf("detail altered: %v", first)
+	}
+}
+
+func TestClassify_NonProblemBodiesAreUnchanged(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{}}
+	for _, body := range []string{"plain text failure", `["a","b"]`, `{"detail":"no instance here"}`} {
+		var perm *PermanentError
+		if !errors.As(classify(resp, []byte(body), nil), &perm) {
+			t.Fatalf("%q: want a PermanentError", body)
+		}
+		if perm.ResponseBody != body {
+			t.Errorf("ResponseBody = %q, want %q", perm.ResponseBody, body)
+		}
 	}
 }

@@ -290,6 +290,7 @@ type teardownOpenMeterClient struct {
 	prepareErr error
 	releaseErr error
 	deleteErr  error
+	unlinkErr  error
 
 	calls               []string
 	deleteCustomerCalls int
@@ -335,6 +336,11 @@ func (f *teardownOpenMeterClient) DeleteCustomer(_ context.Context, _ openmeter.
 	f.calls = append(f.calls, "DeleteCustomer")
 	f.deleteCustomerCalls++
 	return f.deleteErr
+}
+
+func (f *teardownOpenMeterClient) DeleteCustomerStripeAppData(_ context.Context, _ openmeter.CustomerKey) error {
+	f.calls = append(f.calls, "DeleteCustomerStripeAppData")
+	return f.unlinkErr
 }
 
 func (f *teardownOpenMeterClient) called(method string) bool {
@@ -612,11 +618,15 @@ func TestCustomerLinkFinalizer_PreparationFailureIsAnError(t *testing.T) {
 // TestCustomerLinkFinalizer_ForceDelete: the escape hatch releases the
 // finalizer even when the teardown is wedged, after a best-effort
 // subscription cancel (the annotation is customer-writable, so it must never
-// leave a subscription billing a deleted account), and says so.
+// leave a subscription billing a deleted account) and a best-effort Stripe
+// unlink (the customer left behind would otherwise keep its Stripe customer
+// from being linked to a new account), and says so. Neither failing blocks
+// the release.
 func TestCustomerLinkFinalizer_ForceDelete(t *testing.T) {
 	omc := &teardownOpenMeterClient{
 		getCustomerErr: &openmeter.PermanentError{Err: errors.New("wedged"), StatusCode: 400},
 		cancelErr:      &openmeter.TransientError{Err: errors.New("unavailable")},
+		unlinkErr:      &openmeter.TransientError{Err: errors.New("unavailable")},
 	}
 	h := newDeletingAccountHarness(t, omc, map[string]string{ForceDeleteAnnotation: "true"}, nil)
 
@@ -624,8 +634,8 @@ func TestCustomerLinkFinalizer_ForceDelete(t *testing.T) {
 	if err != nil || len(finalizers) != 0 {
 		t.Fatalf("err = %v, finalizers = %v; want released", err, finalizers)
 	}
-	if want := []string{"CancelSubscriptions"}; !slices.Equal(omc.calls, want) {
-		t.Errorf("OpenMeter calls = %v, want %v (cancel attempted, nothing else)", omc.calls, want)
+	if want := []string{"CancelSubscriptions", "DeleteCustomerStripeAppData"}; !slices.Equal(omc.calls, want) {
+		t.Errorf("OpenMeter calls = %v, want %v (cancel and Stripe unlink attempted, nothing else)", omc.calls, want)
 	}
 	if n := countEvents(h.events(), EventReasonForceDeleted); n != 1 {
 		t.Errorf("%d ForceDeleted events, want 1", n)

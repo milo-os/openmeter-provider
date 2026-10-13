@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
-	"strings"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
 )
@@ -37,13 +35,19 @@ type DesiredCustomer struct {
 	// Address is the billing postal address. Nil when the caller has none
 	// to report (e.g. BillingContactInfo.Address is unset).
 	Address *Address
-	// SubjectKeys is the canonical list of Milo projects bound to this
-	// billing account, attributed to it via OpenMeter's usageAttribution so
-	// metered usage tagged with these subjects rolls up to this customer.
-	// Sent as an explicit (possibly empty) list rather than omitted so a
-	// project being unbound actually clears the attribution.
-	SubjectKeys []string
 }
+
+// Usage attribution: OpenMeter attributes a usage event to the customer
+// whose key, or one of whose usageAttribution.subjectKeys, equals the
+// event's subject (streaming.CustomerUsageAttribution.GetValues). The
+// submission consumer sets every event's subject to its BillingAccount's
+// UID — the customer key — so attribution needs no subject keys at all, and
+// binding or unbinding projects never changes the customer. That matters
+// because OpenMeter refuses any change to subjectKeys while the customer has
+// a live subscription. New customers are therefore created with none, and
+// updates send back exactly the keys OpenMeter already holds: customers
+// created before this change keep their legacy "projects/<name>" keys, so
+// usage ingested under those subjects stays attributed to them.
 
 // Address is the controller-facing representation of a billing postal
 // address. Field names mirror billingv1alpha1.BillingAddress (Region, not
@@ -142,46 +146,10 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-// ErrSubjectKeyConflict marks a customer create/update OpenMeter rejected
-// because one of the requested usageAttribution.subjectKeys is still
-// attributed to a different, non-deleted customer (OpenMeter keeps a unique
-// index on active customer subject keys — openmeter/ent/schema/customer.go —
-// and reports it as customer.SubjectKeyConflictError, a 409). In this
-// codebase that means a project moved between two BillingAccounts and the
-// new account reconciled before the old one let go of it: a condition that
-// clears on its own, so EnsureCustomer reports it as a TransientError
-// wrapping this sentinel rather than as a permanent 409.
-var ErrSubjectKeyConflict = errors.New("openmeter: subject key is attributed to another customer")
-
-// subjectKeyConflictMarker is the fixed part of OpenMeter's
-// customer.NewSubjectKeyConflictError message ("one or multiple subject
-// keys of [...] are already associated with an different customer in the
-// namespace ..."). The 409 body carries no machine-readable code that
-// distinguishes it from the other customer 409s (key conflicts), so the
-// message is the only discriminator.
-const subjectKeyConflictMarker = "are already associated with an different customer"
-
-// classifyCustomerWrite is classify, plus ErrSubjectKeyConflict detection
-// for the customer create/update endpoints.
-func classifyCustomerWrite(resp *http.Response, body []byte) error {
-	err := classify(resp, body, nil)
-	var perm *PermanentError
-	if errors.As(err, &perm) && perm.StatusCode == http.StatusConflict &&
-		strings.Contains(perm.ResponseBody, subjectKeyConflictMarker) {
-		return &TransientError{
-			Err:        fmt.Errorf("%w: %s", ErrSubjectKeyConflict, perm.ResponseBody),
-			StatusCode: perm.StatusCode,
-		}
-	}
-	return err
-}
-
 // nonNilStrings returns in, or an empty (non-nil) slice if in is nil.
 // CustomerUsageAttribution.SubjectKeys has no `omitempty` and OpenMeter's
 // schema explicitly rejects `null` for it ("Value is not nullable") even
-// though an empty array is fine — a nil desired.SubjectKeys (e.g. a
-// BillingAccount with no bound projects) would otherwise marshal to
-// `"subjectKeys":null` and get a permanent 400 on every reconcile.
+// though an empty array is fine.
 func nonNilStrings(in []string) []string {
 	if in == nil {
 		return []string{}
@@ -211,11 +179,13 @@ func (c *client) EnsureCustomer(ctx context.Context, desired DesiredCustomer) (o
 	if !customerNeedsUpdate(existing, desired) {
 		return existing, nil
 	}
-	return c.updateCustomer(ctx, desired)
+	return c.updateCustomer(ctx, existing, desired)
 }
 
 // customerNeedsUpdate reports whether existing's mutable fields (name,
-// email, currency, usage attribution) disagree with desired. Key is not
+// email, currency, address) disagree with desired. Subject keys are not
+// compared: they are never changed (see the usage-attribution note on
+// DesiredCustomer). Key is not
 // compared: existing was fetched by desired.Key, so it always matches.
 func customerNeedsUpdate(existing om.Customer, desired DesiredCustomer) bool {
 	if existing.Name != desired.Name {
@@ -243,24 +213,28 @@ func customerNeedsUpdate(existing om.Customer, desired DesiredCustomer) bool {
 			return true
 		}
 	}
-	if addressFromWire(existing.BillingAddress) != normalizeAddress(desired.Address) {
-		return true
+	return addressFromWire(existing.BillingAddress) != normalizeAddress(desired.Address)
+}
+
+// existingSubjectKeys returns the subject keys OpenMeter holds for c, so an
+// update can send them back unchanged (the PUT is a replace; omitting
+// usageAttribution would drop them).
+func existingSubjectKeys(c om.Customer) []string {
+	if c.UsageAttribution == nil {
+		return []string{}
 	}
-	var existingSubjectKeys []string
-	if existing.UsageAttribution != nil {
-		existingSubjectKeys = existing.UsageAttribution.SubjectKeys
-	}
-	return !slices.Equal(existingSubjectKeys, desired.SubjectKeys)
+	return nonNilStrings(c.UsageAttribution.SubjectKeys)
 }
 
 // createCustomer POSTs a new customer.
 func (c *client) createCustomer(ctx context.Context, desired DesiredCustomer) (om.Customer, error) {
 	key := string(desired.Key)
 	body := om.CustomerCreate{
-		Name:             desired.Name,
-		Key:              &key,
-		BillingAddress:   wireAddress(desired.Address),
-		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: nonNilStrings(desired.SubjectKeys)},
+		Name:           desired.Name,
+		Key:            &key,
+		BillingAddress: wireAddress(desired.Address),
+		// No subject keys: usage is attributed by the customer key.
+		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: []string{}},
 	}
 	if desired.Email != "" {
 		body.PrimaryEmail = &desired.Email
@@ -273,7 +247,7 @@ func (c *client) createCustomer(ctx context.Context, desired DesiredCustomer) (o
 	if err != nil {
 		return om.Customer{}, classify(nil, nil, err)
 	}
-	if err := classifyCustomerWrite(resp.HTTPResponse, resp.Body); err != nil {
+	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
 		return om.Customer{}, err
 	}
 	if resp.JSON201 != nil {
@@ -291,7 +265,7 @@ func (c *client) createCustomer(ctx context.Context, desired DesiredCustomer) (o
 }
 
 // updateCustomer PUTs a full replacement of the customer's mutable fields.
-func (c *client) updateCustomer(ctx context.Context, desired DesiredCustomer) (om.Customer, error) {
+func (c *client) updateCustomer(ctx context.Context, existing om.Customer, desired DesiredCustomer) (om.Customer, error) {
 	// PrimaryEmail is sent unconditionally, including as an explicit empty
 	// string. Despite being a REPLACE, OpenMeter preserves fields omitted
 	// from the body (confirmed live: PUT without primaryEmail left the old
@@ -304,11 +278,13 @@ func (c *client) updateCustomer(ctx context.Context, desired DesiredCustomer) (o
 	// customerNeedsUpdate for how that's kept from looping).
 	key := string(desired.Key)
 	body := om.CustomerReplaceUpdate{
-		Name:             desired.Name,
-		Key:              &key,
-		PrimaryEmail:     &desired.Email,
-		BillingAddress:   wireAddress(desired.Address),
-		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: nonNilStrings(desired.SubjectKeys)},
+		Name:           desired.Name,
+		Key:            &key,
+		PrimaryEmail:   &desired.Email,
+		BillingAddress: wireAddress(desired.Address),
+		// Sent back unchanged: OpenMeter refuses subject-key changes while
+		// the customer has a live subscription.
+		UsageAttribution: &om.CustomerUsageAttribution{SubjectKeys: existingSubjectKeys(existing)},
 	}
 	if desired.Currency != "" {
 		body.Currency = &desired.Currency
@@ -318,7 +294,7 @@ func (c *client) updateCustomer(ctx context.Context, desired DesiredCustomer) (o
 	if err != nil {
 		return om.Customer{}, classify(nil, nil, err)
 	}
-	if err := classifyCustomerWrite(resp.HTTPResponse, resp.Body); err != nil {
+	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
 		return om.Customer{}, err
 	}
 	if resp.JSON200 != nil {
@@ -377,11 +353,10 @@ func (c *client) DeleteCustomer(ctx context.Context, key CustomerKey) error {
 
 // ReleaseCustomerSubjects clears the customer's usageAttribution.subjectKeys
 // and leaves every other field as it is. Used by the BillingAccount
-// finalizer: OpenMeter keeps a unique index on active customer subject keys,
-// so a deleting account's customer — which can linger for weeks waiting on
-// unpaid invoices — would otherwise keep its projects from being attributed
-// to whichever account they moved to (that account's customer create/update
-// gets a 409 until then).
+// finalizer for customers created before usage was attributed by customer
+// key, which still carry their projects' "projects/<name>" keys: a deleting
+// account's customer can linger for weeks waiting on unpaid invoices, and
+// should not keep holding subjects it no longer bills.
 //
 // A missing customer, or one with no subject keys, is a no-op. OpenMeter
 // refuses to change subject keys while the customer has a subscription
