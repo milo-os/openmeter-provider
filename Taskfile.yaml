@@ -349,6 +349,39 @@ tasks:
 
         base="http://127.0.0.1:${PF_PORT}/api/v1"
 
+        # --------------------------------------------------------------
+        # Delete the Stripe webhook endpoints left behind by earlier
+        # clusters.
+        #
+        # Installing the Stripe app makes OpenMeter create a webhook
+        # endpoint in the Stripe account (tagged metadata.om_app_id), and
+        # nothing deletes it when the cluster goes away. Every kind/CI
+        # cluster adds one, and Stripe allows at most 16 per test account:
+        # after that every install fails with "You have reached the maximum
+        # of 16 test webhook endpoints" (confirmed in CI). Dev/CI endpoints
+        # point at https://example.com (apps.baseURL is unset here) and a
+        # local cluster can't receive Stripe webhooks anyway, so the ones
+        # whose app does not exist in this OpenMeter are useless. Only
+        # those are deleted: endpoints of a real deployment (any other URL)
+        # and of this cluster's own app are left alone.
+        # --------------------------------------------------------------
+        current_app_ids="$(command curl -s "${base}/apps" | jq -c '[.items[]?.id]')"
+        stale_endpoint_ids="$(command curl -s -u "${STRIPE_TEST_API_KEY}:" \
+          "https://api.stripe.com/v1/webhook_endpoints?limit=100" \
+          | jq -r --argjson current "$current_app_ids" '.data[]?
+              | select((.metadata.om_app_id // "") != ""
+                  and (.url | startswith("https://example.com/"))
+                  and ((.metadata.om_app_id as $id | $current | index($id)) == null))
+              | .id')"
+        for endpoint_id in $stale_endpoint_ids; do
+          if command curl -s -f -o /dev/null -X DELETE -u "${STRIPE_TEST_API_KEY}:" \
+            "https://api.stripe.com/v1/webhook_endpoints/${endpoint_id}"; then
+            echo "🧹 Deleted stale Stripe webhook endpoint ${endpoint_id} (left by an earlier cluster)."
+          else
+            echo "⚠️  Could not delete stale Stripe webhook endpoint ${endpoint_id}."
+          fi
+        done
+
         stripe_app_id="$(command curl -s "${base}/apps" | jq -r '.items[]? | select(.type=="stripe") | .id' | head -1)"
 
         if [ -n "$stripe_app_id" ]; then
