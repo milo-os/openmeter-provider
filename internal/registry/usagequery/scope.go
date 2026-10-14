@@ -114,7 +114,7 @@ func resolveOrganizationScope(ctx context.Context, milo client.Reader, org strin
 
 func resolveProjectScope(ctx context.Context, milo client.Reader, project string, spec *usagev1alpha1.UsageQuerySpec) (*resolvedScope, error) {
 	if len(spec.BillingAccounts) > 0 {
-		return nil, forbidden("spec.billingAccounts cannot be set in a project; the project's usage is read from every billing account it was bound to")
+		return nil, forbidden("spec.billingAccounts cannot be set in a project; the project's usage is read from every billing account of its organization")
 	}
 	for _, p := range spec.Projects {
 		if p != project {
