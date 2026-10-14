@@ -1,0 +1,37 @@
+# A Sum meter with a declared dimension, and a Max meter: their totals are
+# computed differently (the sum of the buckets, or a query of its own).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-uq-cpu-hours
+spec:
+  meterName: e2e-uq-cpu-hours
+  phase: Published
+  displayName: "vCPU hours"
+  measurement:
+    aggregation: Sum
+    unit: "{vCPU-hour}"
+    dimensions:
+      - region
+  billing:
+    consumedUnit: "{vCPU-hour}"
+    pricingUnit: "{vCPU-hour}"
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-uq-peak-storage
+spec:
+  meterName: e2e-uq-peak-storage
+  phase: Published
+  displayName: "Peak storage"
+  measurement:
+    aggregation: Max
+    unit: GBy
+  billing:
+    consumedUnit: GBy
+    pricingUnit: GBy
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource

@@ -1,0 +1,17 @@
+# The Service Milo's APIService points at (components/usage-api-registration).
+apiVersion: v1
+kind: Service
+metadata:
+  name: openmeter-usage-apiserver
+  labels:
+    app.kubernetes.io/name: openmeter-usage-apiserver
+    app.kubernetes.io/part-of: openmeter-provider
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: openmeter-usage-apiserver
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP

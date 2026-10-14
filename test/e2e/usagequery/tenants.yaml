@@ -1,0 +1,48 @@
+# Two organizations, the way Milo lays them out: each organization's billing
+# accounts live in its namespace (organization-<name>), and Projects are
+# cluster-scoped, owned by an organization.
+#
+#   e2e-uq-a: billing account e2e-uq-a-main; projects e2e-uq-web, e2e-uq-api
+#   e2e-uq-b: billing account e2e-uq-b-main; project e2e-uq-shop
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: organization-e2e-uq-a
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: organization-e2e-uq-b
+---
+apiVersion: resourcemanager.miloapis.com/v1alpha1
+kind: Project
+metadata:
+  name: e2e-uq-web
+  labels:
+    resourcemanager.miloapis.com/organization-name: e2e-uq-a
+spec:
+  ownerRef:
+    kind: Organization
+    name: e2e-uq-a
+---
+# No organization label, as on projects Milo admitted before it set one: the
+# server falls back to spec.ownerRef.
+apiVersion: resourcemanager.miloapis.com/v1alpha1
+kind: Project
+metadata:
+  name: e2e-uq-api
+spec:
+  ownerRef:
+    kind: Organization
+    name: e2e-uq-a
+---
+apiVersion: resourcemanager.miloapis.com/v1alpha1
+kind: Project
+metadata:
+  name: e2e-uq-shop
+  labels:
+    resourcemanager.miloapis.com/organization-name: e2e-uq-b
+spec:
+  ownerRef:
+    kind: Organization
+    name: e2e-uq-b

@@ -1,0 +1,19 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-uq-a-main
+  namespace: organization-e2e-uq-a
+spec:
+  currencyCode: USD
+  contactInfo:
+    email: billing@e2e-uq-a.example
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-uq-b-main
+  namespace: organization-e2e-uq-b
+spec:
+  currencyCode: USD
+  contactInfo:
+    email: billing@e2e-uq-b.example

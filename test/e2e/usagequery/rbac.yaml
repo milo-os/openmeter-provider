@@ -1,0 +1,24 @@
+# Milo would grant this through billing's usage viewer role. Here the kind
+# API server authorizes the request (with RBAC, which ignores the parent
+# extras), and the usage API server decides what the parent may read.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: e2e-usage-viewer
+rules:
+  - apiGroups: ["usage.billing.miloapis.com"]
+    resources: ["usagequeries"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: e2e-usage-viewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: e2e-usage-viewer
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: e2e-usage-viewer

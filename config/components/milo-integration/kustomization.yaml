@@ -1,8 +1,9 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
-# milo-integration wires both openmeter-provider workloads (the manager and
-# the submission-consumer) into a Milo control plane. It mounts a discovery
+# milo-integration wires the openmeter-provider workloads (the manager, the
+# submission-consumer and, when components/usage-apiserver is included, the
+# usage API server) into a Milo control plane. It mounts a discovery
 # kubeconfig ConfigMap (consumer responsibility) and the datum control-plane
 # trust bundle. Matches the pattern used by amberflo-provider/stripe-provider.
 # Consumers are expected to:
@@ -59,6 +60,42 @@ patches:
           spec:
             containers:
               - name: submission-consumer
+                volumeMounts:
+                  - mountPath: /etc/kubernetes/pki/trust
+                    name: trust-bundle
+                    readOnly: true
+                  - mountPath: /etc/kubernetes/project-discovery/auth
+                    name: discovery-kubeconfig
+                    readOnly: true
+            volumes:
+              - name: trust-bundle
+                configMap:
+                  name: datum-control-plane-trust-bundle
+              - name: discovery-kubeconfig
+                configMap:
+                  name: openmeter-provider-discovery-kubeconfig
+  # The usage API server also uses the Milo kubeconfig to delegate
+  # authentication and authorization to Milo, and the trust bundle to verify
+  # the requests Milo proxies to it. Matches nothing unless
+  # components/usage-apiserver is included, and listed before this one.
+  - target:
+      kind: Deployment
+      name: openmeter-usage-apiserver
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: openmeter-usage-apiserver
+      spec:
+        template:
+          spec:
+            containers:
+              - name: apiserver
+                env:
+                  - name: MILO_KUBECONFIG
+                    value: /etc/kubernetes/project-discovery/auth/milo-kubeconfig.yaml
+                  - name: REQUESTHEADER_CLIENT_CA_FILE
+                    value: /etc/kubernetes/pki/trust/ca.crt
                 volumeMounts:
                   - mountPath: /etc/kubernetes/pki/trust
                     name: trust-bundle

@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Adds the usage.billing.miloapis.com aggregated API server (UsageQuery) to a
+# deployment. Pair it with components/milo-integration, which points it at
+# Milo, and register it in Milo with components/usage-api-registration.
+#
+# List this component BEFORE milo-integration: components apply in order,
+# and milo-integration can only patch a Deployment that already exists.
+
+resources:
+  - ../../base/usage-apiserver

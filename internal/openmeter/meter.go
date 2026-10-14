@@ -13,6 +13,7 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
@@ -309,6 +310,26 @@ func MeterGroupBy(dimensions []string) (map[string]string, error) {
 		groupBy[key] = path
 	}
 	return groupBy, nil
+}
+
+// SystemDimensions returns the dimension keys the billing pipeline injects
+// on every valid event of md (status.systemDimensions). Before billing's
+// controller has written the status, it falls back to project_name, which
+// billing v0.3.10 always injects, so a new meter can segment by project from
+// the start.
+func SystemDimensions(md *billingv1alpha1.MeterDefinition) []string {
+	if len(md.Status.SystemDimensions) > 0 {
+		return md.Status.SystemDimensions
+	}
+	return []string{billingv1alpha1.SystemDimensionProjectName}
+}
+
+// MeterDimensions returns every dimension md's OpenMeter meter can be
+// grouped and filtered by: its declared dimensions followed by the system
+// dimensions (see SystemDimensions). Pass it to MeterGroupBy to build the
+// meter, and use it to validate a usage query's group-by.
+func MeterDimensions(md *billingv1alpha1.MeterDefinition) []string {
+	return append(slices.Clone(md.Spec.Measurement.Dimensions), SystemDimensions(md)...)
 }
 
 // EnsureMeter creates or updates the meter so OpenMeter matches desired. The

@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: openmeter-usage-apiserver
+  labels:
+    app.kubernetes.io/name: openmeter-usage-apiserver
+    app.kubernetes.io/part-of: openmeter-provider
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openmeter-usage-apiserver

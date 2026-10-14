@@ -1,0 +1,128 @@
+# The usage.billing.miloapis.com aggregated API server: answers UsageQuery
+# from OpenMeter. Milo proxies to it through an APIService (see
+# components/usage-api-registration) after authenticating and authorizing
+# the caller, so it is never exposed outside the cluster.
+#
+# It stores nothing (no etcd). It reads BillingAccounts, MeterDefinitions and
+# Projects from Milo through the same server config and Milo kubeconfig as
+# the controller manager (components/milo-integration wires them, plus the
+# Milo kubeconfig used to delegate authentication and authorization).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openmeter-usage-apiserver
+  labels:
+    app.kubernetes.io/name: openmeter-usage-apiserver
+    app.kubernetes.io/part-of: openmeter-provider
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openmeter-usage-apiserver
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: apiserver
+      labels:
+        app.kubernetes.io/name: openmeter-usage-apiserver
+        app.kubernetes.io/part-of: openmeter-provider
+    spec:
+      serviceAccountName: openmeter-usage-apiserver
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: openmeter-usage-apiserver
+      containers:
+        - name: apiserver
+          image: ghcr.io/milo-os/openmeter-provider:dev
+          command:
+            - /openmeter-provider
+          args:
+            - apiserver
+            - --server-config=/config/config.yaml
+            - --secure-port=8443
+            # Without a serving certificate the server makes a self-signed
+            # one here. Deployments registered in Milo mount a real one and
+            # set TLS_CERT_FILE / TLS_PRIVATE_KEY_FILE.
+            - --cert-dir=/tmp/certs
+            - --tls-cert-file=$(TLS_CERT_FILE)
+            - --tls-private-key-file=$(TLS_PRIVATE_KEY_FILE)
+            # Milo authenticates callers and decides what they may do; this
+            # server checks both with Milo (TokenReview, SubjectAccessReview).
+            - --authentication-kubeconfig=$(MILO_KUBECONFIG)
+            - --authorization-kubeconfig=$(MILO_KUBECONFIG)
+            - --authorization-always-allow-paths=/healthz,/readyz,/livez,/metrics
+            # Milo forwards the caller (and the organization or project the
+            # request was made in) in these headers, signed by this CA.
+            - --requestheader-client-ca-file=$(REQUESTHEADER_CLIENT_CA_FILE)
+            - --requestheader-username-headers=X-Remote-User
+            - --requestheader-group-headers=X-Remote-Group
+            - --requestheader-uid-headers=X-Remote-Uid
+            - --requestheader-extra-headers-prefix=X-Remote-Extra-
+            - --logging-format=json
+            - --v=2
+          env:
+            - name: TLS_CERT_FILE
+              value: ""
+            - name: TLS_PRIVATE_KEY_FILE
+              value: ""
+            # Empty means the cluster the server runs in.
+            - name: MILO_KUBECONFIG
+              value: ""
+            - name: REQUESTHEADER_CLIENT_CA_FILE
+              value: ""
+          ports:
+            - containerPort: 8443
+              name: https
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          # Ready once the Milo cache has synced (a post-start hook).
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: config
+          configMap:
+            name: openmeter-provider-config
+        - name: tmp
+          emptyDir: {}

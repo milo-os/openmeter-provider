@@ -217,6 +217,13 @@ type Client interface {
 	// SubmitUsageBatch ingests already-validated CloudEvents into OpenMeter.
 	SubmitUsageBatch(ctx context.Context, events []cloudevents.Event) error
 
+	// Usage queries (see usage.go).
+
+	// QueryMeter reads a meter's aggregated usage, optionally windowed,
+	// grouped and filtered by customer and group-by values. Returns
+	// ErrMeterNotFound when the meter does not exist.
+	QueryMeter(ctx context.Context, q MeterQuery) ([]MeterQueryRow, error)
+
 	// Billing-account cleanup and invoice projection lookups (see
 	// billingprofile.go and invoice.go).
 
