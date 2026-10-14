@@ -13,6 +13,7 @@ package usagequery
 import (
 	"context"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -105,13 +106,15 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 
 	if scope.Type == usagev1alpha1.UsageScopePlatform {
 		// Only staff can query the platform; keep a trail of who read what.
+		// Times are formatted: the JSON log format writes a time.Time value
+		// as the time of logging, not the value itself.
 		klog.InfoS("Platform usage query",
 			"user", user.GetName(),
 			"billingAccounts", len(resolved.accounts),
 			"projects", resolved.projects,
 			"meters", query.Spec.Meters,
-			"startTime", query.Spec.StartTime.Time,
-			"endTime", query.Spec.EndTime.Time)
+			"startTime", query.Spec.StartTime.UTC().Format(time.RFC3339),
+			"endTime", query.Spec.EndTime.UTC().Format(time.RFC3339))
 	}
 
 	plans, err := planMeters(ctx, r.milo, &query.Spec)
