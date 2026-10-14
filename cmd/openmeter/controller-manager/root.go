@@ -4,7 +4,11 @@
 // openmeter-provider binary's controller-manager subcommand.
 package controllermanager
 
-import "github.com/spf13/cobra"
+import (
+	"github.com/spf13/cobra"
+
+	"go.miloapis.com/openmeter-provider/cmd/openmeter/apiserver"
+)
 
 // BuildInfo carries version metadata injected at build time via -ldflags.
 type BuildInfo struct {
@@ -23,5 +27,6 @@ func NewRootCommand(info BuildInfo) *cobra.Command {
 		// No RunE — 'openmeter-provider' with no subcommand prints help.
 	}
 	root.AddCommand(newControllerManagerCommand(info))
+	root.AddCommand(apiserver.NewCommand(info.Version))
 	return root
 }

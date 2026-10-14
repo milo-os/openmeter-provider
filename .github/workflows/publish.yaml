@@ -27,6 +27,6 @@ jobs:
     with:
       bundle-name: ghcr.io/milo-os/openmeter-provider-kustomize
       bundle-path: config
-      image-overlays: config/base/manager,config/base/submission-consumer
+      image-overlays: config/base/manager,config/base/submission-consumer,config/base/usage-apiserver
       image-name: ghcr.io/milo-os/openmeter-provider
     secrets: inherit

@@ -1,0 +1,17 @@
+# Tells Milo to proxy usage.billing.miloapis.com/v1alpha1 to the usage API
+# server. Apply it to Milo, not to the cluster the server runs in. Milo
+# reaches the Service by its cluster DNS name.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.usage.billing.miloapis.com
+spec:
+  group: usage.billing.miloapis.com
+  version: v1alpha1
+  service:
+    name: openmeter-usage-apiserver
+    namespace: openmeter-system
+    port: 443
+  insecureSkipTLSVerify: false
+  groupPriorityMinimum: 1000
+  versionPriority: 15

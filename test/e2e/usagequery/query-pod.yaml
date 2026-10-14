@@ -1,0 +1,12 @@
+# Long-lived helper pod for reaching OpenMeter's ClusterIP API through
+# `kubectl exec`, to ingest usage directly.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: openmeter-query-uq
+spec:
+  restartPolicy: Never
+  containers:
+    - name: query
+      image: curlimages/curl:8.10.1
+      command: ["sleep", "3600"]

@@ -1,0 +1,61 @@
+# What the usage API server needs from the cluster whose API it delegates to
+# and reads from. In a Milo deployment that is Milo (through the Milo
+# kubeconfig components/milo-integration mounts) and this RBAC is unused;
+# in a single cluster (dev, e2e) it is the cluster itself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openmeter-usage-apiserver
+  labels:
+    app.kubernetes.io/name: openmeter-usage-apiserver
+    app.kubernetes.io/part-of: openmeter-provider
+rules:
+  # The request-header CA and allowed names for verifying proxied requests.
+  # Granted by name with a ClusterRole rather than a RoleBinding in
+  # kube-system, which an overlay's namespace would move.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["extension-apiserver-authentication"]
+    verbs: ["get", "list", "watch"]
+  # Scoping a query: billing accounts, meters, and which organization owns a
+  # project.
+  - apiGroups: ["billing.miloapis.com"]
+    resources: ["billingaccounts", "meterdefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["resourcemanager.miloapis.com"]
+    resources: ["projects"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openmeter-usage-apiserver
+  labels:
+    app.kubernetes.io/name: openmeter-usage-apiserver
+    app.kubernetes.io/part-of: openmeter-provider
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openmeter-usage-apiserver
+subjects:
+  - kind: ServiceAccount
+    name: openmeter-usage-apiserver
+    namespace: openmeter-system
+---
+# TokenReview and SubjectAccessReview, to delegate authentication and
+# authorization.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openmeter-usage-apiserver-auth-delegator
+  labels:
+    app.kubernetes.io/name: openmeter-usage-apiserver
+    app.kubernetes.io/part-of: openmeter-provider
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: openmeter-usage-apiserver
+    namespace: openmeter-system

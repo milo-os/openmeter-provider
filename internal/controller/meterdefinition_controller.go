@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -260,8 +259,7 @@ func desiredMeter(md *billingv1alpha1.MeterDefinition) (openmeter.DesiredMeter, 
 		description = md.Spec.Description
 	}
 
-	dimensions := append(slices.Clone(md.Spec.Measurement.Dimensions), systemDimensions(md)...)
-	groupBy, err := openmeter.MeterGroupBy(dimensions)
+	groupBy, err := openmeter.MeterGroupBy(openmeter.MeterDimensions(md))
 	if err != nil {
 		return openmeter.DesiredMeter{}, err
 	}
@@ -275,18 +273,6 @@ func desiredMeter(md *billingv1alpha1.MeterDefinition) (openmeter.DesiredMeter, 
 		GroupBy:       groupBy,
 		ValueProperty: openmeter.MeterValueProperty(md.Spec.Measurement.Aggregation),
 	}, nil
-}
-
-// systemDimensions returns the dimension keys the billing pipeline injects
-// on every valid event of md (status.systemDimensions). Before billing's
-// controller has written the status, it falls back to project_name, which
-// billing v0.3.10 always injects, so a new meter can segment by project from
-// the start.
-func systemDimensions(md *billingv1alpha1.MeterDefinition) []string {
-	if len(md.Status.SystemDimensions) > 0 {
-		return md.Status.SystemDimensions
-	}
-	return []string{billingv1alpha1.SystemDimensionProjectName}
 }
 
 // SetupWithManager registers the reconciler with mgr, wiring a watch on

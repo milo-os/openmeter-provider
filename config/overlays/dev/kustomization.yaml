@@ -12,6 +12,11 @@ components:
   - ../../components/namespace
   - ../../components/controller_rbac
   - ../../components/leader_election
+  # The usage API server, registered in this cluster: in dev the kind
+  # cluster plays Milo's part (it holds the billing CRDs and Projects, and
+  # proxies UsageQuery to the server).
+  - ../../components/usage-apiserver
+  - ../../components/usage-api-registration
 
 configMapGenerator:
   - name: openmeter-provider-config
@@ -27,3 +32,4 @@ patches:
       kind: Deployment
       name: submission-consumer
     path: submission_consumer_patch.yaml
+  - path: usage_apiserver_patch.yaml

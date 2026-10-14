@@ -1,0 +1,16 @@
+# One replica is enough locally.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openmeter-usage-apiserver
+spec:
+  replicas: 1
+---
+# The server makes itself a self-signed serving certificate in dev, which the
+# kind API server has no CA for.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.usage.billing.miloapis.com
+spec:
+  insecureSkipTLSVerify: true

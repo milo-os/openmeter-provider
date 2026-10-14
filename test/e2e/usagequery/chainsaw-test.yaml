@@ -1,0 +1,143 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: usagequery
+spec:
+  description: |
+    Reads usage through the usage API (usage.billing.miloapis.com
+    UsageQuery) and checks that what a query can read is decided by where
+    it is made: on the platform, in an organization, or in a project.
+
+    The cluster plays Milo's part: it holds the billing accounts (one
+    namespace per organization) and the Projects, and proxies UsageQuery to
+    the usage API server through its APIService. Queries are made as an
+    impersonated user, with the parent Milo would set for an
+    /organizations/<name> or /projects/<name> URL passed as impersonated
+    user extras, which the API server forwards to the usage API server the
+    same way Milo does (see lib.sh).
+
+    Usage is sent straight to OpenMeter (ingest.sh) rather than through NATS
+    and the submission consumer, which the submission suite covers. Every
+    expected number below comes from the table in ingest.sh:
+
+      organization e2e-uq-a: account e2e-uq-a-main
+        project e2e-uq-web: cpu 10 (yesterday) + 5 (today), peak 40
+        project e2e-uq-api: cpu 7, peak 70 (no organization label; found
+                            through spec.ownerRef)
+      organization e2e-uq-b: account e2e-uq-b-main
+        project e2e-uq-shop: cpu 100, peak 999
+  namespace: openmeter-system
+  steps:
+    - name: the usage API is registered and serving
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: apiregistration.k8s.io/v1
+              kind: APIService
+              metadata:
+                name: v1alpha1.usage.billing.miloapis.com
+              status:
+                (conditions[?type == 'Available']):
+                  - status: "True"
+
+    - name: start the OpenMeter query pod
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-uq
+              status:
+                phase: Running
+
+    - name: create two organizations with projects, billing accounts and meters
+      description: |
+        The controller creates an OpenMeter customer per billing account
+        and a meter per MeterDefinition; their finalizers show it did.
+      try:
+        - apply:
+            file: rbac.yaml
+        - apply:
+            file: tenants.yaml
+        - apply:
+            file: meters.yaml
+        - apply:
+            file: billingaccounts.yaml
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-uq-cpu-hours
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: MeterDefinition
+              metadata:
+                name: e2e-uq-peak-storage
+                (finalizers[?@ == 'openmeter.miloapis.com/meter']): ['openmeter.miloapis.com/meter']
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-uq-a-main
+                namespace: organization-e2e-uq-a
+                (finalizers[?@ == 'openmeter.miloapis.com/customer-link']): ['openmeter.miloapis.com/customer-link']
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-uq-b-main
+                namespace: organization-e2e-uq-b
+                (finalizers[?@ == 'openmeter.miloapis.com/customer-link']): ['openmeter.miloapis.com/customer-link']
+
+    - name: send usage to OpenMeter
+      try:
+        - script:
+            timeout: 90s
+            content: bash ingest.sh
+
+    - name: wait for the usage to be queryable
+      description: |
+        OpenMeter's ingest pipeline (Kafka -> sink-worker -> ClickHouse) can
+        lag by minutes on a small cluster.
+      try:
+        - script:
+            timeout: 7m
+            content: bash wait-usage.sh
+
+    - name: an organization reads only its own usage
+      try:
+        - script:
+            timeout: 2m
+            content: bash check-organization.sh
+
+    - name: a project reads only its own usage
+      try:
+        - script:
+            timeout: 2m
+            content: bash check-project.sh
+
+    - name: the platform reads any usage it names
+      try:
+        - script:
+            timeout: 2m
+            content: bash check-platform.sh
+
+    - name: requests the usage API refuses
+      try:
+        - script:
+            timeout: 2m
+            content: bash check-denied.sh
