@@ -1,7 +1,7 @@
 #!/bin/bash
 # expect-milo-invoice.sh PHASE — the BillingAccount controller projected the
 # OpenMeter invoice onto exactly one Milo Invoice, in PHASE, with its
-# amounts.
+# amounts and a link to its Stripe invoice page (documentUri).
 set -euo pipefail
 . ./lib.sh
 
@@ -10,6 +10,8 @@ want_phase=$1
 invoice=$(the_invoice) || fail "expected exactly one OpenMeter invoice" "$(account_invoices)"
 id=$(echo "$invoice" | jq -r .id)
 total=$(echo "$invoice" | jq -r .totals.total)
+stripe_invoice_id=$(echo "$invoice" | jq -r '.externalIds.invoicing // empty')
+[ -n "$stripe_invoice_id" ] || fail "invoice ${id} has no Stripe invoice id" "$invoice"
 
 check() {
   resync_account
@@ -18,10 +20,11 @@ check() {
     jq -c --arg id "$id" '[.items[] | select(.metadata.annotations["openmeter.miloapis.com/invoiceId"] == $id)]')
   [ "$(echo "$matches" | jq 'length')" = "1" ] || return 1
   obj=$(echo "$matches" | jq -c '.[0]')
-  [ "$(echo "$obj" | jq -r .status.phase)" = "$want_phase" ]
+  [ "$(echo "$obj" | jq -r .status.phase)" = "$want_phase" ] &&
+    [ -n "$(echo "$obj" | jq -r '.status.documentUri // empty')" ]
 }
 
-retry 20 check || fail "no Milo Invoice for OpenMeter invoice ${id} in phase ${want_phase}" "${matches:-[]}"
+retry 20 check || fail "no Milo Invoice for OpenMeter invoice ${id} in phase ${want_phase} with a documentUri" "${matches:-[]}"
 
 name=$(echo "$obj" | jq -r .metadata.name)
 st=$(echo "$obj" | jq -c .status)
@@ -34,6 +37,14 @@ expect ".spec.billingAccountRef.name == \"${ACCOUNT}\"" "billingAccountRef is no
 expect '.status.currencyCode == "USD"' "currency is not USD"
 expect '(.status.conditions // [] | map(select(.type == "Ready")) | .[0].status) == "True"' "Ready is not True"
 num_eq "$(echo "$st" | jq -r .total)" "$total" || fail "Invoice ${name}: total is not ${total}" "$st"
+
+# The link is the Stripe invoice's own hosted page (view, PDF, pay). Stripe
+# signs a new URL on every read, so compare the page each URL opens.
+hosted=$(stripe GET "/invoices/${stripe_invoice_id}" | jq -r '.hosted_invoice_url // empty')
+[ -n "$hosted" ] || fail "Stripe invoice ${stripe_invoice_id} has no hosted_invoice_url"
+page=$(stripe_invoice_page "$(echo "$obj" | jq -r .status.documentUri)")
+[ -n "$page" ] && [ "$page" = "$(stripe_invoice_page "$hosted")" ] ||
+  fail "Invoice ${name}: documentUri is not Stripe invoice ${stripe_invoice_id}'s hosted page ${hosted}" "$obj"
 
 case "$want_phase" in
   Open)

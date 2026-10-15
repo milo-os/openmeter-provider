@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
 
@@ -32,6 +33,23 @@ import (
 // name (see invoiceName). Mirrors amberflo-provider's
 // invoice.InvoiceKeyAnnotation.
 const InvoiceKeyAnnotation = "openmeter.miloapis.com/invoiceId"
+
+// InvoiceDocumentFetchedAtAnnotation records when status.documentUri was
+// last read from Stripe (RFC 3339), so it is read again before it expires.
+const InvoiceDocumentFetchedAtAnnotation = "openmeter.miloapis.com/documentUriFetchedAt"
+
+// documentURIRefreshAfter is how old status.documentUri may get before it
+// is read from Stripe again. Stripe expires an invoice's link 30 days after
+// its due date, but guarantees a link read through the API works for at
+// least 10 days, so reading it again within a week keeps it working for as
+// long as the invoice exists.
+const documentURIRefreshAfter = 7 * 24 * time.Hour
+
+// InvoiceLinker returns the link to a Stripe invoice's hosted page
+// (*stripe.InvoiceLinks).
+type InvoiceLinker interface {
+	HostedInvoiceURL(ctx context.Context, stripeInvoiceID string) (string, error)
+}
 
 // Invoice Ready condition reasons this provider sets besides the phase
 // names (billing documents Paid and CurrencyMismatch).
@@ -358,27 +376,89 @@ func (r *BillingAccountReconciler) patchInvoiceStatus(
 	account *billingv1alpha1.BillingAccount,
 	inv om.Invoice,
 ) error {
-	if obj.Annotations[InvoiceKeyAnnotation] != inv.Id {
+	now := time.Now()
+	documentURI, refreshed := r.invoiceDocumentURI(ctx, obj, inv, now)
+
+	annotations := map[string]string{InvoiceKeyAnnotation: inv.Id}
+	if refreshed {
+		annotations[InvoiceDocumentFetchedAtAnnotation] = now.UTC().Format(time.RFC3339)
+	}
+	if needsAnnotations(obj, annotations) {
 		base := obj.DeepCopy()
 		if obj.Annotations == nil {
 			obj.Annotations = map[string]string{}
 		}
-		obj.Annotations[InvoiceKeyAnnotation] = inv.Id
+		for k, v := range annotations {
+			obj.Annotations[k] = v
+		}
 		if err := r.Patch(ctx, obj, client.MergeFrom(base)); err != nil {
 			return fmt.Errorf("patch Invoice metadata %s/%s: %w", obj.Namespace, obj.Name, err)
 		}
 	}
 
 	statusBase := obj.DeepCopy()
-	projectInvoiceStatus(obj, account, inv, time.Now())
+	projectInvoiceStatus(obj, account, inv, now)
+	if refreshed {
+		obj.Status.DocumentURI = documentURI
+	}
 	if err := r.Status().Patch(ctx, obj, client.MergeFrom(statusBase)); err != nil {
 		return fmt.Errorf("patch Invoice status %s/%s: %w", obj.Namespace, obj.Name, err)
 	}
 	return nil
 }
 
+func needsAnnotations(obj *billingv1alpha1.Invoice, want map[string]string) bool {
+	for k, v := range want {
+		if obj.Annotations[k] != v {
+			return true
+		}
+	}
+	return false
+}
+
+// invoiceDocumentURI reads the link to inv's Stripe invoice for
+// status.documentUri when obj has none yet or it is due for a refresh (see
+// documentURIRefreshAfter), and reports whether it read one. OpenMeter
+// renders no invoice document and keeps only the Stripe invoice's id, so the
+// link comes from Stripe: its hosted invoice page, where the customer can
+// view the invoice, download its PDF and pay it.
+//
+// A failure only leaves the current link in place, to be retried on the next
+// sync: a missing link must not hold up the invoice's status.
+func (r *BillingAccountReconciler) invoiceDocumentURI(
+	ctx context.Context,
+	obj *billingv1alpha1.Invoice,
+	inv om.Invoice,
+	now time.Time,
+) (string, bool) {
+	if openmeter.IsInvoiceDeleted(inv) ||
+		inv.ExternalIds == nil || inv.ExternalIds.Invoicing == nil || *inv.ExternalIds.Invoicing == "" {
+		return "", false
+	}
+	if obj.Status.DocumentURI != "" {
+		fetchedAt, err := time.Parse(time.RFC3339, obj.Annotations[InvoiceDocumentFetchedAtAnnotation])
+		if err == nil && now.Sub(fetchedAt) < documentURIRefreshAfter {
+			return "", false
+		}
+	}
+
+	stripeInvoiceID := *inv.ExternalIds.Invoicing
+	uri, err := r.InvoiceLinks.HostedInvoiceURL(ctx, stripeInvoiceID)
+	switch {
+	case err != nil:
+		log.FromContext(ctx).Error(err, "reading the invoice's Stripe link failed; keeping the current one",
+			"invoice", obj.Name, "stripeInvoice", stripeInvoiceID)
+		return "", false
+	case uri == "":
+		// Still a draft in Stripe.
+		return "", false
+	}
+	return uri, true
+}
+
 // projectInvoiceStatus writes inv's state onto obj.Status. now is only used
-// for paidAt when OpenMeter gives no usable timestamp.
+// for paidAt when OpenMeter gives no usable timestamp. status.documentUri is
+// not OpenMeter's; see invoiceDocumentURI.
 func projectInvoiceStatus(obj *billingv1alpha1.Invoice, account *billingv1alpha1.BillingAccount, inv om.Invoice, now time.Time) {
 	phase, ok := mapInvoiceStatus(inv.Status)
 	deleted := openmeter.IsInvoiceDeleted(inv)
@@ -394,7 +474,6 @@ func projectInvoiceStatus(obj *billingv1alpha1.Invoice, account *billingv1alpha1
 	obj.Status.CurrencyCode = string(inv.Currency)
 	obj.Status.Total = inv.Totals.Total
 	obj.Status.AmountPaid, obj.Status.AmountDue = invoiceAmounts(inv, phase)
-	obj.Status.DocumentURI = ""
 	obj.Status.ObservedGeneration = obj.Generation
 
 	obj.Status.DueDate = nil

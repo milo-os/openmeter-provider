@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -273,7 +274,11 @@ func newInvoiceSyncReconciler(t *testing.T, invoices []om.Invoice, objs ...clien
 		WithObjects(append([]client.Object{account}, objs...)...).
 		WithStatusSubresource(&billingv1alpha1.Invoice{}).
 		Build()
-	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: &invoiceListOpenMeterClient{invoices: invoices}}
+	r := &BillingAccountReconciler{
+		Client:          k8s,
+		OpenMeterClient: &invoiceListOpenMeterClient{invoices: invoices},
+		InvoiceLinks:    &fakeInvoiceLinks{},
+	}
 	return r, k8s, account
 }
 
@@ -459,5 +464,118 @@ func TestReconcileInvoices_IgnoresOtherAccountsAndUnannotatedInvoices(t *testing
 		if len(obj.Status.Conditions) != 0 {
 			t.Errorf("%s was touched: %+v", name, obj.Status.Conditions)
 		}
+	}
+}
+
+// fakeInvoiceLinks serves Stripe invoice links by Stripe invoice id.
+type fakeInvoiceLinks struct {
+	urls  map[string]string
+	err   error
+	calls int
+}
+
+func (f *fakeInvoiceLinks) HostedInvoiceURL(_ context.Context, stripeInvoiceID string) (string, error) {
+	f.calls++
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.urls[stripeInvoiceID], nil
+}
+
+func inStripe(inv om.Invoice, stripeInvoiceID string) om.Invoice {
+	inv.ExternalIds = &om.InvoiceAppExternalIds{Invoicing: &stripeInvoiceID}
+	return inv
+}
+
+func TestReconcileInvoices_DocumentURIIsTheStripeInvoicePage(t *testing.T) {
+	inv := inStripe(omInvoice("01OPEN", om.InvoiceStatusIssued, "10"), "in_1")
+	links := &fakeInvoiceLinks{urls: map[string]string{"in_1": "https://invoice.stripe.com/i/one"}}
+	r, k8s, account := newInvoiceSyncReconciler(t, []om.Invoice{inv})
+	r.InvoiceLinks = links
+
+	for pass := 1; pass <= 2; pass++ {
+		if err := r.reconcileInvoices(context.Background(), account, "cust"); err != nil {
+			t.Fatalf("reconcileInvoices pass %d: %v", pass, err)
+		}
+	}
+	obj := listMiloInvoices(t, k8s)["01OPEN"]
+	if obj.Status.DocumentURI != "https://invoice.stripe.com/i/one" {
+		t.Errorf("documentUri = %q, want the Stripe invoice page", obj.Status.DocumentURI)
+	}
+	if _, err := time.Parse(time.RFC3339, obj.Annotations[InvoiceDocumentFetchedAtAnnotation]); err != nil {
+		t.Errorf("fetched-at annotation %q: %v", obj.Annotations[InvoiceDocumentFetchedAtAnnotation], err)
+	}
+	if links.calls != 1 {
+		t.Errorf("Stripe read %d times in two syncs, want once: a fresh link is kept", links.calls)
+	}
+}
+
+func TestReconcileInvoices_DocumentURIIsRefreshedBeforeItExpires(t *testing.T) {
+	inv := inStripe(omInvoice("01OPEN", om.InvoiceStatusPaid, "10"), "in_1")
+	existing := legacyInvoice("acme-account-2026-03", "01OPEN", billingv1alpha1.InvoicePhasePaid)
+	existing.Status.DocumentURI = "https://invoice.stripe.com/i/old"
+	existing.Annotations[InvoiceDocumentFetchedAtAnnotation] = time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	links := &fakeInvoiceLinks{urls: map[string]string{"in_1": "https://invoice.stripe.com/i/new"}}
+	r, k8s, account := newInvoiceSyncReconciler(t, []om.Invoice{inv}, existing)
+	r.InvoiceLinks = links
+
+	if err := r.reconcileInvoices(context.Background(), account, "cust"); err != nil {
+		t.Fatalf("reconcileInvoices: %v", err)
+	}
+	obj := listMiloInvoices(t, k8s)["01OPEN"]
+	if obj.Status.DocumentURI != "https://invoice.stripe.com/i/new" {
+		t.Errorf("documentUri = %q, want the link read again after a week", obj.Status.DocumentURI)
+	}
+	fetchedAt, _ := time.Parse(time.RFC3339, obj.Annotations[InvoiceDocumentFetchedAtAnnotation])
+	if time.Since(fetchedAt) > time.Minute {
+		t.Errorf("fetched-at annotation not updated: %s", fetchedAt)
+	}
+}
+
+func TestReconcileInvoices_DocumentURIFailureKeepsTheLinkAndTheStatus(t *testing.T) {
+	inv := inStripe(omInvoice("01OPEN", om.InvoiceStatusPaid, "10"), "in_1")
+	existing := legacyInvoice("acme-account-2026-03", "01OPEN", billingv1alpha1.InvoicePhaseOpen)
+	existing.Status.DocumentURI = "https://invoice.stripe.com/i/old"
+	r, k8s, account := newInvoiceSyncReconciler(t, []om.Invoice{inv}, existing)
+	r.InvoiceLinks = &fakeInvoiceLinks{err: errors.New("stripe is down")}
+
+	if err := r.reconcileInvoices(context.Background(), account, "cust"); err != nil {
+		t.Fatalf("reconcileInvoices: %v, want the link failure not to fail the sync", err)
+	}
+	obj := listMiloInvoices(t, k8s)["01OPEN"]
+	if obj.Status.Phase != billingv1alpha1.InvoicePhasePaid {
+		t.Errorf("phase = %s, want Paid: the rest of the status is still synced", obj.Status.Phase)
+	}
+	if obj.Status.DocumentURI != "https://invoice.stripe.com/i/old" {
+		t.Errorf("documentUri = %q, want the current link kept", obj.Status.DocumentURI)
+	}
+}
+
+func TestReconcileInvoices_NoDocumentURIWithoutAStripeInvoice(t *testing.T) {
+	deleted := inStripe(omInvoice("01DELETED", openmeter.InvoiceStatusDeleted, "7"), "in_deleted")
+	at := time.Date(2026, 3, 5, 0, 0, 0, 0, time.UTC)
+	deleted.DeletedAt = &at
+	for name, tc := range map[string]struct {
+		inv      om.Invoice
+		links    *fakeInvoiceLinks
+		existing []client.Object
+	}{
+		"not in Stripe":   {omInvoice("01OPEN", om.InvoiceStatusIssued, "10"), &fakeInvoiceLinks{}, nil},
+		"draft in Stripe": {inStripe(omInvoice("01OPEN", om.InvoiceStatusIssued, "10"), "in_draft"), &fakeInvoiceLinks{urls: map[string]string{}}, nil},
+		"deleted invoice": {deleted, &fakeInvoiceLinks{urls: map[string]string{"in_deleted": "https://invoice.stripe.com/i/deleted"}}, []client.Object{
+			legacyInvoice("acme-account-2026-03", "01DELETED", billingv1alpha1.InvoicePhaseOpen)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, k8s, account := newInvoiceSyncReconciler(t, []om.Invoice{tc.inv}, tc.existing...)
+			r.InvoiceLinks = tc.links
+			if err := r.reconcileInvoices(context.Background(), account, "cust"); err != nil {
+				t.Fatalf("reconcileInvoices: %v", err)
+			}
+			obj := listMiloInvoices(t, k8s)[tc.inv.Id]
+			if obj.Status.DocumentURI != "" || obj.Annotations[InvoiceDocumentFetchedAtAnnotation] != "" {
+				t.Errorf("documentUri %q, fetched-at %q, want neither",
+					obj.Status.DocumentURI, obj.Annotations[InvoiceDocumentFetchedAtAnnotation])
+			}
+		})
 	}
 }

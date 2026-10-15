@@ -23,6 +23,7 @@ import (
 	"go.miloapis.com/openmeter-provider/internal/config"
 	"go.miloapis.com/openmeter-provider/internal/controller"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
+	"go.miloapis.com/openmeter-provider/internal/stripe"
 	stripev1alpha1 "go.miloapis.com/stripe-provider/api/v1alpha1"
 )
 
@@ -45,6 +46,7 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 		leaderElectionNamespace string
 		probeAddr               string
 		serverConfigFile        string
+		stripeAPIKeyFile        string
 	)
 
 	opts := zap.Options{
@@ -137,8 +139,15 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 				}).SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("creating MeterDefinition controller: %w", err)
 				}
+				// Every Invoice links to its Stripe page, so the key is
+				// required: fail now rather than run without the links.
+				invoiceLinks, err := stripe.NewInvoiceLinks(stripeAPIKeyFile)
+				if err != nil {
+					return fmt.Errorf("--stripe-api-key-file: %w", err)
+				}
 				if err = (&controller.BillingAccountReconciler{
 					OpenMeterClient: openMeterClient,
+					InvoiceLinks:    invoiceLinks,
 				}).SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("creating BillingAccount controller: %w", err)
 				}
@@ -182,6 +191,9 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 			"Enabling this will ensure there is only one active controller manager.")
 	cmd.Flags().StringVar(&leaderElectionNamespace, "leader-elect-namespace", "", "The namespace to use for leader election.")
 	cmd.Flags().StringVar(&serverConfigFile, "server-config", "", "Path to the server config file.")
+	cmd.Flags().StringVar(&stripeAPIKeyFile, "stripe-api-key-file", "",
+		"Path to the API key of the Stripe account OpenMeter invoices in, used to link each Invoice to its Stripe page "+
+			"(status.documentUri). Required when OpenMeter is configured.")
 
 	// zap.Options.BindFlags accepts *flag.FlagSet (stdlib). Bridge via pflag's
 	// AddGoFlagSet so the zap flags are surfaced on the cobra command.
