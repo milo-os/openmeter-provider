@@ -1,0 +1,40 @@
+# Requests: one rate for us-east4 and a catch-all for every other region,
+# so the plan has two rate cards (features with filters) on one meter.
+# Egress: graduated tiers, so the price of usage depends on the usage
+# before it in the billing period.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: e2e-sp-requests
+spec:
+  displayName: "Requests"
+  chargeType: Usage
+  currency: USD
+  metric: e2e-sp-requests
+  pricingUnit: "{request}"
+  serviceRef: networking.miloapis.com
+  rates:
+    - match:
+        dimension: region
+        value: us-east4
+      flat: "0.5"
+    - flat: "0.25"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: e2e-sp-egress
+spec:
+  displayName: "Egress"
+  chargeType: Usage
+  currency: USD
+  metric: e2e-sp-egress
+  pricingUnit: GBy
+  serviceRef: networking.miloapis.com
+  rates:
+    - tiered:
+        - upTo: "10"
+          rate: "1"
+        - upTo: "100"
+          rate: "0.5"
+        - rate: "0.1"

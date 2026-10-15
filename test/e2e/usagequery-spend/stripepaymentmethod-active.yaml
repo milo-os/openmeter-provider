@@ -1,0 +1,9 @@
+# Ids from ../billingaccount/resolve-stripe-customer.sh.
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripePaymentMethod
+metadata:
+  name: e2e-sp-payment-method
+status:
+  phase: Active
+  stripeCustomerId: ($stripeCustomerId)
+  stripePaymentMethodId: ($stripePaymentMethodId)

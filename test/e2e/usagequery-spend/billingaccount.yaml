@@ -1,0 +1,13 @@
+# In the organization's namespace, so the suite can query it in the
+# organization's context.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-sp-account
+spec:
+  currencyCode: USD
+  contactInfo:
+    name: E2E Spend
+    email: e2e-spend@example.com
+  defaultPaymentMethodRef:
+    name: e2e-sp-payment-method

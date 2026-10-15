@@ -122,7 +122,7 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 		return nil, err
 	}
 
-	customers, err := r.customers.customerIDs(ctx, resolved.accounts)
+	customers, err := r.customers.customers(ctx, resolved.accounts)
 	if err != nil {
 		return nil, apierrors.NewServiceUnavailable(fmt.Sprintf("looking up OpenMeter customers: %v", err))
 	}
@@ -130,16 +130,36 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 	meters, err := (&executor{
 		openMeter: r.openMeter,
 		spec:      &query.Spec,
-		customers: customers,
+		customers: customerIDs(customers),
 		projects:  resolved.projects,
 	}).run(ctx, plans)
 	if err != nil {
 		return nil, err
 	}
 
+	if query.Spec.IncludeSpend {
+		spend := (&spendCalculator{
+			openMeter: r.openMeter,
+			spec:      &query.Spec,
+			customers: customers,
+			projects:  resolved.projects,
+		}).run(ctx, plans)
+		for i := range meters {
+			// A meter that could not be read has no usage to price.
+			if meters[i].Error != "" {
+				continue
+			}
+			meters[i].Spend = spend[i].spend
+			meters[i].SpendError = spend[i].err
+		}
+	}
+
 	query.Status = usagev1alpha1.UsageQueryStatus{
 		Scope:  scope,
 		Meters: meters,
+	}
+	if query.Spec.IncludeSpend {
+		query.Status.Spend, query.Status.SpendError = totalSpend(meters)
 	}
 	// A project query reads every billing account of its organization, which
 	// project members may not be allowed to see, so it does not name them.

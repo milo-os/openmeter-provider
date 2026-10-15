@@ -1,0 +1,155 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: usagequery-spend
+spec:
+  description: |
+    UsageQuery's spend per meter (spec.includeSpend): usage priced with the
+    billing account's plan the way its invoice prices it.
+
+    An organization (e2e-sp, namespace organization-e2e-sp) has one billing
+    account entitled to an Offer that prices two meters: requests with one
+    rate for us-east4 and a catch-all for other regions (two rate cards on
+    one meter), and egress with graduated tiers. Usage is sent straight to
+    OpenMeter in two batches around a boundary W (ingest.sh), and the
+    suite checks (amounts in lib.sh):
+
+      - the spend over the whole subscription, per meter and in total
+        (status.spend), in the organization and in its project;
+      - the spend from W only, where egress continues the tiers after the
+        usage before W instead of starting over;
+      - that the whole-subscription spend, per meter and in total, equals
+        the lines OpenMeter is gathering for the account's invoice;
+      - no spend without includeSpend.
+
+    As in the billingentitlement and invoice suites, billing's operator and
+    stripe-provider do not run: the Offer is published with
+    ../offer/publish.sh and the payment method chain is fabricated with
+    status patches. Stripe ids come from
+    ../billingaccount/resolve-stripe-customer.sh.
+  namespace: organization-e2e-sp
+  steps:
+    - name: the usage API is registered and the OpenMeter query pod runs
+      try:
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: apiregistration.k8s.io/v1
+              kind: APIService
+              metadata:
+                name: v1alpha1.usage.billing.miloapis.com
+              status:
+                (conditions[?type == 'Available']):
+                  - status: "True"
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-sp
+                namespace: openmeter-system
+              status:
+                phase: Running
+        - apply:
+            file: ../usagequery/rbac.yaml
+        - apply:
+            file: project.yaml
+
+    - name: publish an Offer pricing two meters
+      try:
+        - apply:
+            file: meters.yaml
+        - apply:
+            file: servicepricings.yaml
+        - apply:
+            file: offer.yaml
+        - script:
+            timeout: 30s
+            content: bash ../offer/publish.sh e2e-sp-offer
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-sp-offer
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+
+    - name: a billing account with a payment method, entitled to the Offer
+      description: The subscription is what prices the usage.
+      try:
+        - script:
+            content: QUERY_POD=openmeter-query-sp sh ../billingaccount/resolve-stripe-customer.sh "$NAMESPACE" customerId
+            outputs:
+              - name: stripeCustomerId
+                value: ($stdout)
+        - script:
+            content: QUERY_POD=openmeter-query-sp sh ../billingaccount/resolve-stripe-customer.sh "$NAMESPACE" paymentMethodId
+            outputs:
+              - name: stripePaymentMethodId
+                value: ($stdout)
+        - apply:
+            file: paymentmethod.yaml
+        - patch:
+            file: paymentmethod-active.yaml
+            subresource: status
+        - patch:
+            file: stripepaymentmethod-active.yaml
+            subresource: status
+        - apply:
+            file: billingaccount.yaml
+        - patch:
+            file: billingaccount-payment-method-ready.yaml
+            subresource: status
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-sp-account
+                (finalizers[?@ == 'openmeter.miloapis.com/customer-link']): ['openmeter.miloapis.com/customer-link']
+        - apply:
+            file: entitlement.yaml
+        - assert:
+            # The entitlement retries a refused subscription every 30s.
+            timeout: 120s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              metadata:
+                name: e2e-sp-entitlement
+              status:
+                (conditions[?type == 'OpenMeterSubscriptionSynced']):
+                  - status: "True"
+
+    - name: send usage in two batches and wait until OpenMeter has it
+      description: |
+        The usage leaves the account a draft invoice with a balance, which
+        keeps its customer-link finalizer waiting, so the cleanup releases
+        the account with the force-delete annotation. It is here, not in the
+        step that creates the account, because chainsaw deletes a step's
+        resources before running its cleanup scripts, and cleans up the
+        steps last to first: here it runs before the account is deleted.
+      cleanup:
+        - script:
+            timeout: 30s
+            content: bash release-account.sh
+      try:
+        - script:
+            timeout: 60s
+            content: bash ingest.sh
+        - script:
+            timeout: 7m
+            content: bash wait-usage.sh
+
+    - name: spend per meter matches the plan and the invoice
+      try:
+        - script:
+            timeout: 2m
+            content: bash check-spend.sh

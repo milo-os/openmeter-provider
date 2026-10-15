@@ -176,3 +176,41 @@ func TestQueryMeter_ServerErrorIsTransient(t *testing.T) {
 		t.Fatalf("err = %v, want a TransientError", err)
 	}
 }
+
+func TestQueryMeter_SendsFeatureFilters(t *testing.T) {
+	var got om.MeterQueryRequest
+	var slug string
+	c := newQueryServer(t, &got, &slug, func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data": []}`))
+	})
+
+	nin := []string{"eu-west1"}
+	eq := "web"
+	if _, err := c.QueryMeter(context.Background(), MeterQuery{
+		Slug:          "m",
+		From:          time.Unix(0, 0),
+		To:            time.Unix(3600, 0),
+		FilterGroupBy: map[string][]string{"project_name": {"web", "api"}},
+		Filters: map[string]om.FilterString{
+			"region":       {Nin: &nin},
+			"project_name": {Eq: &eq},
+		},
+	}); err != nil {
+		t.Fatalf("QueryMeter: %v", err)
+	}
+
+	filters := *got.AdvancedMeterGroupByFilters
+	if r := filters["region"]; r.Nin == nil || len(*r.Nin) != 1 || (*r.Nin)[0] != "eu-west1" {
+		t.Errorf("region filter = %+v, want $nin [eu-west1]", r)
+	}
+	// The same key in both must match both.
+	p := filters["project_name"]
+	if p.And == nil || len(*p.And) != 2 {
+		t.Fatalf("project_name filter = %+v, want $and of the two", p)
+	}
+	in, feature := (*p.And)[0], (*p.And)[1]
+	if in.In == nil || len(*in.In) != 2 || feature.Eq == nil || *feature.Eq != "web" {
+		t.Errorf("project_name $and = %+v", *p.And)
+	}
+}

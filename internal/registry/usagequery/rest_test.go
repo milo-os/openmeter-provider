@@ -33,17 +33,49 @@ var (
 	end   = start.Add(2 * 24 * time.Hour)
 )
 
-// fakeOpenMeter answers GetCustomer from customers (keyed by account UID)
-// and QueryMeter with query, recording every query.
+// fakeOpenMeter answers GetCustomer from customers (keyed by account UID),
+// QueryMeter with query, recording every query, and the subscription calls
+// from subscriptions (keyed by account UID).
 type fakeOpenMeter struct {
 	openmeter.Client
 
-	customers map[string]string
-	query     func(q openmeter.MeterQuery) ([]openmeter.MeterQueryRow, error)
+	customers       map[string]string
+	query           func(q openmeter.MeterQuery) ([]openmeter.MeterQueryRow, error)
+	subscriptions   map[string][]om.SubscriptionExpanded
+	subscriptionErr error
 
-	mu            sync.Mutex
-	queries       []openmeter.MeterQuery
-	customerCalls int
+	mu                sync.Mutex
+	queries           []openmeter.MeterQuery
+	customerCalls     int
+	subscriptionCalls int
+}
+
+func (f *fakeOpenMeter) ListSubscriptions(_ context.Context, key openmeter.CustomerKey) ([]om.Subscription, error) {
+	f.mu.Lock()
+	f.subscriptionCalls++
+	f.mu.Unlock()
+	if f.subscriptionErr != nil {
+		return nil, f.subscriptionErr
+	}
+	var out []om.Subscription
+	for _, s := range f.subscriptions[string(key)] {
+		out = append(out, om.Subscription{
+			Id: s.Id, ActiveFrom: s.ActiveFrom, ActiveTo: s.ActiveTo, DeletedAt: s.DeletedAt,
+			Currency: s.Currency, BillingAnchor: s.BillingAnchor, BillingCadence: s.BillingCadence,
+		})
+	}
+	return out, nil
+}
+
+func (f *fakeOpenMeter) GetSubscription(_ context.Context, id string) (om.SubscriptionExpanded, error) {
+	for _, subs := range f.subscriptions {
+		for _, s := range subs {
+			if s.Id == id {
+				return s, nil
+			}
+		}
+	}
+	return om.SubscriptionExpanded{}, fmt.Errorf("subscription %s not found", id)
 }
 
 func (f *fakeOpenMeter) GetCustomer(_ context.Context, key openmeter.CustomerKey) (om.Customer, error) {

@@ -1,0 +1,13 @@
+# Reaches openmeter-api from inside the cluster for ingestion and the
+# invoice comparison (see lib.sh).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: openmeter-query-sp
+  namespace: openmeter-system
+spec:
+  restartPolicy: Never
+  containers:
+    - name: query
+      image: curlimages/curl:8.10.1
+      command: ["sleep", "3600"]

@@ -389,6 +389,21 @@ func (c *client) ListSubscriptions(ctx context.Context, customerKey CustomerKey)
 	}
 }
 
+// GetSubscription returns the subscription with its phases and items.
+func (c *client) GetSubscription(ctx context.Context, id string) (om.SubscriptionExpanded, error) {
+	rsp, err := c.api.GetSubscriptionWithResponse(ctx, id, nil)
+	if err != nil {
+		return om.SubscriptionExpanded{}, classify(nil, nil, err)
+	}
+	if err := classify(rsp.HTTPResponse, rsp.Body, nil); err != nil {
+		return om.SubscriptionExpanded{}, err
+	}
+	if rsp.JSON200 == nil {
+		return om.SubscriptionExpanded{}, &TransientError{Err: errors.New("unexpected empty 200 response from GetSubscription")}
+	}
+	return *rsp.JSON200, nil
+}
+
 // classifySubscription classifies a subscription endpoint response. Two
 // statuses mean something specific here and are not what classify assumes:
 //
