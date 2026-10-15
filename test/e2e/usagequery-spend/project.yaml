@@ -1,0 +1,12 @@
+# The project the suite's usage is reported by, owned by organization
+# e2e-sp (whose namespace, organization-e2e-sp, is the suite's).
+apiVersion: resourcemanager.miloapis.com/v1alpha1
+kind: Project
+metadata:
+  name: e2e-sp-web
+  labels:
+    resourcemanager.miloapis.com/organization-name: e2e-sp
+spec:
+  ownerRef:
+    kind: Organization
+    name: e2e-sp

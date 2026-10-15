@@ -208,6 +208,10 @@ type Client interface {
 	// ListSubscriptions returns every subscription of the customer, live or
 	// ended. Returns ErrCustomerNotFound when the customer does not exist.
 	ListSubscriptions(ctx context.Context, customerKey CustomerKey) ([]om.Subscription, error)
+	// GetSubscription returns a subscription with its phases and every
+	// version of their items (itemTimelines), each with its price and
+	// feature.
+	GetSubscription(ctx context.Context, id string) (om.SubscriptionExpanded, error)
 	// CancelSubscriptions ends every live subscription of the customer
 	// immediately. A missing customer is treated as success.
 	CancelSubscriptions(ctx context.Context, customerKey CustomerKey) error

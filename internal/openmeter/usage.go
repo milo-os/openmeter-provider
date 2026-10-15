@@ -33,6 +33,10 @@ type MeterQuery struct {
 	// FilterGroupBy keeps only rows whose group-by key has one of the listed
 	// values, keyed by OpenMeter group-by key.
 	FilterGroupBy map[string][]string
+	// Filters are further group-by filters, keyed by OpenMeter group-by key,
+	// such as a feature's advancedMeterGroupByFilters. A key also in
+	// FilterGroupBy must match both.
+	Filters map[string]om.FilterString
 }
 
 // MeterQueryRow is one row of a meter query: the meter's aggregate for one
@@ -46,6 +50,26 @@ type MeterQueryRow struct {
 	// events did not set it.
 	GroupBy map[string]string
 	Value   float64
+}
+
+// groupByFilters merges FilterGroupBy and Filters into OpenMeter's
+// advancedMeterGroupByFilters.
+func (q MeterQuery) groupByFilters() map[string]om.FilterString {
+	filters := make(map[string]om.FilterString, len(q.FilterGroupBy)+len(q.Filters))
+	for key, values := range q.FilterGroupBy {
+		in := append([]string(nil), values...)
+		filters[key] = om.FilterString{In: &in}
+	}
+	for key, filter := range q.Filters {
+		existing, ok := filters[key]
+		if !ok {
+			filters[key] = filter
+			continue
+		}
+		and := []om.FilterString{existing, filter}
+		filters[key] = om.FilterString{And: &and}
+	}
+	return filters
 }
 
 // QueryMeter runs q. Returns ErrMeterNotFound when OpenMeter has no meter
@@ -74,12 +98,7 @@ func (c *client) QueryMeter(ctx context.Context, q MeterQuery) ([]MeterQueryRow,
 		groupBy := append([]string(nil), q.GroupBy...)
 		body.GroupBy = &groupBy
 	}
-	if len(q.FilterGroupBy) > 0 {
-		filters := make(map[string]om.FilterString, len(q.FilterGroupBy))
-		for key, values := range q.FilterGroupBy {
-			in := append([]string(nil), values...)
-			filters[key] = om.FilterString{In: &in}
-		}
+	if filters := q.groupByFilters(); len(filters) > 0 {
 		body.AdvancedMeterGroupByFilters = &filters
 	}
 

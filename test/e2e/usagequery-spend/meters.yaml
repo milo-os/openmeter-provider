@@ -1,0 +1,37 @@
+# Two Sum meters. Their pricing unit is the meter's own unit: prices are
+# applied to raw meter units (see the pricing-unit note in TODO.md).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-sp-requests
+spec:
+  meterName: e2e-sp-requests
+  phase: Published
+  displayName: "Requests"
+  measurement:
+    aggregation: Sum
+    unit: "{request}"
+    dimensions:
+      - region
+  billing:
+    consumedUnit: "{request}"
+    pricingUnit: "{request}"
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: e2e-sp-egress
+spec:
+  meterName: e2e-sp-egress
+  phase: Published
+  displayName: "Egress"
+  measurement:
+    aggregation: Sum
+    unit: GBy
+  billing:
+    consumedUnit: GBy
+    pricingUnit: GBy
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource

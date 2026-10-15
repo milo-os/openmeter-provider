@@ -52,17 +52,24 @@ func newCustomerResolver(openMeter openmeter.Client) *customerResolver {
 	}
 }
 
-// customerIDs returns the customer ids of accounts, in order. Accounts
+// accountCustomer is a billing account's OpenMeter customer.
+type accountCustomer struct {
+	// key is the customer key, the billing account's UID.
+	key openmeter.CustomerKey
+	id  openmeter.CustomerID
+}
+
+// customers returns the OpenMeter customers of accounts, in order. Accounts
 // without a customer (never provisioned, so no usage) are left out.
-func (r *customerResolver) customerIDs(ctx context.Context, accounts []billingv1alpha1.BillingAccount) ([]openmeter.CustomerID, error) {
-	ids := make([]openmeter.CustomerID, len(accounts))
+func (r *customerResolver) customers(ctx context.Context, accounts []billingv1alpha1.BillingAccount) ([]accountCustomer, error) {
+	found := make([]accountCustomer, len(accounts))
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(customerLookups)
 	for i := range accounts {
 		g.Go(func() error {
 			id, err := r.customerID(gctx, accounts[i].UID)
-			ids[i] = id
+			found[i] = accountCustomer{key: openmeter.CustomerKey(accounts[i].UID), id: id}
 			return err
 		})
 	}
@@ -70,13 +77,22 @@ func (r *customerResolver) customerIDs(ctx context.Context, accounts []billingv1
 		return nil, err
 	}
 
-	out := ids[:0]
-	for _, id := range ids {
-		if id != "" {
-			out = append(out, id)
+	out := found[:0]
+	for _, c := range found {
+		if c.id != "" {
+			out = append(out, c)
 		}
 	}
 	return out, nil
+}
+
+// customerIDs returns the ids of customers.
+func customerIDs(customers []accountCustomer) []openmeter.CustomerID {
+	ids := make([]openmeter.CustomerID, len(customers))
+	for i, c := range customers {
+		ids[i] = c.id
+	}
+	return ids
 }
 
 func (r *customerResolver) customerID(ctx context.Context, uid types.UID) (openmeter.CustomerID, error) {

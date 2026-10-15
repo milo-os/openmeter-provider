@@ -1,0 +1,17 @@
+# Authored as Draft with refs and published with ../offer/publish.sh
+# (billing's publish flow; its operator does not run in e2e).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-sp-offer
+  annotations:
+    kubernetes.io/display-name: "E2E Spend Offer"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+  servicePricingRefs:
+    - name: e2e-sp-requests
+      namespace: organization-e2e-sp
+    - name: e2e-sp-egress
+      namespace: organization-e2e-sp
