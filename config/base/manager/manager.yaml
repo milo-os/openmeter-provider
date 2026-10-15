@@ -45,6 +45,8 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --server-config=/config/config.yaml
+          # Links each Invoice to its Stripe page (status.documentUri).
+          - --stripe-api-key-file=/etc/stripe/apiKey
         image: ghcr.io/milo-os/openmeter-provider:dev
         name: manager
         securityContext:
@@ -74,9 +76,18 @@ spec:
         volumeMounts:
         - name: config
           mountPath: /config
+        - name: stripe-credentials
+          mountPath: /etc/stripe
+          readOnly: true
       serviceAccountName: openmeter-provider-manager
       terminationGracePeriodSeconds: 10
       volumes:
       - name: config
         configMap:
           name: openmeter-provider-config
+      # The API key OpenMeter's Stripe app was installed with (key apiKey),
+      # the same Secret its bootstrap reads. Required: the pod does not
+      # start without it.
+      - name: stripe-credentials
+        secret:
+          secretName: openmeter-stripe-credentials

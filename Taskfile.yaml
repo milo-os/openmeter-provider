@@ -360,10 +360,18 @@ tasks:
 
         if [ -z "${STRIPE_TEST_API_KEY:-}" ]; then
           echo "⚠️  STRIPE_TEST_API_KEY not set (see .env.example) — skipping Stripe app install."
-          echo "   BillingAccountReconciler's Stripe app-data sync will 412 with"
-          echo "   \"no stripe app found in billing profile\" until this is set."
+          echo "   The controller manager will not start: it requires the Stripe key"
+          echo "   (Secret openmeter-stripe-credentials) to link Invoices to Stripe."
           exit 0
         fi
+
+        # The same key for the controller manager, which reads the links to
+        # the Stripe invoices from it (Invoice.status.documentUri). Same
+        # Secret name and key as the bootstrap's in infra.
+        task test-infra:kubectl -- create secret generic openmeter-stripe-credentials -n openmeter-system \
+          --from-literal=apiKey="${STRIPE_TEST_API_KEY}" --dry-run=client -o yaml |
+          task test-infra:kubectl -- apply -f - >/dev/null
+        echo "✅ Secret openmeter-stripe-credentials set from STRIPE_TEST_API_KEY."
 
         PF_PORT=18898
         task test-infra:kubectl -- port-forward -n openmeter-system svc/openmeter-api "${PF_PORT}:80" >/tmp/openmeter-install-stripe-pf.log 2>&1 &

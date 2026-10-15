@@ -88,6 +88,20 @@ stripe() {
     -H "Stripe-Version: ${STRIPE_API_VERSION}" "$@" "https://api.stripe.com/v1${path}"
 }
 
+# stripe_invoice_page URL — which invoice a Stripe hosted invoice URL opens:
+# "<account>,<invoice secret>". The URL's token
+# (https://invoice.stripe.com/i/<account>/<mode>_<token>) is base64 of
+# "<account>,<invoice secret>,<timestamp>" followed by a signature, and
+# Stripe signs a new one on every read, so two URLs of one invoice differ
+# only after the secret.
+stripe_invoice_page() {
+  local t=${1##*/}
+  t=${t%%\?*}
+  t=${t#*_}
+  t=${t:0:$((${#t} / 4 * 4))}
+  printf '%s' "$t" | base64 -d 2>/dev/null | LC_ALL=C cut -d, -f1,2 | LC_ALL=C tr -cd '[:print:]'
+}
+
 # customer_key — the BillingAccount UID (OpenMeter customer key).
 customer_key() {
   kubectl get billingaccount "$ACCOUNT" -n "$NS" -o jsonpath='{.metadata.uid}'
