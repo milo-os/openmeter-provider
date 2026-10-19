@@ -152,6 +152,12 @@ func canonicalFilterJSON(f om.FilterString) ([]byte, error) {
 // "active" for the purposes of meter deletion, which is the only reason the
 // callers here enumerate features.
 func (c *client) ListFeatures(ctx context.Context, meterSlug *string) ([]om.Feature, error) {
+	return c.listFeatures(ctx, meterSlug, false)
+}
+
+// listFeatures walks every page of the feature listing, archived features
+// included when includeArchived is set.
+func (c *client) listFeatures(ctx context.Context, meterSlug *string, includeArchived bool) ([]om.Feature, error) {
 	var all []om.Feature
 	pageSize := om.PaginationPageSize(featureListPageSize)
 	for page := 1; ; page++ {
@@ -159,6 +165,9 @@ func (c *client) ListFeatures(ctx context.Context, meterSlug *string) ([]om.Feat
 		params := &om.ListFeaturesParams{Page: &pp, PageSize: &pageSize}
 		if meterSlug != nil {
 			params.MeterSlug = &[]string{*meterSlug}
+		}
+		if includeArchived {
+			params.IncludeArchived = &includeArchived
 		}
 		rsp, err := c.api.ListFeaturesWithResponse(ctx, params)
 		if err != nil {
@@ -212,44 +221,44 @@ func (c *client) DeleteFeature(ctx context.Context, idOrKey string) error {
 	return classify(rsp.HTTPResponse, rsp.Body, nil)
 }
 
-// referencedFeatureKeys returns the set of feature keys referenced by any
+// referencedFeatureIDs returns the ids of the features referenced by any
 // non-deleted plan version in OpenMeter. It is the safety predicate for
-// feature garbage collection: a feature whose key appears here must NOT be
-// archived, because a plan's usage rate card still points at it. Archived
-// plan versions count too — subscriptions created before a new version was
-// published keep billing against them.
-func (c *client) referencedFeatureKeys(ctx context.Context) (map[string]struct{}, error) {
-	plans, err := c.listPlans(ctx, &om.ListPlansParams{})
+// feature garbage collection: a feature in this set must NOT be archived,
+// because a plan's rate card still points at it. Archived plan versions count
+// too — subscriptions created before a new version was published keep
+// billing against them.
+func (c *client) referencedFeatureIDs(ctx context.Context) (map[string]struct{}, error) {
+	plans, err := c.listPlans(ctx, "")
 	if err != nil {
 		return nil, err
 	}
 	refs := make(map[string]struct{})
 	for _, plan := range plans {
-		for _, key := range PlanFeatureKeys(plan) {
-			refs[key] = struct{}{}
+		for _, id := range PlanFeatureIDs(plan) {
+			refs[id] = struct{}{}
 		}
 	}
 	return refs, nil
 }
 
-// ArchiveFeaturesIfUnreferenced archives each member of candidateKeys that no
+// ArchiveFeaturesIfUnreferenced archives each member of candidateIDs that no
 // non-deleted plan references. Features still referenced by a plan are left
 // active. It must run AFTER the owning plan versions are deleted: until then
 // they reference the candidates themselves and nothing is archived.
-func (c *client) ArchiveFeaturesIfUnreferenced(ctx context.Context, candidateKeys []string) error {
-	if len(candidateKeys) == 0 {
+func (c *client) ArchiveFeaturesIfUnreferenced(ctx context.Context, candidateIDs []string) error {
+	if len(candidateIDs) == 0 {
 		return nil
 	}
-	refs, err := c.referencedFeatureKeys(ctx)
+	refs, err := c.referencedFeatureIDs(ctx)
 	if err != nil {
 		return err
 	}
-	for _, key := range candidateKeys {
-		if _, used := refs[key]; used {
+	for _, id := range candidateIDs {
+		if _, used := refs[id]; used {
 			continue
 		}
-		if err := c.DeleteFeature(ctx, key); err != nil {
-			return fmt.Errorf("archive feature %q: %w", key, err)
+		if err := c.DeleteFeature(ctx, id); err != nil {
+			return fmt.Errorf("archive feature %q: %w", id, err)
 		}
 	}
 	return nil
@@ -268,9 +277,9 @@ func (c *client) ArchiveUnreferencedMeterFeatures(ctx context.Context, meterSlug
 	if err != nil {
 		return err
 	}
-	keys := make([]string, 0, len(features))
+	ids := make([]string, 0, len(features))
 	for _, f := range features {
-		keys = append(keys, f.Key)
+		ids = append(ids, f.Id)
 	}
-	return c.ArchiveFeaturesIfUnreferenced(ctx, keys)
+	return c.ArchiveFeaturesIfUnreferenced(ctx, ids)
 }

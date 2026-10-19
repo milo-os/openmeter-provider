@@ -10,6 +10,7 @@ import (
 	"time"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
+	omv3 "github.com/openmeterio/openmeter/api/v3"
 )
 
 // featureFixture returns a Feature bound to the given meter, keyed by key.
@@ -34,32 +35,30 @@ func seedFeature(f *fakeServer, feat om.Feature) {
 	f.featureByID[feat.Id] = feat.Key
 }
 
-// usageRateCard builds an om.RateCard union that references featureKey, using
-// the same FromRateCardUsageBased conversion offered_controller.go uses to
-// assemble plan rate cards.
-func usageRateCard(key, featureKey string) om.RateCard {
-	var card om.RateCard
-	if err := card.FromRateCardUsageBased(om.RateCardUsageBased{
-		Type:       om.RateCardUsageBasedTypeUsageBased,
-		Key:        key,
-		Name:       key,
-		FeatureKey: &featureKey,
-	}); err != nil {
+// usageRateCard builds a unit-priced rate card that references the feature
+// featureFixture(featureKey, ...) creates, by its id.
+func usageRateCard(key, featureKey string) omv3.BillingRateCard {
+	card := omv3.BillingRateCard{
+		Key:     key,
+		Name:    key,
+		Feature: &omv3.FeatureReference{Id: "feat-" + featureKey},
+	}
+	if err := card.Price.FromBillingPriceUnit(omv3.BillingPriceUnit{Type: omv3.BillingPriceUnitTypeUnit, Amount: "1"}); err != nil {
 		panic(err)
 	}
 	return card
 }
 
 // planFixture returns a Plan with an id/key and the given usage rate cards.
-func planFixture(id, key string, cards ...om.RateCard) om.Plan {
-	return om.Plan{
+func planFixture(id, key string, cards ...omv3.BillingRateCard) omv3.BillingPlan {
+	return omv3.BillingPlan{
 		Id:             id,
 		Key:            key,
 		Name:           key,
 		BillingCadence: "P1M",
 		Currency:       "USD",
-		Status:         om.PlanStatusActive,
-		Phases: []om.PlanPhase{{
+		Status:         omv3.BillingPlanStatusActive,
+		Phases: []omv3.BillingPlanPhase{{
 			Key:       "default",
 			Name:      "default",
 			RateCards: cards,
@@ -174,8 +173,8 @@ func TestArchiveFeaturesIfUnreferenced(t *testing.T) {
 		f.plans["plan-1"] = planFixture("plan-1", "plan-1",
 			usageRateCard("used_key_ratecard", "used_key"))
 
-		keys := []string{"used_key", "orphaned_key"}
-		if err := c.ArchiveFeaturesIfUnreferenced(context.Background(), keys); err != nil {
+		ids := []string{referenced.Id, orphaned.Id}
+		if err := c.ArchiveFeaturesIfUnreferenced(context.Background(), ids); err != nil {
 			t.Fatalf("ArchiveFeaturesIfUnreferenced: %v", err)
 		}
 		used, ok := f.lookupFeature("used_key")
@@ -208,7 +207,7 @@ func TestArchiveFeaturesIfUnreferenced(t *testing.T) {
 }
 
 func TestArchiveFeaturesIfUnreferenced_WalksAllPlanPages(t *testing.T) {
-	// referencedFeatureKeys must walk every plan page: a feature whose
+	// referencedFeatureIDs must walk every plan page: a feature whose
 	// references only appear after the first page (the fake serves 100
 	// plans/page, matching the real API default) must still be recognized
 	// as referenced. Without the pagination loop this test would archive a
@@ -218,13 +217,13 @@ func TestArchiveFeaturesIfUnreferenced_WalksAllPlanPages(t *testing.T) {
 	// 250 seeded plans (pages 1-3). Feature references on page 3.
 	for i := 0; i < 250; i++ {
 		fkey := "pg" + strconv.Itoa(i)
-		f.plans[fkey] = om.Plan{Id: fkey, Key: fkey, Name: fkey}
+		f.plans[fkey] = omv3.BillingPlan{Id: fkey, Key: fkey, Name: fkey}
 	}
 	lastPlan := f.plans["pg249"]
-	lastPlan.Phases = []om.PlanPhase{{
+	lastPlan.Phases = []omv3.BillingPlanPhase{{
 		Key:       "default",
 		Name:      "default",
-		RateCards: []om.RateCard{usageRateCard("rc", "referenced_on_pg3")},
+		RateCards: []omv3.BillingRateCard{usageRateCard("rc", "referenced_on_pg3")},
 	}}
 	f.plans["pg249"] = lastPlan
 
@@ -235,7 +234,7 @@ func TestArchiveFeaturesIfUnreferenced_WalksAllPlanPages(t *testing.T) {
 		seedFeature(f, feat)
 	}
 
-	if err := c.ArchiveFeaturesIfUnreferenced(context.Background(), []string{"referenced_on_pg3", "orphan_feature"}); err != nil {
+	if err := c.ArchiveFeaturesIfUnreferenced(context.Background(), []string{ref.Id, orphan.Id}); err != nil {
 		t.Fatalf("ArchiveFeaturesIfUnreferenced: %v", err)
 	}
 
@@ -414,14 +413,14 @@ func TestArchiveFeaturesIfUnreferenced_ArchivedPlanVersionsCountAsReferences(t *
 	seedFeature(f, featureFixture("on_archived", "m1"))
 	seedFeature(f, featureFixture("on_deleted", "m1"))
 	archived := planFixture("p1", "k", usageRateCard("rc", "on_archived"))
-	archived.Status = om.PlanStatusArchived
+	archived.Status = omv3.BillingPlanStatusArchived
 	f.plans["p1"] = archived
 	deleted := planFixture("p2", "k2", usageRateCard("rc", "on_deleted"))
 	now := time.Now().UTC()
 	deleted.DeletedAt = &now
 	f.plans["p2"] = deleted
 
-	if err := c.ArchiveFeaturesIfUnreferenced(context.Background(), []string{"on_archived", "on_deleted"}); err != nil {
+	if err := c.ArchiveFeaturesIfUnreferenced(context.Background(), []string{"feat-on_archived", "feat-on_deleted"}); err != nil {
 		t.Fatalf("ArchiveFeaturesIfUnreferenced: %v", err)
 	}
 	if got, _ := f.lookupFeature("on_archived"); got.ArchivedAt != nil {

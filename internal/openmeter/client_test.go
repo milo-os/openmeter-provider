@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	om "github.com/openmeterio/openmeter/api/client/go"
+	omv3 "github.com/openmeterio/openmeter/api/v3"
 )
 
 // fakeServer is a minimal in-memory stand-in for the OpenMeter API. Each
@@ -41,9 +41,9 @@ type fakeServer struct {
 	// key alone avoids double-counting features in list responses.
 	features    map[string]om.Feature
 	featureByID map[string]string
-	// plans is keyed by plan id. ListPlans filters to non-deleted plans,
-	// mirroring the real API's default.
-	plans map[string]om.Plan
+	// plans is keyed by plan id. The v3 plan list leaves deleted plans out,
+	// like the real one.
+	plans map[string]omv3.BillingPlan
 	// planSeq generates plan ids; planWrites counts every plan mutation
 	// (create, update, publish, archive, delete).
 	planSeq    int
@@ -54,8 +54,10 @@ type fakeServer struct {
 	subscriptions map[string]om.Subscription
 	// subscriptionSeq generates subscription ids and orders creation.
 	subscriptionSeq int
-	// subscriptionWrites counts every subscription mutation.
+	// subscriptionWrites counts every subscription mutation; v3Changes
+	// counts the changes made through the v3 API.
 	subscriptionWrites int
+	v3Changes          int
 	// pendingLinesInvoiced counts invoice-pending-lines actions;
 	// invoicesDeleted records deleted invoice ids in order.
 	pendingLinesInvoiced int
@@ -144,7 +146,7 @@ func newTestClient(t *testing.T) (Client, *fakeServer) {
 		billingProfileOverrides: map[string]om.BillingProfileCustomerOverrideCreate{},
 		features:                map[string]om.Feature{},
 		featureByID:             map[string]string{},
-		plans:                   map[string]om.Plan{},
+		plans:                   map[string]omv3.BillingPlan{},
 		subscriptions:           map[string]om.Subscription{},
 		pendingLines:            map[string]fakePendingLines{},
 	}
@@ -282,7 +284,7 @@ func (f *fakeServer) serveFeatures(w http.ResponseWriter, r *http.Request) bool 
 		var out []om.Feature
 		meterSlug := r.URL.Query().Get("meterSlug")
 		for _, feat := range f.features {
-			if feat.ArchivedAt != nil {
+			if feat.ArchivedAt != nil && r.URL.Query().Get("includeArchived") != "true" {
 				// Default list excludes archived features, mirroring
 				// ListFeatures' doc contract (active-only).
 				continue
@@ -329,22 +331,25 @@ func (f *fakeServer) serveFeatures(w http.ResponseWriter, r *http.Request) bool 
 	return true
 }
 
-// servePlans mirrors OpenMeter's plan lifecycle closely enough to exercise
-// the client's versioning logic:
+// servePlans mirrors OpenMeter's v3 plan lifecycle closely enough to
+// exercise the client's versioning logic:
 //
-//	GET    /api/v1/plans                  list (key, includeDeleted, paging)
-//	POST   /api/v1/plans                  create a draft; next version per key;
-//	                                      400 while a draft exists for the key
-//	PUT    /api/v1/plans/{id}             replace; draft/scheduled only
-//	POST   /api/v1/plans/{id}/publish     draft -> active; archives the
-//	                                      previous active version of the key
-//	POST   /api/v1/plans/{id}/archive     active -> archived
-//	DELETE /api/v1/plans/{id}             draft/archived/scheduled only
+//	GET    /api/v3/openmeter/plans               list (filter[key], page[size],
+//	                                             page[number]); no deleted plans
+//	GET    /api/v3/openmeter/plans/{id}          get, deleted or not
+//	POST   /api/v3/openmeter/plans               create a draft; next version per
+//	                                             key; 400 while a draft exists
+//	PUT    /api/v3/openmeter/plans/{id}          replace; draft/scheduled only
+//	POST   /api/v3/openmeter/plans/{id}/publish  draft -> active; archives the
+//	                                             previous active version of the key
+//	POST   /api/v3/openmeter/plans/{id}/archive  active -> archived
+//	DELETE /api/v3/openmeter/plans/{id}          draft/archived/scheduled only
 func (f *fakeServer) servePlans(w http.ResponseWriter, r *http.Request) bool {
-	if !strings.HasPrefix(r.URL.Path, "/api/v1/plans") {
+	const prefix = "/api/v3/openmeter/plans"
+	if !strings.HasPrefix(r.URL.Path, prefix) {
 		return false
 	}
-	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/plans"), "/")
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/")
 	parts := strings.Split(rest, "/")
 	writeJSON := func(status int, v any) {
 		w.Header().Set("Content-Type", "application/json")
@@ -358,31 +363,41 @@ func (f *fakeServer) servePlans(w http.ResponseWriter, r *http.Request) bool {
 	switch {
 	case rest == "" && r.Method == http.MethodGet:
 		q := r.URL.Query()
-		keys := q["key"]
-		includeDeleted := q.Get("includeDeleted") == "true"
-		var all []om.Plan
+		key := q.Get("filter[key]")
+		var all []omv3.BillingPlan
 		for _, plan := range f.plans {
-			if plan.DeletedAt != nil && !includeDeleted {
+			if plan.DeletedAt != nil {
 				continue
 			}
-			if len(keys) > 0 && !slices.Contains(keys, plan.Key) {
+			if key != "" && plan.Key != key {
 				continue
 			}
 			all = append(all, plan)
 		}
 		// Stable order so pagination is consistent across page requests.
 		sort.Slice(all, func(i, j int) bool { return all[i].Id < all[j].Id })
-		page, pageSize := pageParams(r)
+		page, pageSize := 1, 20
+		if p, err := strconv.Atoi(q.Get("page[number]")); err == nil && p > 0 {
+			page = p
+		}
+		if ps, err := strconv.Atoi(q.Get("page[size]")); err == nil && ps > 0 {
+			pageSize = ps
+		}
 		start, end := pageBounds(page, pageSize, len(all))
-		writeJSON(http.StatusOK, om.PlanPaginatedResponse{
-			Items:      all[start:end],
-			Page:       page,
-			PageSize:   pageSize,
-			TotalCount: len(all),
-		})
+		rsp := omv3.PlanPagePaginatedResponse{Data: all[start:end]}
+		rsp.Meta.Page = omv3.PageMeta{Number: float32(page), Size: float32(pageSize), Total: float32(len(all))}
+		writeJSON(http.StatusOK, rsp)
+
+	case len(parts) == 1 && r.Method == http.MethodGet:
+		plan, ok := f.plans[parts[0]]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return true
+		}
+		writeJSON(http.StatusOK, plan)
 
 	case rest == "" && r.Method == http.MethodPost:
-		var body om.PlanCreate
+		var body omv3.CreatePlanRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			badRequest(err.Error())
 			return true
@@ -392,7 +407,7 @@ func (f *fakeServer) servePlans(w http.ResponseWriter, r *http.Request) bool {
 			if p.Key != body.Key {
 				continue
 			}
-			if p.DeletedAt == nil && p.Status == om.PlanStatusDraft {
+			if p.DeletedAt == nil && p.Status == omv3.BillingPlanStatusDraft {
 				badRequest("only a single draft version is allowed for Plan")
 				return true
 			}
@@ -403,16 +418,17 @@ func (f *fakeServer) servePlans(w http.ResponseWriter, r *http.Request) bool {
 		f.planSeq++
 		f.planWrites++
 		now := time.Now().UTC()
-		plan := om.Plan{
+		// Labels are dropped: OpenMeter's v3 API stores plan labels but
+		// never returns them.
+		plan := omv3.BillingPlan{
 			Id:             "plan-" + strconv.Itoa(f.planSeq),
 			Key:            body.Key,
 			Name:           body.Name,
 			Description:    body.Description,
 			Currency:       body.Currency,
 			BillingCadence: body.BillingCadence,
-			Metadata:       body.Metadata,
 			Phases:         body.Phases,
-			Status:         om.PlanStatusDraft,
+			Status:         omv3.BillingPlanStatusDraft,
 			Version:        version,
 			CreatedAt:      now,
 			UpdatedAt:      now,
@@ -426,11 +442,11 @@ func (f *fakeServer) servePlans(w http.ResponseWriter, r *http.Request) bool {
 			w.WriteHeader(http.StatusNotFound)
 			return true
 		}
-		if plan.Status != om.PlanStatusDraft && plan.Status != om.PlanStatusScheduled {
+		if plan.Status != omv3.BillingPlanStatusDraft && plan.Status != omv3.BillingPlanStatusScheduled {
 			badRequest("only Plans in [draft scheduled] can be updated")
 			return true
 		}
-		var body om.PlanReplaceUpdate
+		var body omv3.UpsertPlanRequest
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			badRequest(err.Error())
 			return true
@@ -438,7 +454,6 @@ func (f *fakeServer) servePlans(w http.ResponseWriter, r *http.Request) bool {
 		f.planWrites++
 		plan.Name = body.Name
 		plan.Description = body.Description
-		plan.Metadata = body.Metadata
 		plan.Phases = body.Phases
 		plan.UpdatedAt = time.Now().UTC()
 		f.plans[plan.Id] = plan
@@ -450,20 +465,20 @@ func (f *fakeServer) servePlans(w http.ResponseWriter, r *http.Request) bool {
 			w.WriteHeader(http.StatusNotFound)
 			return true
 		}
-		if plan.Status != om.PlanStatusDraft && plan.Status != om.PlanStatusScheduled {
+		if plan.Status != omv3.BillingPlanStatusDraft && plan.Status != omv3.BillingPlanStatusScheduled {
 			badRequest("only Plans in [draft scheduled] can be published")
 			return true
 		}
 		now := time.Now().UTC()
 		for id, p := range f.plans {
-			if p.Key == plan.Key && p.DeletedAt == nil && p.Status == om.PlanStatusActive {
-				p.Status = om.PlanStatusArchived
+			if p.Key == plan.Key && p.DeletedAt == nil && p.Status == omv3.BillingPlanStatusActive {
+				p.Status = omv3.BillingPlanStatusArchived
 				p.EffectiveTo = &now
 				f.plans[id] = p
 			}
 		}
 		f.planWrites++
-		plan.Status = om.PlanStatusActive
+		plan.Status = omv3.BillingPlanStatusActive
 		plan.EffectiveFrom = &now
 		f.plans[plan.Id] = plan
 		writeJSON(http.StatusOK, plan)
@@ -474,13 +489,13 @@ func (f *fakeServer) servePlans(w http.ResponseWriter, r *http.Request) bool {
 			w.WriteHeader(http.StatusNotFound)
 			return true
 		}
-		if plan.Status != om.PlanStatusActive {
+		if plan.Status != omv3.BillingPlanStatusActive {
 			badRequest("only Plans in [active] can be archived")
 			return true
 		}
 		f.planWrites++
 		now := time.Now().UTC()
-		plan.Status = om.PlanStatusArchived
+		plan.Status = omv3.BillingPlanStatusArchived
 		plan.EffectiveTo = &now
 		f.plans[plan.Id] = plan
 		writeJSON(http.StatusOK, plan)
@@ -491,7 +506,7 @@ func (f *fakeServer) servePlans(w http.ResponseWriter, r *http.Request) bool {
 			w.WriteHeader(http.StatusNotFound)
 			return true
 		}
-		if plan.Status == om.PlanStatusActive {
+		if plan.Status == omv3.BillingPlanStatusActive {
 			badRequest("only Plans in [archived scheduled draft] can be deleted, but it has active state")
 			return true
 		}

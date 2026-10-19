@@ -11,7 +11,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/alpacahq/alpacadecimal"
 	om "github.com/openmeterio/openmeter/api/client/go"
+	omv3 "github.com/openmeterio/openmeter/api/v3"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 
@@ -34,12 +36,7 @@ const (
 	planPhaseName      = "Default Phase"
 	usageBillingPeriod = "P1M"
 
-	metadataOfferName      = "miloapis.com/offer-name"
-	metadataServiceRef     = "miloapis.com/service-ref"
-	metadataServicePricing = "miloapis.com/service-pricing"
-	metadataPricingUnit    = "miloapis.com/pricing-unit"
-	metadataTrigger        = "miloapis.com/trigger"
-	metadataMeterName      = "miloapis.com/meter-name"
+	metadataMeterName = "miloapis.com/meter-name"
 )
 
 // errMeterNotFound marks a usage pricing whose metric has no MeterDefinition
@@ -71,12 +68,37 @@ type meterInfo struct {
 
 // offerMapping is the full OpenMeter projection of a GA Offer.
 type offerMapping struct {
+	// Plan is the plan to publish. Its usage rate cards reference their
+	// features by id, which only exists once the features are created: see
+	// setFeatureIDs.
 	Plan openmeter.DesiredPlan
 	// Features are the usage features referenced by Plan, deduplicated, in
 	// rate card order.
 	Features []openmeter.DesiredFeature
 	// MeterSlugs are the distinct meters the features are bound to.
 	MeterSlugs []string
+	// CardFeatures maps each usage rate card key to its feature key.
+	CardFeatures map[string]string
+}
+
+// setFeatureIDs points each usage rate card at its feature, given the ids of
+// the created features by key.
+func (m offerMapping) setFeatureIDs(idsByKey map[string]string) error {
+	for _, phase := range m.Plan.Phases {
+		for i := range phase.RateCards {
+			card := &phase.RateCards[i]
+			featureKey, ok := m.CardFeatures[card.Key]
+			if !ok {
+				continue
+			}
+			id, ok := idsByKey[featureKey]
+			if !ok {
+				return fmt.Errorf("rate card %q: feature %q was not created", card.Key, featureKey)
+			}
+			card.Feature = &omv3.FeatureReference{Id: id}
+		}
+	}
+	return nil
 }
 
 // planKeyForOffer is the OpenMeter plan key of an Offer. The UID is stable for
@@ -100,6 +122,7 @@ func buildOfferMapping(offer *billingv1alpha1.Offer, meters map[string]meterInfo
 		rateCardKeys:  map[string]string{},
 		featureByKey:  map[string]int{},
 		pricedMetrics: map[string]string{},
+		cardFeatures:  map[string]string{},
 	}
 	for _, sp := range offer.Spec.ServicePricings {
 		var err error
@@ -124,19 +147,18 @@ func buildOfferMapping(offer *billingv1alpha1.Offer, meters map[string]meterInfo
 	}
 	return offerMapping{
 		Plan: openmeter.DesiredPlan{
-			Key:         planKeyForOffer(offer),
-			Name:        name,
-			Description: offer.Name,
-			Currency:    "USD",
-			Metadata:    map[string]string{metadataOfferName: offer.Name},
-			Phases: []om.PlanPhase{{
+			Key:      planKeyForOffer(offer),
+			Name:     name,
+			Currency: "USD",
+			Phases: []omv3.BillingPlanPhase{{
 				Key:       planPhaseKey,
 				Name:      planPhaseName,
 				RateCards: b.rateCards,
 			}},
 		},
-		Features:   b.features,
-		MeterSlugs: b.meterSlugs,
+		Features:     b.features,
+		MeterSlugs:   b.meterSlugs,
+		CardFeatures: b.cardFeatures,
 	}, nil
 }
 
@@ -145,7 +167,9 @@ type mappingBuilder struct {
 	offer  *billingv1alpha1.Offer
 	meters map[string]meterInfo
 
-	rateCards []om.RateCard
+	rateCards []omv3.BillingRateCard
+	// cardFeatures maps each usage rate card key to its feature key.
+	cardFeatures map[string]string
 	// rateCardKeys maps each used rate card key to the pricing that
 	// produced it. OpenMeter rejects duplicate keys within a phase.
 	rateCardKeys map[string]string
@@ -202,6 +226,10 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 	b.pricedMetrics[sp.Spec.Metric] = sp.Name
 	if len(sp.Spec.Rates) == 0 {
 		return invalidOffer("service pricing %q: usage pricing has no rates", sp.Name)
+	}
+	conversion, err := unitConversion(sp)
+	if err != nil {
+		return err
 	}
 
 	// Validate the rate set and collect the matched values.
@@ -272,27 +300,20 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 		if label != "" {
 			name = fmt.Sprintf("%s (%s)", name, label)
 		}
-		featureKey := feature.Key
-		var card om.RateCard
-		if err := card.FromRateCardUsageBased(om.RateCardUsageBased{
-			Type:           om.RateCardUsageBasedTypeUsageBased,
-			Key:            feature.Key,
-			Name:           name,
-			FeatureKey:     &featureKey,
-			BillingCadence: usageBillingPeriod,
-			Price:          &price,
-			Metadata: &om.Metadata{
-				metadataServiceRef:     sp.Spec.ServiceRef,
-				metadataServicePricing: sp.Name,
-				metadataPricingUnit:    sp.Spec.PricingUnit,
-			},
-		}); err != nil {
-			return fmt.Errorf("service pricing %q: encode rate card: %w", sp.Name, err)
-		}
+		cadence := usageBillingPeriod
+		description := fmt.Sprintf("ServicePricing %s (%s), priced per %s", sp.Name, sp.Spec.ServiceRef, sp.Spec.PricingUnit)
 		if err := b.claimRateCardKey(feature.Key, sp.Name); err != nil {
 			return err
 		}
-		b.rateCards = append(b.rateCards, card)
+		b.cardFeatures[feature.Key] = feature.Key
+		b.rateCards = append(b.rateCards, omv3.BillingRateCard{
+			Key:            feature.Key,
+			Name:           name,
+			Description:    &description,
+			BillingCadence: &cadence,
+			Price:          price,
+			UnitConfig:     conversion,
+		})
 	}
 	return nil
 }
@@ -304,41 +325,63 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 // continuous quantities Milo meters the two agree everywhere except the
 // single boundary point, and the Amberflo provider (startAfterUnit = upTo)
 // makes the same inclusive choice, so the bound is passed through unchanged.
-func usagePrice(pricing string, rate billingv1alpha1.PricingRate) (om.RateCardUsageBasedPrice, error) {
-	var price om.RateCardUsageBasedPrice
+func usagePrice(pricing string, rate billingv1alpha1.PricingRate) (omv3.BillingPrice, error) {
+	var price omv3.BillingPrice
 	switch {
 	case rate.Flat != "" && len(rate.Tiered) > 0:
 		return price, invalidOffer("service pricing %q: a rate sets both flat and tiered", pricing)
 	case rate.Flat != "":
-		err := price.FromUnitPriceWithCommitments(om.UnitPriceWithCommitments{
-			Type:   om.UnitPriceWithCommitmentsTypeUnit,
-			Amount: om.Numeric(rate.Flat),
+		err := price.FromBillingPriceUnit(omv3.BillingPriceUnit{
+			Type:   omv3.BillingPriceUnitTypeUnit,
+			Amount: rate.Flat,
 		})
 		return price, err
 	case len(rate.Tiered) > 0:
-		tiers := make([]om.PriceTier, 0, len(rate.Tiered))
+		tiers := make([]omv3.BillingPriceTier, 0, len(rate.Tiered))
 		for i, band := range rate.Tiered {
-			tier := om.PriceTier{UnitPrice: &om.UnitPrice{
-				Type:   om.UnitPriceTypeUnit,
-				Amount: om.Numeric(band.Rate),
+			tier := omv3.BillingPriceTier{UnitPrice: &omv3.BillingPriceUnit{
+				Type:   omv3.BillingPriceUnitTypeUnit,
+				Amount: band.Rate,
 			}}
 			if band.UpTo != "" {
-				upTo := om.Numeric(band.UpTo)
+				upTo := band.UpTo
 				tier.UpToAmount = &upTo
 			} else if i != len(rate.Tiered)-1 {
 				return price, invalidOffer("service pricing %q: only the last tier may omit upTo", pricing)
 			}
 			tiers = append(tiers, tier)
 		}
-		err := price.FromTieredPriceWithCommitments(om.TieredPriceWithCommitments{
-			Type:  om.TieredPriceWithCommitmentsTypeTiered,
-			Mode:  om.TieredPriceModeGraduated,
+		err := price.FromBillingPriceGraduated(omv3.BillingPriceGraduated{
+			Type:  omv3.BillingPriceGraduatedTypeGraduated,
 			Tiers: tiers,
 		})
 		return price, err
 	default:
 		return price, invalidOffer("service pricing %q: a rate must set flat or tiered", pricing)
 	}
+}
+
+// unitConversion maps a Usage pricing's unitConversion to the rate card's
+// unit_config: OpenMeter divides the metered usage by the factor before the
+// rates apply, so rates and tier bounds stay in pricingUnit and invoices
+// show the converted quantity. Nil when the meter already measures in
+// pricingUnit.
+func unitConversion(sp billingv1alpha1.ServicePricingSnapshot) (*omv3.BillingUnitConfig, error) {
+	c := sp.Spec.UnitConversion
+	if c == nil {
+		return nil, nil
+	}
+	factor, err := alpacadecimal.NewFromString(c.MeterUnitsPerPricingUnit)
+	if err != nil || !factor.IsPositive() {
+		return nil, invalidOffer("service pricing %q: unitConversion.meterUnitsPerPricingUnit %q is not a positive decimal",
+			sp.Name, c.MeterUnitsPerPricingUnit)
+	}
+	displayUnit := sp.Spec.PricingUnit
+	return &omv3.BillingUnitConfig{
+		Operation:        omv3.BillingUnitConfigOperationDivide,
+		ConversionFactor: c.MeterUnitsPerPricingUnit,
+		DisplayUnit:      &displayUnit,
+	}, nil
 }
 
 // addFlatFee maps a OneTime or Recurring pricing to a flat-fee rate card.
@@ -353,19 +396,20 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	if name == "" {
 		name = sp.Name
 	}
-	meta := om.Metadata{
-		metadataServiceRef:     sp.Spec.ServiceRef,
-		metadataServicePricing: sp.Name,
+	description := fmt.Sprintf("ServicePricing %s (%s)", sp.Name, sp.Spec.ServiceRef)
+	// v1 charged flat fees in advance by default; v3 defaults to arrears.
+	paymentTerm := omv3.BillingPricePaymentTermInAdvance
+	card := omv3.BillingRateCard{
+		Key:         key,
+		Name:        name,
+		Description: &description,
+		PaymentTerm: &paymentTerm,
 	}
-	card := om.RateCardFlatFee{
-		Type: om.RateCardFlatFeeTypeFlatFee,
-		Key:  key,
-		Name: name,
-		Price: &om.FlatPriceWithPaymentTerm{
-			Type:   om.FlatPriceWithPaymentTermTypeFlat,
-			Amount: om.Numeric(sp.Spec.Amount),
-		},
-		Metadata: &meta,
+	if err := card.Price.FromBillingPriceFlat(omv3.BillingPriceFlat{
+		Type:   omv3.BillingPriceFlatTypeFlat,
+		Amount: sp.Spec.Amount,
+	}); err != nil {
+		return fmt.Errorf("service pricing %q: encode price: %w", sp.Name, err)
 	}
 	switch sp.Spec.ChargeType {
 	case billingv1alpha1.ChargeTypeRecurring:
@@ -376,18 +420,15 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 		card.BillingCadence = &cadence
 	case billingv1alpha1.ChargeTypeOneTime:
 		if sp.Spec.Trigger != "" {
-			meta[metadataTrigger] = string(sp.Spec.Trigger)
+			description += fmt.Sprintf(", charged on %s", sp.Spec.Trigger)
+			card.Description = &description
 		}
 	}
 
-	var wrapper om.RateCard
-	if err := wrapper.FromRateCardFlatFee(card); err != nil {
-		return fmt.Errorf("service pricing %q: encode rate card: %w", sp.Name, err)
-	}
 	if err := b.claimRateCardKey(key, sp.Name); err != nil {
 		return err
 	}
-	b.rateCards = append(b.rateCards, wrapper)
+	b.rateCards = append(b.rateCards, card)
 	return nil
 }
 

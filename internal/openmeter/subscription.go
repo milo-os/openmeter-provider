@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
+	omv3 "github.com/openmeterio/openmeter/api/v3"
 )
 
 // ErrPlanNotPublished is returned by EnsureSubscription when the plan has no
@@ -188,19 +190,20 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 		return SubscriptionState{}, &PermanentError{Err: errors.New("DesiredSubscription.CustomerKey and PlanKey are required")}
 	}
 
-	versions, err := c.ListPlanVersions(ctx, desired.PlanKey, false)
+	versions, err := c.ListPlanVersions(ctx, desired.PlanKey)
 	if err != nil {
 		return SubscriptionState{}, fmt.Errorf("list plan versions: %w", err)
 	}
-	activeVersion := 0
-	for _, v := range versions {
-		if v.Status == om.PlanStatusActive {
-			activeVersion = v.Version
+	var active *omv3.BillingPlan
+	for i := range versions {
+		if versions[i].Status == omv3.BillingPlanStatusActive {
+			active = &versions[i]
 		}
 	}
-	if activeVersion == 0 {
+	if active == nil {
 		return SubscriptionState{}, fmt.Errorf("plan %q: %w", desired.PlanKey, ErrPlanNotPublished)
 	}
+	activeVersion := active.Version
 
 	for range maxSubscriptionSteps {
 		subs, err := c.ListSubscriptions(ctx, desired.CustomerKey)
@@ -211,7 +214,7 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 		if step.kind == stepNone {
 			return SubscriptionState{Current: *step.current, Pending: step.pending, PlanVersion: activeVersion}, nil
 		}
-		if err := c.applySubscriptionStep(ctx, desired, step, activeVersion); err != nil {
+		if err := c.applySubscriptionStep(ctx, desired, step, *active); err != nil {
 			return SubscriptionState{}, fmt.Errorf("%s subscription: %w", step.kind, err)
 		}
 	}
@@ -219,8 +222,11 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 		"subscription for customer %s did not converge after %d steps", desired.CustomerKey, maxSubscriptionSteps)}
 }
 
-func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubscription, step subscriptionStep, activeVersion int) error {
+func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubscription, step subscriptionStep, active omv3.BillingPlan) error {
 	metadata := om.Metadata(desired.Metadata)
+	if (step.kind == stepChange || step.kind == stepMigrate) && planHasUnitConfig(active) {
+		return c.changeSubscriptionV3(ctx, desired, step.target.Id, active.Version)
+	}
 	switch step.kind {
 	case stepCreate:
 		key := string(desired.CustomerKey)
@@ -282,7 +288,7 @@ func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubsc
 		if err := timing.FromSubscriptionTimingEnum(om.SubscriptionTimingEnumImmediate); err != nil {
 			return &PermanentError{Err: err}
 		}
-		target := activeVersion
+		target := active.Version
 		rsp, err := c.api.MigrateSubscriptionWithResponse(ctx, step.target.Id, om.MigrateSubscriptionJSONRequestBody{
 			TargetVersion: &target,
 			Timing:        &timing,
@@ -293,6 +299,24 @@ func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubsc
 		return classifySubscription(rsp.HTTPResponse, rsp.Body)
 	}
 	return &PermanentError{Err: fmt.Errorf("unknown subscription step %d", step.kind)}
+}
+
+// changeSubscriptionV3 moves the subscription onto planKey@version
+// immediately, the change and the migration in one. The v1 API refuses both
+// when the plan converts usage, so they go through v3, which cannot carry the
+// subscription's metadata: v3 labels allow no "/" in keys or values.
+func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscription, subscriptionID string, version int) error {
+	var timing omv3.BillingSubscriptionEditTiming
+	if err := timing.FromBillingSubscriptionEditTimingEnum(omv3.BillingSubscriptionEditTimingEnumImmediate); err != nil {
+		return &PermanentError{Err: err}
+	}
+	body := omv3.BillingSubscriptionChange{Timing: timing}
+	key := string(desired.CustomerKey)
+	body.Customer.Key = &key
+	body.Plan.Key = &desired.PlanKey
+	body.Plan.Version = &version
+	_, err := c.v3.do(ctx, http.MethodPost, "/subscriptions/"+url.PathEscape(subscriptionID)+"/change", nil, body, nil)
+	return reclassifySubscription(err)
 }
 
 // CancelSubscriptions ends every live subscription of the customer now:
@@ -389,21 +413,6 @@ func (c *client) ListSubscriptions(ctx context.Context, customerKey CustomerKey)
 	}
 }
 
-// GetSubscription returns the subscription with its phases and items.
-func (c *client) GetSubscription(ctx context.Context, id string) (om.SubscriptionExpanded, error) {
-	rsp, err := c.api.GetSubscriptionWithResponse(ctx, id, nil)
-	if err != nil {
-		return om.SubscriptionExpanded{}, classify(nil, nil, err)
-	}
-	if err := classify(rsp.HTTPResponse, rsp.Body, nil); err != nil {
-		return om.SubscriptionExpanded{}, err
-	}
-	if rsp.JSON200 == nil {
-		return om.SubscriptionExpanded{}, &TransientError{Err: errors.New("unexpected empty 200 response from GetSubscription")}
-	}
-	return *rsp.JSON200, nil
-}
-
 // classifySubscription classifies a subscription endpoint response. Two
 // statuses mean something specific here and are not what classify assumes:
 //
@@ -414,7 +423,12 @@ func (c *client) GetSubscription(ctx context.Context, id string) (om.Subscriptio
 //   - 409 "invalid billing setup": the customer cannot be invoiced yet, which
 //     is ErrCustomerBillingNotReady rather than a generic conflict.
 func classifySubscription(resp *http.Response, body []byte) error {
-	err := classify(resp, body, nil)
+	return reclassifySubscription(classify(resp, body, nil))
+}
+
+// reclassifySubscription applies classifySubscription's rules to an error
+// classify already returned.
+func reclassifySubscription(err error) error {
 	if err == nil {
 		return nil
 	}

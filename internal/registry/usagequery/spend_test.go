@@ -3,14 +3,15 @@
 package usagequery
 
 import (
-	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/alpacahq/alpacadecimal"
 	om "github.com/openmeterio/openmeter/api/client/go"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 
 	usagev1alpha1 "go.miloapis.com/billing/api/usage/v1alpha1"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
@@ -115,51 +116,59 @@ func matches(f om.FilterString, v string) bool {
 	return true
 }
 
-func priceOf(t *testing.T, raw string) *om.RateCardUsageBasedPrice {
-	t.Helper()
-	var p om.RateCardUsageBasedPrice
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		t.Fatal(err)
-	}
-	return &p
+func unitPrice(amount string) *productcatalog.Price {
+	return productcatalog.NewPriceFrom(productcatalog.UnitPrice{Amount: alpacadecimal.RequireFromString(amount)})
 }
 
-const (
-	unitPrice2 = `{"type":"unit","amount":"2"}`
-	unitPrice3 = `{"type":"unit","amount":"3"}`
+func tier(upTo, amount string) productcatalog.PriceTier {
+	t := productcatalog.PriceTier{UnitPrice: &productcatalog.PriceTierUnitPrice{Amount: alpacadecimal.RequireFromString(amount)}}
+	if upTo != "" {
+		u := alpacadecimal.RequireFromString(upTo)
+		t.UpToAmount = &u
+	}
+	return t
+}
+
+func graduatedPrice(tiers ...productcatalog.PriceTier) *productcatalog.Price {
+	return productcatalog.NewPriceFrom(productcatalog.TieredPrice{Mode: productcatalog.GraduatedTieredPrice, Tiers: tiers})
+}
+
+var (
+	unitPrice2 = unitPrice("2")
+	unitPrice3 = unitPrice("3")
 	// 0-100 at 1, 100-1000 at 0.5, above at 0.1.
-	graduated = `{"type":"tiered","mode":"graduated","tiers":[
-		{"upToAmount":"100","unitPrice":{"type":"unit","amount":"1"}},
-		{"upToAmount":"1000","unitPrice":{"type":"unit","amount":"0.5"}},
-		{"unitPrice":{"type":"unit","amount":"0.1"}}]}`
+	graduated = graduatedPrice(tier("100", "1"), tier("1000", "0.5"), tier("", "0.1"))
 )
 
-// spendItem is a subscription item pricing slug from `from` (until `to`, if
-// set).
-func spendItem(t *testing.T, key, slug, price string, from time.Time, to *time.Time, filters map[string]om.FilterString) om.SubscriptionItem {
-	feature := om.Feature{Key: key, MeterSlug: &slug}
-	if filters != nil {
-		feature.AdvancedMeterGroupByFilters = &filters
-	}
-	return om.SubscriptionItem{
-		Key: key, FeatureKey: &key, ActiveFrom: from, ActiveTo: to,
-		Price:    priceOf(t, price),
-		Included: &om.SubscriptionItemIncluded{Feature: feature},
-	}
+// spendCard is a plan's usage rate card pricing slug.
+func spendCard(key, slug string, price *productcatalog.Price, filters map[string]om.FilterString) openmeter.UsageRateCard {
+	return openmeter.UsageRateCard{Key: key, MeterSlug: slug, Filters: filters, Price: price}
+}
+
+// fakeSubscription is a subscription with the usage rate cards of the plan
+// version it bills.
+type fakeSubscription struct {
+	sub   om.Subscription
+	cards []openmeter.UsageRateCard
 }
 
 // monthly is a subscription billed monthly from anchor, active from `from`,
-// with every version of its items in one phase.
-func monthly(id, currency string, from, anchor time.Time, items ...om.SubscriptionItem) om.SubscriptionExpanded {
-	timelines := map[string][]om.SubscriptionItem{}
-	for _, it := range items {
-		timelines[it.Key] = append(timelines[it.Key], it)
+// on a plan version of its own with the given rate cards.
+func monthly(id, currency string, from, anchor time.Time, cards ...openmeter.UsageRateCard) fakeSubscription {
+	return fakeSubscription{
+		sub: om.Subscription{
+			Id: id, Currency: om.CurrencyCode(currency), ActiveFrom: from,
+			BillingAnchor: anchor, BillingCadence: "P1M",
+			Plan: &om.PlanReference{Id: "plan-" + id, Key: "plan", Version: 1},
+		},
+		cards: cards,
 	}
-	return om.SubscriptionExpanded{
-		Id: id, Currency: om.CurrencyCode(currency), ActiveFrom: from,
-		BillingAnchor: anchor, BillingCadence: "P1M",
-		Phases: []om.SubscriptionPhaseExpanded{{Key: "default", ActiveFrom: from, ItemTimelines: timelines}},
-	}
+}
+
+// endedAt ends s at `to`, as a plan change or migration does.
+func endedAt(s fakeSubscription, to time.Time) fakeSubscription {
+	s.sub.ActiveTo = &to
+	return s
 }
 
 func spendQuery(meters ...string) *usagev1alpha1.UsageQuery {
@@ -195,19 +204,18 @@ func wantSpend(t *testing.T, m usagev1alpha1.MeterUsage, amount, currency string
 
 func TestSpend(t *testing.T) {
 	const main, eu = "organization-acme/acme-main", "organization-acme/acme-eu"
-	ptr := func(t time.Time) *time.Time { return &t }
 
 	tests := []struct {
 		name   string
 		ctx    inParentCtx
-		subs   map[string][]om.SubscriptionExpanded
+		subs   map[string][]fakeSubscription
 		events []spendEvent
 		want   string // amount in USD
 	}{
 		{
 			name: "unit price",
-			subs: map[string][]om.SubscriptionExpanded{main: {monthly("s1", "USD", day(1, 0), day(1, 0),
-				spendItem(t, "cpu", cpuSlug, unitPrice2, day(1, 0), nil, nil))}},
+			subs: map[string][]fakeSubscription{main: {monthly("s1", "USD", day(1, 0), day(1, 0),
+				spendCard("cpu", cpuSlug, unitPrice2, nil))}},
 			events: []spendEvent{
 				{at: day(5, 3), customer: "01ACMEMAIN", value: 10},
 				{at: day(6, 3), customer: "01ACMEMAIN", value: 5},
@@ -217,8 +225,8 @@ func TestSpend(t *testing.T) {
 		},
 		{
 			name: "tiers continue from the usage earlier in the billing period",
-			subs: map[string][]om.SubscriptionExpanded{main: {monthly("s1", "USD", day(1, 0), day(1, 0),
-				spendItem(t, "cpu", cpuSlug, graduated, day(1, 0), nil, nil))}},
+			subs: map[string][]fakeSubscription{main: {monthly("s1", "USD", day(1, 0), day(1, 0),
+				spendCard("cpu", cpuSlug, graduated, nil))}},
 			events: []spendEvent{
 				{at: day(2, 0), customer: "01ACMEMAIN", value: 950}, // earlier this period
 				{at: day(5, 3), customer: "01ACMEMAIN", value: 150},
@@ -227,8 +235,8 @@ func TestSpend(t *testing.T) {
 		},
 		{
 			name: "a range across two billing periods restarts the tiers",
-			subs: map[string][]om.SubscriptionExpanded{main: {monthly("s1", "USD", day(1, 0), day(6, 0),
-				spendItem(t, "cpu", cpuSlug, graduated, day(1, 0), nil, nil))}},
+			subs: map[string][]fakeSubscription{main: {monthly("s1", "USD", day(1, 0), day(6, 0),
+				spendCard("cpu", cpuSlug, graduated, nil))}},
 			events: []spendEvent{
 				{at: day(2, 0), customer: "01ACMEMAIN", value: 950}, // earlier in the period ending Oct 6
 				{at: day(5, 12), customer: "01ACMEMAIN", value: 150},
@@ -238,8 +246,8 @@ func TestSpend(t *testing.T) {
 		},
 		{
 			name: "usage before the subscription started is not billed",
-			subs: map[string][]om.SubscriptionExpanded{main: {monthly("s1", "USD", day(6, 0), day(6, 0),
-				spendItem(t, "cpu", cpuSlug, unitPrice2, day(6, 0), nil, nil))}},
+			subs: map[string][]fakeSubscription{main: {monthly("s1", "USD", day(6, 0), day(6, 0),
+				spendCard("cpu", cpuSlug, unitPrice2, nil))}},
 			events: []spendEvent{
 				{at: day(5, 3), customer: "01ACMEMAIN", value: 10},
 				{at: day(6, 3), customer: "01ACMEMAIN", value: 5},
@@ -248,9 +256,10 @@ func TestSpend(t *testing.T) {
 		},
 		{
 			name: "a price change in the range prices each part with its price",
-			subs: map[string][]om.SubscriptionExpanded{main: {monthly("s1", "USD", day(1, 0), day(1, 0),
-				spendItem(t, "cpu", cpuSlug, unitPrice2, day(1, 0), ptr(day(6, 0)), nil),
-				spendItem(t, "cpu", cpuSlug, unitPrice3, day(6, 0), nil, nil))}},
+			subs: map[string][]fakeSubscription{main: {
+				endedAt(monthly("s1", "USD", day(1, 0), day(1, 0), spendCard("cpu", cpuSlug, unitPrice2, nil)), day(6, 0)),
+				monthly("s2", "USD", day(6, 0), day(1, 0), spendCard("cpu", cpuSlug, unitPrice3, nil)),
+			}},
 			events: []spendEvent{
 				{at: day(5, 3), customer: "01ACMEMAIN", value: 10},
 				{at: day(6, 3), customer: "01ACMEMAIN", value: 5},
@@ -259,9 +268,9 @@ func TestSpend(t *testing.T) {
 		},
 		{
 			name: "rate cards with dimension filters price only their usage",
-			subs: map[string][]om.SubscriptionExpanded{main: {monthly("s1", "USD", day(1, 0), day(1, 0),
-				spendItem(t, "cpu-us", cpuSlug, unitPrice2, day(1, 0), nil, map[string]om.FilterString{"region": {Eq: new("us-east4")}}),
-				spendItem(t, "cpu-rest", cpuSlug, unitPrice3, day(1, 0), nil, map[string]om.FilterString{"region": {Nin: &[]string{"us-east4"}}}))}},
+			subs: map[string][]fakeSubscription{main: {monthly("s1", "USD", day(1, 0), day(1, 0),
+				spendCard("cpu-us", cpuSlug, unitPrice2, map[string]om.FilterString{"region": {Eq: new("us-east4")}}),
+				spendCard("cpu-rest", cpuSlug, unitPrice3, map[string]om.FilterString{"region": {Nin: &[]string{"us-east4"}}}))}},
 			events: []spendEvent{
 				{at: day(5, 3), customer: "01ACMEMAIN", region: "us-east4", value: 10},
 				{at: day(5, 4), customer: "01ACMEMAIN", region: "eu-west1", value: 1},
@@ -270,9 +279,9 @@ func TestSpend(t *testing.T) {
 		},
 		{
 			name: "every billing account of the organization adds up",
-			subs: map[string][]om.SubscriptionExpanded{
-				main: {monthly("s1", "USD", day(1, 0), day(1, 0), spendItem(t, "cpu", cpuSlug, unitPrice2, day(1, 0), nil, nil))},
-				eu:   {monthly("s2", "USD", day(1, 0), day(1, 0), spendItem(t, "cpu", cpuSlug, unitPrice3, day(1, 0), nil, nil))},
+			subs: map[string][]fakeSubscription{
+				main: {monthly("s1", "USD", day(1, 0), day(1, 0), spendCard("cpu", cpuSlug, unitPrice2, nil))},
+				eu:   {monthly("s2", "USD", day(1, 0), day(1, 0), spendCard("cpu", cpuSlug, unitPrice3, nil))},
 			},
 			events: []spendEvent{
 				{at: day(5, 3), customer: "01ACMEMAIN", value: 10},
@@ -281,10 +290,27 @@ func TestSpend(t *testing.T) {
 			want: "23",
 		},
 		{
+			name: "usage metered in bytes is priced per GiB",
+			subs: map[string][]fakeSubscription{main: {monthly("s1", "USD", day(1, 0), day(1, 0), func() openmeter.UsageRateCard {
+				// The first 200 GiB free, then 0.05 per GiB.
+				c := spendCard("egress", cpuSlug, graduatedPrice(tier("200", "0"), tier("", "0.05")), nil)
+				c.UnitConfig = &productcatalog.UnitConfig{
+					Operation:        productcatalog.UnitConfigOperationDivide,
+					ConversionFactor: alpacadecimal.NewFromInt(1 << 30),
+				}
+				return c
+			}())}},
+			events: []spendEvent{
+				{at: day(2, 0), customer: "01ACMEMAIN", value: 100 << 30}, // earlier this period
+				{at: day(5, 3), customer: "01ACMEMAIN", value: 300 << 30},
+			},
+			want: "10", // 100 GiB free + 200 GiB at 0.05
+		},
+		{
 			name: "a project query prices only that project's usage",
 			ctx:  inParentCtx{"Project", "web"},
-			subs: map[string][]om.SubscriptionExpanded{main: {monthly("s1", "USD", day(1, 0), day(1, 0),
-				spendItem(t, "cpu", cpuSlug, unitPrice2, day(1, 0), nil, nil))}},
+			subs: map[string][]fakeSubscription{main: {monthly("s1", "USD", day(1, 0), day(1, 0),
+				spendCard("cpu", cpuSlug, unitPrice2, nil))}},
 			events: []spendEvent{
 				{at: day(5, 3), customer: "01ACMEMAIN", project: "web", value: 10},
 				{at: day(5, 3), customer: "01ACMEMAIN", project: "api", value: 7},
@@ -311,9 +337,9 @@ func TestSpend(t *testing.T) {
 type inParentCtx struct{ kind, name string }
 
 func TestSpend_MeterNoPlanPricesHasNone(t *testing.T) {
-	omc := &fakeOpenMeter{customers: everyCustomer(), query: usageFrom(nil), subscriptions: map[string][]om.SubscriptionExpanded{
+	omc := &fakeOpenMeter{customers: everyCustomer(), query: usageFrom(nil), subscriptions: map[string][]fakeSubscription{
 		"organization-acme/acme-main": {monthly("s1", "USD", day(1, 0), day(1, 0),
-			spendItem(t, "cpu", cpuSlug, unitPrice2, day(1, 0), nil, nil))},
+			spendCard("cpu", cpuSlug, unitPrice2, nil))},
 	}}
 	got, err := create(t, inParent("Organization", "acme"), NewREST(world(t), omc), spendQuery("cpu-hours", "peak-storage"))
 	if err != nil {
@@ -327,9 +353,9 @@ func TestSpend_MeterNoPlanPricesHasNone(t *testing.T) {
 }
 
 func TestSpend_DifferentCurrenciesIsAnError(t *testing.T) {
-	omc := &fakeOpenMeter{customers: everyCustomer(), query: usageFrom(nil), subscriptions: map[string][]om.SubscriptionExpanded{
-		"organization-acme/acme-main": {monthly("s1", "USD", day(1, 0), day(1, 0), spendItem(t, "cpu", cpuSlug, unitPrice2, day(1, 0), nil, nil))},
-		"organization-acme/acme-eu":   {monthly("s2", "EUR", day(1, 0), day(1, 0), spendItem(t, "cpu", cpuSlug, unitPrice2, day(1, 0), nil, nil))},
+	omc := &fakeOpenMeter{customers: everyCustomer(), query: usageFrom(nil), subscriptions: map[string][]fakeSubscription{
+		"organization-acme/acme-main": {monthly("s1", "USD", day(1, 0), day(1, 0), spendCard("cpu", cpuSlug, unitPrice2, nil))},
+		"organization-acme/acme-eu":   {monthly("s2", "EUR", day(1, 0), day(1, 0), spendCard("cpu", cpuSlug, unitPrice2, nil))},
 	}}
 	got, err := create(t, inParent("Organization", "acme"), NewREST(world(t), omc), spendQuery("cpu-hours"))
 	if err != nil {
@@ -446,10 +472,10 @@ func TestTotalSpend(t *testing.T) {
 
 func TestSpend_TotalOfEveryMeter(t *testing.T) {
 	peakSlug := openmeter.MeterSlug("compute.miloapis.com/peak-storage")
-	omc := &fakeOpenMeter{customers: everyCustomer(), subscriptions: map[string][]om.SubscriptionExpanded{
+	omc := &fakeOpenMeter{customers: everyCustomer(), subscriptions: map[string][]fakeSubscription{
 		"organization-acme/acme-main": {monthly("s1", "USD", day(1, 0), day(1, 0),
-			spendItem(t, "cpu", cpuSlug, unitPrice2, day(1, 0), nil, nil),
-			spendItem(t, "peak", peakSlug, unitPrice3, day(1, 0), nil, nil))},
+			spendCard("cpu", cpuSlug, unitPrice2, nil),
+			spendCard("peak", peakSlug, unitPrice3, nil))},
 	}}
 	omc.query = func(q openmeter.MeterQuery) ([]openmeter.MeterQueryRow, error) {
 		value := 10.0 // cpu-hours

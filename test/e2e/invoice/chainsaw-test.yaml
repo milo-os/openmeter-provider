@@ -15,10 +15,13 @@ spec:
     then deletes the account, which only succeeds once nothing it owes is
     left open.
 
-    The Offer prices three meters (compute, storage, egress), so the
-    invoice has one line per meter, each titled with its ServicePricing's
-    displayName; every line is checked in OpenMeter and on the Stripe
-    invoice. The lines and amounts are in the LINES table in lib.sh.
+    The Offer prices four meters (compute, storage, egress, memory), so
+    the invoice has one line per meter, each titled with its
+    ServicePricing's displayName; every line's quantity, unit price and
+    total are checked in OpenMeter and on the Stripe invoice. Memory is
+    metered in byte-seconds and priced per GiB-second, so its line must
+    bill the converted quantity at the Offer's rate. The lines and amounts
+    are in the LINES table in lib.sh.
 
     Things that do not happen on their own in a local cluster are done by
     the suite, each explained in its script:
@@ -157,9 +160,10 @@ spec:
 
     - name: publish usage and wait until OpenMeter has all of it
       description: |
-        Usage on each of the three meters (the LINES table in lib.sh):
-        25 vCPU hours, 50 GB-months of storage and 10 GB of egress,
-        published the way billing's attribution stage emits them: subject
+        Usage on each of the four meters (the LINES table in lib.sh):
+        25 vCPU hours, 50 GB-months of storage, 10 GB of egress and
+        53687091200 byte-seconds (50 GiB-seconds) of memory, published the
+        way billing's attribution stage emits them: subject
         projects/e2e-invoice (the bound project) on
         billing.usage.e2e-invoice.valid, with the billingaccountref
         extension naming the account the project is bound to. The

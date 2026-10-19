@@ -12,7 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	om "github.com/openmeterio/openmeter/api/client/go"
+	omv3 "github.com/openmeterio/openmeter/api/v3"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
@@ -140,28 +140,28 @@ func mustMapping(t *testing.T, offer *billingv1alpha1.Offer) offerMapping {
 	return m
 }
 
-func mustUsageRateCard(t *testing.T, phase om.PlanPhase, i int) om.RateCardUsageBased {
+// mustUsageRateCard returns rate card i, which must reference a feature.
+func mustUsageRateCard(t *testing.T, phase omv3.BillingPlanPhase, i int) omv3.BillingRateCard {
 	t.Helper()
-	if d, _ := phase.RateCards[i].Discriminator(); d != string(om.RateCardUsageBasedTypeUsageBased) {
-		t.Fatalf("rate card %d: type %q, want usage_based", i, d)
-	}
-	rc, err := phase.RateCards[i].AsRateCardUsageBased()
-	if err != nil {
-		t.Fatalf("rate card %d: %v", i, err)
+	rc := phase.RateCards[i]
+	if d, _ := rc.Price.Discriminator(); d == string(omv3.BillingPriceFlatTypeFlat) {
+		t.Fatalf("rate card %d: flat price, want a usage price", i)
 	}
 	return rc
 }
 
-func mustFlatRateCard(t *testing.T, phase om.PlanPhase, i int) om.RateCardFlatFee {
+// mustFlatRateCard returns rate card i, which must have a flat price.
+func mustFlatRateCard(t *testing.T, phase omv3.BillingPlanPhase, i int) (omv3.BillingRateCard, omv3.BillingPriceFlat) {
 	t.Helper()
-	if d, _ := phase.RateCards[i].Discriminator(); d != string(om.RateCardFlatFeeTypeFlatFee) {
-		t.Fatalf("rate card %d: type %q, want flat_fee", i, d)
+	rc := phase.RateCards[i]
+	if d, _ := rc.Price.Discriminator(); d != string(omv3.BillingPriceFlatTypeFlat) {
+		t.Fatalf("rate card %d: price type %q, want flat", i, d)
 	}
-	rc, err := phase.RateCards[i].AsRateCardFlatFee()
+	flat, err := rc.Price.AsBillingPriceFlat()
 	if err != nil {
 		t.Fatalf("rate card %d: %v", i, err)
 	}
-	return rc
+	return rc, flat
 }
 
 func featureByKey(t *testing.T, m offerMapping, key string) openmeter.DesiredFeature {
@@ -259,11 +259,8 @@ func TestBuildOfferMapping_Plan(t *testing.T) {
 			if plan.Key != "test_uid" {
 				t.Errorf("Key = %q, want test_uid", plan.Key)
 			}
-			if plan.Description != "test-offer" || plan.Currency != "USD" {
-				t.Errorf("Description/Currency = %q/%q", plan.Description, plan.Currency)
-			}
-			if plan.Metadata[metadataOfferName] != "test-offer" {
-				t.Errorf("metadata = %v", plan.Metadata)
+			if plan.Currency != "USD" {
+				t.Errorf("Currency = %q", plan.Currency)
 			}
 			if plan.Phases[0].Key != planPhaseKey {
 				t.Errorf("phase key = %q", plan.Phases[0].Key)
@@ -274,7 +271,7 @@ func TestBuildOfferMapping_Plan(t *testing.T) {
 
 // TestBuildOfferMapping_Exhaustive drives the full cpuOffer and asserts every
 // OpenMeter artifact: features, filters, rate card types, prices, cadences,
-// and metadata.
+// and descriptions.
 func TestBuildOfferMapping_Exhaustive(t *testing.T) {
 	m := mustMapping(t, cpuOffer())
 	phase := m.Plan.Phases[0]
@@ -292,8 +289,8 @@ func TestBuildOfferMapping_Exhaustive(t *testing.T) {
 	// feature is bound to the slug derived from spec.meterName.
 	for i := 0; i < 3; i++ {
 		rc := mustUsageRateCard(t, phase, i)
-		if rc.FeatureKey == nil || *rc.FeatureKey != rc.Key {
-			t.Errorf("rate card %d featureKey %v != key %q", i, rc.FeatureKey, rc.Key)
+		if m.CardFeatures[rc.Key] != rc.Key {
+			t.Errorf("rate card %d feature %q != key %q", i, m.CardFeatures[rc.Key], rc.Key)
 		}
 		f := featureByKey(t, m, rc.Key)
 		if f.MeterSlug != cpuSlug {
@@ -302,12 +299,15 @@ func TestBuildOfferMapping_Exhaustive(t *testing.T) {
 		if !strings.HasPrefix(f.Key, cpuSlug+"_") || !openMeterKeyRE.MatchString(f.Key) || len(f.Key) > 64 {
 			t.Errorf("feature key %q invalid", f.Key)
 		}
-		if rc.BillingCadence != "P1M" {
-			t.Errorf("rate card %d cadence = %q", i, rc.BillingCadence)
+		if rc.BillingCadence == nil || *rc.BillingCadence != "P1M" {
+			t.Errorf("rate card %d cadence = %v", i, rc.BillingCadence)
 		}
-		if rc.Metadata == nil || (*rc.Metadata)[metadataPricingUnit] != "vcpu" ||
-			(*rc.Metadata)[metadataServicePricing] != "usage-item-multi-region" {
-			t.Errorf("rate card %d metadata = %v", i, rc.Metadata)
+		want := "ServicePricing usage-item-multi-region (compute.miloapis.com), priced per vcpu"
+		if rc.Description == nil || *rc.Description != want {
+			t.Errorf("rate card %d description = %v, want %q", i, rc.Description, want)
+		}
+		if rc.UnitConfig != nil {
+			t.Errorf("rate card %d converts usage without a unitConversion", i)
 		}
 	}
 
@@ -320,14 +320,20 @@ func TestBuildOfferMapping_Exhaustive(t *testing.T) {
 	if us.Name != "Compute Usage (region=us-east)" {
 		t.Errorf("us-east name = %q", us.Name)
 	}
-	if unit, err := us.Price.AsUnitPriceWithCommitments(); err != nil || unit.Amount != "0.10" {
+	if d, _ := us.Price.Discriminator(); d != string(omv3.BillingPriceUnitTypeUnit) {
+		t.Errorf("us-east price type = %q, want unit", d)
+	}
+	if unit, err := us.Price.AsBillingPriceUnit(); err != nil || unit.Amount != "0.10" {
 		t.Errorf("us-east price = %+v (%v)", unit, err)
 	}
 
 	// eu-west: graduated tiers, last band open-ended.
 	eu := mustUsageRateCard(t, phase, 1)
-	tiered, err := eu.Price.AsTieredPriceWithCommitments()
-	if err != nil || tiered.Mode != om.TieredPriceModeGraduated || len(tiered.Tiers) != 2 {
+	if d, _ := eu.Price.Discriminator(); d != string(omv3.BillingPriceGraduatedTypeGraduated) {
+		t.Fatalf("eu-west price type = %q, want graduated", d)
+	}
+	tiered, err := eu.Price.AsBillingPriceGraduated()
+	if err != nil || len(tiered.Tiers) != 2 {
 		t.Fatalf("eu-west price = %+v (%v)", tiered, err)
 	}
 	if tiered.Tiers[0].UpToAmount == nil || *tiered.Tiers[0].UpToAmount != "100" ||
@@ -350,34 +356,66 @@ func TestBuildOfferMapping_Exhaustive(t *testing.T) {
 		t.Errorf("catch-all name = %q", def.Name)
 	}
 
-	// Recurring flat fee: monthly cadence.
-	rec := mustFlatRateCard(t, phase, 3)
+	// Recurring flat fee: monthly cadence, charged in advance as v1 did.
+	rec, recPrice := mustFlatRateCard(t, phase, 3)
 	if !strings.HasPrefix(rec.Key, "recurring_base_fee_") || !openMeterKeyRE.MatchString(rec.Key) {
 		t.Errorf("recurring key = %q", rec.Key)
 	}
 	if rec.BillingCadence == nil || *rec.BillingCadence != "P1M" {
 		t.Errorf("recurring cadence = %v", rec.BillingCadence)
 	}
-	if rec.Price == nil || rec.Price.Amount != "50.00" {
-		t.Errorf("recurring price = %+v", rec.Price)
+	if recPrice.Amount != "50.00" {
+		t.Errorf("recurring price = %+v", recPrice)
 	}
-	if (*rec.Metadata)[metadataServiceRef] != "platform.miloapis.com" {
-		t.Errorf("recurring metadata = %v", rec.Metadata)
+	if rec.PaymentTerm == nil || *rec.PaymentTerm != omv3.BillingPricePaymentTermInAdvance {
+		t.Errorf("recurring payment term = %v, want in_advance", rec.PaymentTerm)
 	}
-	if rec.FeatureKey != nil {
+	if rec.Description == nil || *rec.Description != "ServicePricing recurring-base-fee (platform.miloapis.com)" {
+		t.Errorf("recurring description = %v", rec.Description)
+	}
+	if _, ok := m.CardFeatures[rec.Key]; ok || rec.Feature != nil {
 		t.Errorf("flat fee must not reference a feature")
 	}
 
 	// One-time flat fee: no cadence (charged once), trigger recorded.
-	one := mustFlatRateCard(t, phase, 4)
+	one, _ := mustFlatRateCard(t, phase, 4)
 	if !strings.HasPrefix(one.Key, "one_time_setup_") {
 		t.Errorf("one-time key = %q", one.Key)
 	}
 	if one.BillingCadence != nil {
 		t.Errorf("one-time cadence = %v, want nil", one.BillingCadence)
 	}
-	if (*one.Metadata)[metadataTrigger] != "BillingAccountActivation" {
-		t.Errorf("one-time metadata = %v", one.Metadata)
+	if one.Description == nil || !strings.HasSuffix(*one.Description, ", charged on BillingAccountActivation") {
+		t.Errorf("one-time description = %v", one.Description)
+	}
+}
+
+// TestBuildOfferMapping_UnitConversion: a pricing whose meter measures in a
+// smaller unit than it is priced in converts the usage, so the rates and tier
+// bounds stay as the Offer states them, in the pricing unit.
+func TestBuildOfferMapping_UnitConversion(t *testing.T) {
+	offer := baseOffer()
+	sp := usagePricing("memory", billingv1alpha1.PricingRate{Tiered: []billingv1alpha1.PricingTierBand{
+		{Rate: "0", UpTo: "200"}, {Rate: "0.05"},
+	}})
+	sp.Spec.PricingUnit = "GiB"
+	sp.Spec.UnitConversion = &billingv1alpha1.UnitConversion{
+		MeterUnitsPerPricingUnit: "1073741824",
+		Description:              "Metered in bytes, priced per GiB",
+	}
+	offer.Spec.ServicePricings = []billingv1alpha1.ServicePricingSnapshot{sp}
+
+	rc := mustUsageRateCard(t, mustMapping(t, offer).Plan.Phases[0], 0)
+	uc := rc.UnitConfig
+	if uc == nil || uc.Operation != omv3.BillingUnitConfigOperationDivide || uc.ConversionFactor != "1073741824" {
+		t.Fatalf("unit config = %+v, want divide by 1073741824", uc)
+	}
+	if uc.DisplayUnit == nil || *uc.DisplayUnit != "GiB" {
+		t.Errorf("display unit = %v, want the pricing unit", uc.DisplayUnit)
+	}
+	tiered, err := rc.Price.AsBillingPriceGraduated()
+	if err != nil || *tiered.Tiers[0].UpToAmount != "200" || tiered.Tiers[1].UnitPrice.Amount != "0.05" {
+		t.Errorf("price = %+v (%v), want the Offer's tiers unchanged", tiered, err)
 	}
 }
 
@@ -483,7 +521,7 @@ func TestBuildOfferMapping_LongNamesStayValid(t *testing.T) {
 			t.Errorf("feature key %q (len %d) invalid", f.Key, len(f.Key))
 		}
 	}
-	flat := mustFlatRateCard(t, m.Plan.Phases[0], 2)
+	flat, _ := mustFlatRateCard(t, m.Plan.Phases[0], 2)
 	if len(flat.Key) > openMeterKeyMaxLen || !openMeterKeyRE.MatchString(flat.Key) {
 		t.Errorf("flat fee key %q (len %d) invalid", flat.Key, len(flat.Key))
 	}
@@ -500,7 +538,8 @@ func TestBuildOfferMapping_FlatFeeNamesDoNotCollide(t *testing.T) {
 		})
 	}
 	m := mustMapping(t, offer)
-	a, b := mustFlatRateCard(t, m.Plan.Phases[0], 0), mustFlatRateCard(t, m.Plan.Phases[0], 1)
+	a, _ := mustFlatRateCard(t, m.Plan.Phases[0], 0)
+	b, _ := mustFlatRateCard(t, m.Plan.Phases[0], 1)
 	if a.Key == b.Key {
 		t.Fatalf("both flat fees keyed %q", a.Key)
 	}
@@ -616,6 +655,13 @@ func TestBuildOfferMapping_RejectsUnrepresentable(t *testing.T) {
 			})},
 			"last tier"},
 		{"flat fee without amount", []billingv1alpha1.ServicePricingSnapshot{oneTime("fee", "")}, "no amount"},
+		{"non-positive unit conversion",
+			[]billingv1alpha1.ServicePricingSnapshot{func() billingv1alpha1.ServicePricingSnapshot {
+				sp := usagePricing("u", billingv1alpha1.PricingRate{Flat: "1"})
+				sp.Spec.UnitConversion = &billingv1alpha1.UnitConversion{MeterUnitsPerPricingUnit: "0", Description: "x"}
+				return sp
+			}()},
+			"not a positive decimal"},
 		{"unsupported charge type",
 			[]billingv1alpha1.ServicePricingSnapshot{{Name: "x", Spec: billingv1alpha1.ServicePricingSpec{
 				ChargeType: billingv1alpha1.ChargeType("Bogus"),

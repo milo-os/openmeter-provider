@@ -14,6 +14,7 @@ import (
 
 	"github.com/alpacahq/alpacadecimal"
 	om "github.com/openmeterio/openmeter/api/client/go"
+	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/datetime"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
 	"golang.org/x/sync/errgroup"
@@ -25,15 +26,21 @@ import (
 
 // spendCalculator prices each meter's usage with the plans the billing
 // accounts are subscribed to, the way OpenMeter prices it on their invoices:
-// for every subscription item (one rate card of a plan) whose feature reads a
-// queried meter, the usage it covers in the time range is split at billing
-// period boundaries and each part is priced with the item's price, tiered
-// prices continuing from the usage earlier in that period.
+// for every usage rate card of a subscription's plan version whose feature
+// reads a queried meter, the usage it covers in the time range is split at
+// billing period boundaries and each part is priced with the card's price
+// and unit conversion, tiered prices continuing from the usage earlier in
+// that period.
 type spendCalculator struct {
 	openMeter openmeter.Client
 	spec      *usagev1alpha1.UsageQuerySpec
 	customers []accountCustomer
 	projects  []string
+
+	// rateCards caches each plan version's usage rate cards by plan id:
+	// accounts on the same Offer share them.
+	mu        sync.Mutex
+	rateCards map[string][]openmeter.UsageRateCard
 }
 
 // spendResult is one meter's spend, or why it has none.
@@ -45,11 +52,12 @@ type spendResult struct {
 // pricedRange is the usage of one subscription item over part of one billing
 // period, to be priced.
 type pricedRange struct {
-	plan     int
-	customer openmeter.CustomerID
-	currency string
-	price    om.RateCardUsageBasedPrice
-	filters  map[string]om.FilterString
+	plan       int
+	customer   openmeter.CustomerID
+	currency   string
+	price      *productcatalog.Price
+	unitConfig *productcatalog.UnitConfig
+	filters    map[string]om.FilterString
 	// from and to bound the usage to price; earlierFrom is where the
 	// billing period's usage starts counting for this item, so tiered
 	// prices continue from the usage between earlierFrom and from.
@@ -169,70 +177,72 @@ func (c *spendCalculator) customerRanges(ctx context.Context, customer accountCu
 
 	var out []pricedRange
 	for _, sub := range subs {
-		if sub.DeletedAt != nil || !overlaps(sub.ActiveFrom, sub.ActiveTo, start, end) {
+		if sub.DeletedAt != nil || sub.Plan == nil || !overlaps(sub.ActiveFrom, sub.ActiveTo, start, end) {
 			continue
 		}
-		expanded, err := c.openMeter.GetSubscription(ctx, sub.Id)
+		cards, err := c.planRateCards(ctx, sub.Plan.Id)
 		if err != nil {
 			return nil, fmt.Errorf("subscription %s: %w", sub.Id, err)
 		}
-		for _, phase := range expanded.Phases {
-			for _, item := range subscriptionItems(phase) {
-				ranges, err := itemRanges(expanded, phase, item, planBySlug, start, end)
-				if err != nil {
-					return nil, fmt.Errorf("subscription %s item %s: %w", sub.Id, item.Key, err)
-				}
-				for i := range ranges {
-					ranges[i].customer = customer.id
-				}
-				out = append(out, ranges...)
+		for _, card := range cards {
+			ranges, err := cardRanges(sub, card, planBySlug, start, end)
+			if err != nil {
+				return nil, fmt.Errorf("subscription %s rate card %s: %w", sub.Id, card.Key, err)
 			}
+			for i := range ranges {
+				ranges[i].customer = customer.id
+			}
+			out = append(out, ranges...)
 		}
 	}
 	return out, nil
 }
 
-// subscriptionItems returns every version of a phase's items: the
-// itemTimelines when OpenMeter returns them, else the current items.
-func subscriptionItems(phase om.SubscriptionPhaseExpanded) []om.SubscriptionItem {
-	if len(phase.ItemTimelines) == 0 {
-		return phase.Items
+// planRateCards returns the usage rate cards of the plan version planID,
+// reading each plan version once per query.
+func (c *spendCalculator) planRateCards(ctx context.Context, planID string) ([]openmeter.UsageRateCard, error) {
+	c.mu.Lock()
+	cards, ok := c.rateCards[planID]
+	c.mu.Unlock()
+	if ok {
+		return cards, nil
 	}
-	var items []om.SubscriptionItem
-	for _, key := range slices.Sorted(maps.Keys(phase.ItemTimelines)) {
-		items = append(items, phase.ItemTimelines[key]...)
+	cards, err := c.openMeter.PlanUsageRateCards(ctx, planID)
+	if err != nil {
+		return nil, err
 	}
-	return items
+	c.mu.Lock()
+	if c.rateCards == nil {
+		c.rateCards = map[string][]openmeter.UsageRateCard{}
+	}
+	c.rateCards[planID] = cards
+	c.mu.Unlock()
+	return cards, nil
 }
 
-// itemRanges splits the part of [start, end) the item was active in at its
-// billing period boundaries. It returns nothing for items that price no
-// queried meter.
-func itemRanges(sub om.SubscriptionExpanded, phase om.SubscriptionPhaseExpanded, item om.SubscriptionItem, planBySlug map[string]int, start, end time.Time) ([]pricedRange, error) {
-	if item.DeletedAt != nil || item.Price == nil || item.Included == nil || item.Included.Feature.MeterSlug == nil {
-		return nil, nil
-	}
-	plan, ok := planBySlug[*item.Included.Feature.MeterSlug]
+// cardRanges splits the part of [start, end) the subscription was active in
+// at the card's billing period boundaries. It returns nothing for cards that
+// price no queried meter. A subscription bills one plan version for its whole
+// life (changes and migrations start a new subscription), so the card is
+// active exactly while the subscription is.
+func cardRanges(sub om.Subscription, card openmeter.UsageRateCard, planBySlug map[string]int, start, end time.Time) ([]pricedRange, error) {
+	plan, ok := planBySlug[card.MeterSlug]
 	if !ok {
 		return nil, nil
 	}
 
-	// When the item was active: the item, its phase and its subscription
-	// all bound it.
-	activeFrom := latest(item.ActiveFrom, phase.ActiveFrom, sub.ActiveFrom)
-	activeTo := earliest(item.ActiveTo, phase.ActiveTo, sub.ActiveTo)
-	from := latest(activeFrom, start)
+	from := latest(sub.ActiveFrom, start)
 	to := end
-	if activeTo != nil && activeTo.Before(to) {
-		to = *activeTo
+	if sub.ActiveTo != nil && sub.ActiveTo.Before(to) {
+		to = *sub.ActiveTo
 	}
 	if !from.Before(to) {
 		return nil, nil
 	}
 
 	cadence := sub.BillingCadence
-	if item.BillingCadence != nil && *item.BillingCadence != "" {
-		cadence = *item.BillingCadence
+	if card.BillingCadence != "" {
+		cadence = card.BillingCadence
 	}
 	interval, err := datetime.ISODurationString(cadence).Parse()
 	if err != nil {
@@ -241,11 +251,6 @@ func itemRanges(sub om.SubscriptionExpanded, phase om.SubscriptionPhaseExpanded,
 	periods, err := timeutil.NewRecurrenceFromISODuration(interval, sub.BillingAnchor)
 	if err != nil {
 		return nil, fmt.Errorf("billing cadence %q: %w", cadence, err)
-	}
-
-	var filters map[string]om.FilterString
-	if f := item.Included.Feature.AdvancedMeterGroupByFilters; f != nil {
-		filters = *f
 	}
 
 	var out []pricedRange
@@ -263,11 +268,12 @@ func itemRanges(sub om.SubscriptionExpanded, phase om.SubscriptionPhaseExpanded,
 		r := pricedRange{
 			plan:        plan,
 			currency:    string(sub.Currency),
-			price:       *item.Price,
-			filters:     filters,
+			price:       card.Price,
+			unitConfig:  card.UnitConfig,
+			filters:     card.Filters,
 			from:        t.Truncate(time.Second),
 			to:          partEnd.Truncate(time.Second),
-			earlierFrom: latest(period.From, activeFrom).Truncate(time.Second),
+			earlierFrom: latest(period.From, sub.ActiveFrom).Truncate(time.Second),
 		}
 		if r.from.Before(r.to) {
 			out = append(out, r)
@@ -295,6 +301,7 @@ func (c *spendCalculator) priceRange(ctx context.Context, plan meterPlan, r pric
 	}
 	amount, err := openmeter.PriceUsage(openmeter.UsageToPrice{
 		Price:                 r.price,
+		UnitConfig:            r.unitConfig,
 		Currency:              r.currency,
 		From:                  r.from,
 		To:                    r.to,
@@ -344,16 +351,6 @@ func latest(first time.Time, rest ...time.Time) time.Time {
 	out := first
 	for _, t := range rest {
 		if t.After(out) {
-			out = t
-		}
-	}
-	return out
-}
-
-func earliest(times ...*time.Time) *time.Time {
-	var out *time.Time
-	for _, t := range times {
-		if t != nil && (out == nil || t.Before(*out)) {
 			out = t
 		}
 	}

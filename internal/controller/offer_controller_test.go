@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
+	omv3 "github.com/openmeterio/openmeter/api/v3"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
@@ -203,7 +204,17 @@ func TestReconcile_GAConverges(t *testing.T) {
 	}
 	plan := omc.ensurePlanCalls[0]
 	if len(plan.Phases) != 1 || len(plan.Phases[0].RateCards) != 5 {
-		t.Errorf("plan phases wrong: %+v", plan.Phases)
+		t.Fatalf("plan phases wrong: %+v", plan.Phases)
+	}
+	// Usage cards reference their feature by the id OpenMeter gave it; flat
+	// fees reference none.
+	for i, rc := range plan.Phases[0].RateCards {
+		switch {
+		case i < 3 && (rc.Feature == nil || rc.Feature.Id != "id-"+rc.Key):
+			t.Errorf("usage rate card %s feature = %+v, want id-%s", rc.Key, rc.Feature, rc.Key)
+		case i >= 3 && rc.Feature != nil:
+			t.Errorf("flat fee %s references feature %+v", rc.Key, rc.Feature)
+		}
 	}
 
 	cond := syncedCondition(t, r)
@@ -312,21 +323,27 @@ func TestReconcile_OpenMeterFailures(t *testing.T) {
 		{
 			name: "plan transient",
 			setup: func(f *fakeOpenMeterClient) {
-				f.ensurePlanFn = func(context.Context, openmeter.DesiredPlan) (om.Plan, error) { return om.Plan{}, transient }
+				f.ensurePlanFn = func(context.Context, openmeter.DesiredPlan) (omv3.BillingPlan, error) {
+					return omv3.BillingPlan{}, transient
+				}
 			},
 			wantRequeue: transientRequeueAfter,
 		},
 		{
 			name: "plan permanent",
 			setup: func(f *fakeOpenMeterClient) {
-				f.ensurePlanFn = func(context.Context, openmeter.DesiredPlan) (om.Plan, error) { return om.Plan{}, permanent }
+				f.ensurePlanFn = func(context.Context, openmeter.DesiredPlan) (omv3.BillingPlan, error) {
+					return omv3.BillingPlan{}, permanent
+				}
 			},
 			wantRequeue: permanentRequeueAfter,
 		},
 		{
 			name: "plan unclassified is treated as transient",
 			setup: func(f *fakeOpenMeterClient) {
-				f.ensurePlanFn = func(context.Context, openmeter.DesiredPlan) (om.Plan, error) { return om.Plan{}, errors.New("??") }
+				f.ensurePlanFn = func(context.Context, openmeter.DesiredPlan) (omv3.BillingPlan, error) {
+					return omv3.BillingPlan{}, errors.New("??")
+				}
 			},
 			wantRequeue: transientRequeueAfter,
 		},
@@ -365,8 +382,8 @@ func TestReconcile_OpenMeterFailures(t *testing.T) {
 // OpenMeter recovers.
 func TestReconcile_RecoversAfterFailure(t *testing.T) {
 	r, omc, _ := newOfferReconciler(t, cpuMeter(), withFinalizer(cpuOffer()))
-	omc.ensurePlanFn = func(context.Context, openmeter.DesiredPlan) (om.Plan, error) {
-		return om.Plan{}, &openmeter.TransientError{Err: errors.New("down")}
+	omc.ensurePlanFn = func(context.Context, openmeter.DesiredPlan) (omv3.BillingPlan, error) {
+		return omv3.BillingPlan{}, &openmeter.TransientError{Err: errors.New("down")}
 	}
 	reconcileOnce(t, r)
 	omc.ensurePlanFn = nil
@@ -380,19 +397,14 @@ func TestReconcile_RecoversAfterFailure(t *testing.T) {
 // Delete
 // ---------------------------------------------------------------------------
 
-func planVersion(id string, version int, status om.PlanStatus, featureKeys ...string) om.Plan {
-	var cards []om.RateCard
-	for _, key := range featureKeys {
-		k := key
-		var card om.RateCard
-		_ = card.FromRateCardUsageBased(om.RateCardUsageBased{
-			Type: om.RateCardUsageBasedTypeUsageBased, Key: k, Name: k, FeatureKey: &k,
-		})
-		cards = append(cards, card)
+func planVersion(id string, version int, status omv3.BillingPlanStatus, featureIDs ...string) omv3.BillingPlan {
+	var cards []omv3.BillingRateCard
+	for _, fid := range featureIDs {
+		cards = append(cards, omv3.BillingRateCard{Key: fid, Name: fid, Feature: &omv3.FeatureReference{Id: fid}})
 	}
-	return om.Plan{
+	return omv3.BillingPlan{
 		Id: id, Key: "test_uid", Version: version, Status: status,
-		Phases: []om.PlanPhase{{Key: planPhaseKey, Name: planPhaseName, RateCards: cards}},
+		Phases: []omv3.BillingPlanPhase{{Key: planPhaseKey, Name: planPhaseName, RateCards: cards}},
 	}
 }
 
@@ -410,21 +422,20 @@ func TestReconcileDelete_NoPlan(t *testing.T) {
 
 // TestReconcileDelete_DeletesAllVersionsThenCollectsFeatures pins the
 // ordering fix: every plan version is deleted BEFORE feature GC runs, and
-// GC receives the union of features from every version (including already
-// deleted ones, so a retry after a partial failure still collects them).
+// GC receives the union of features from every version.
 func TestReconcileDelete_DeletesAllVersionsThenCollectsFeatures(t *testing.T) {
 	r, omc, rec := newOfferReconciler(t, cpuMeter(), deletedOffer())
 	deletedAt := time.Now()
-	gone := planVersion("p0", 1, om.PlanStatusArchived, "f_old")
+	gone := planVersion("p0", 1, omv3.BillingPlanStatusArchived, "f_old")
 	gone.DeletedAt = &deletedAt
-	omc.listPlanVersionsFn = func(_ context.Context, key string, includeDeleted bool) ([]om.Plan, error) {
-		if key != "test_uid" || !includeDeleted {
-			t.Errorf("ListPlanVersions(%q, %v), want (test_uid, true)", key, includeDeleted)
+	omc.listPlanVersionsFn = func(_ context.Context, key string) ([]omv3.BillingPlan, error) {
+		if key != "test_uid" {
+			t.Errorf("ListPlanVersions(%q), want test_uid", key)
 		}
-		return []om.Plan{
+		return []omv3.BillingPlan{
 			gone,
-			planVersion("p1", 2, om.PlanStatusArchived, "f_a", "f_b"),
-			planVersion("p2", 3, om.PlanStatusActive, "f_b", "f_c"),
+			planVersion("p1", 2, omv3.BillingPlanStatusArchived, "f_a", "f_b"),
+			planVersion("p2", 3, omv3.BillingPlanStatusActive, "f_b", "f_c"),
 		}, nil
 	}
 
@@ -447,8 +458,8 @@ func TestReconcileDelete_DeletesAllVersionsThenCollectsFeatures(t *testing.T) {
 func TestReconcileDelete_Failures(t *testing.T) {
 	transient := &openmeter.TransientError{Err: errors.New("down")}
 	permanent := &openmeter.PermanentError{Err: errors.New("rejected")}
-	oneVersion := func(context.Context, string, bool) ([]om.Plan, error) {
-		return []om.Plan{planVersion("p1", 1, om.PlanStatusActive, "f_a")}, nil
+	oneVersion := func(context.Context, string) ([]omv3.BillingPlan, error) {
+		return []omv3.BillingPlan{planVersion("p1", 1, omv3.BillingPlanStatusActive, "f_a")}, nil
 	}
 	tests := []struct {
 		name            string
@@ -460,14 +471,14 @@ func TestReconcileDelete_Failures(t *testing.T) {
 		{
 			name: "list transient keeps finalizer",
 			setup: func(f *fakeOpenMeterClient) {
-				f.listPlanVersionsFn = func(context.Context, string, bool) ([]om.Plan, error) { return nil, transient }
+				f.listPlanVersionsFn = func(context.Context, string) ([]omv3.BillingPlan, error) { return nil, transient }
 			},
 			wantRequeue: transientRequeueAfter,
 		},
 		{
 			name: "list permanent keeps finalizer (published plan state unknown)",
 			setup: func(f *fakeOpenMeterClient) {
-				f.listPlanVersionsFn = func(context.Context, string, bool) ([]om.Plan, error) { return nil, permanent }
+				f.listPlanVersionsFn = func(context.Context, string) ([]omv3.BillingPlan, error) { return nil, permanent }
 			},
 			wantRequeue: permanentRequeueAfter,
 		},
@@ -475,7 +486,7 @@ func TestReconcileDelete_Failures(t *testing.T) {
 			name: "delete transient keeps finalizer and skips feature GC",
 			setup: func(f *fakeOpenMeterClient) {
 				f.listPlanVersionsFn = oneVersion
-				f.deletePlanFn = func(context.Context, om.Plan) error { return transient }
+				f.deletePlanFn = func(context.Context, omv3.BillingPlan) error { return transient }
 			},
 			wantRequeue: transientRequeueAfter,
 		},
@@ -483,7 +494,7 @@ func TestReconcileDelete_Failures(t *testing.T) {
 			name: "delete permanent releases finalizer",
 			setup: func(f *fakeOpenMeterClient) {
 				f.listPlanVersionsFn = oneVersion
-				f.deletePlanFn = func(context.Context, om.Plan) error { return permanent }
+				f.deletePlanFn = func(context.Context, omv3.BillingPlan) error { return permanent }
 			},
 			wantReleased:    true,
 			wantArchiveCall: true,
@@ -569,12 +580,12 @@ type fakeOpenMeterClient struct {
 	ensureFeatureFn    func(context.Context, openmeter.DesiredFeature) (om.Feature, error)
 
 	ensurePlanCalls []openmeter.DesiredPlan
-	ensurePlanFn    func(context.Context, openmeter.DesiredPlan) (om.Plan, error)
+	ensurePlanFn    func(context.Context, openmeter.DesiredPlan) (omv3.BillingPlan, error)
 
-	listPlanVersionsFn func(context.Context, string, bool) ([]om.Plan, error)
+	listPlanVersionsFn func(context.Context, string) ([]omv3.BillingPlan, error)
 
 	deletePlanCalls []string
-	deletePlanFn    func(context.Context, om.Plan) error
+	deletePlanFn    func(context.Context, omv3.BillingPlan) error
 
 	archiveFeaturesCalls []string
 	archiveFeaturesFn    func(context.Context, []string) error
@@ -609,27 +620,27 @@ func (f *fakeOpenMeterClient) EnsureFeature(ctx context.Context, d openmeter.Des
 	if f.ensureFeatureFn != nil {
 		return f.ensureFeatureFn(ctx, d)
 	}
-	return om.Feature{Key: d.Key}, nil
+	return om.Feature{Id: "id-" + d.Key, Key: d.Key}, nil
 }
 
-func (f *fakeOpenMeterClient) EnsurePlan(ctx context.Context, d openmeter.DesiredPlan) (om.Plan, error) {
+func (f *fakeOpenMeterClient) EnsurePlan(ctx context.Context, d openmeter.DesiredPlan) (omv3.BillingPlan, error) {
 	f.calls = append(f.calls, "EnsurePlan "+d.Key)
 	f.ensurePlanCalls = append(f.ensurePlanCalls, d)
 	if f.ensurePlanFn != nil {
 		return f.ensurePlanFn(ctx, d)
 	}
-	return om.Plan{Id: "plan-1", Key: d.Key, Name: d.Name, Version: 1, Status: om.PlanStatusActive}, nil
+	return omv3.BillingPlan{Id: "plan-1", Key: d.Key, Name: d.Name, Version: 1, Status: omv3.BillingPlanStatusActive}, nil
 }
 
-func (f *fakeOpenMeterClient) ListPlanVersions(ctx context.Context, key string, includeDeleted bool) ([]om.Plan, error) {
+func (f *fakeOpenMeterClient) ListPlanVersions(ctx context.Context, key string) ([]omv3.BillingPlan, error) {
 	f.calls = append(f.calls, "ListPlanVersions "+key)
 	if f.listPlanVersionsFn != nil {
-		return f.listPlanVersionsFn(ctx, key, includeDeleted)
+		return f.listPlanVersionsFn(ctx, key)
 	}
 	return nil, nil
 }
 
-func (f *fakeOpenMeterClient) DeletePlan(ctx context.Context, plan om.Plan) error {
+func (f *fakeOpenMeterClient) DeletePlan(ctx context.Context, plan omv3.BillingPlan) error {
 	f.calls = append(f.calls, "DeletePlan "+plan.Id)
 	f.deletePlanCalls = append(f.deletePlanCalls, plan.Id)
 	if f.deletePlanFn != nil {
@@ -638,11 +649,11 @@ func (f *fakeOpenMeterClient) DeletePlan(ctx context.Context, plan om.Plan) erro
 	return nil
 }
 
-func (f *fakeOpenMeterClient) ArchiveFeaturesIfUnreferenced(ctx context.Context, keys []string) error {
+func (f *fakeOpenMeterClient) ArchiveFeaturesIfUnreferenced(ctx context.Context, ids []string) error {
 	f.calls = append(f.calls, "ArchiveFeaturesIfUnreferenced")
-	f.archiveFeaturesCalls = append(f.archiveFeaturesCalls, keys...)
+	f.archiveFeaturesCalls = append(f.archiveFeaturesCalls, ids...)
 	if f.archiveFeaturesFn != nil {
-		return f.archiveFeaturesFn(ctx, keys)
+		return f.archiveFeaturesFn(ctx, ids)
 	}
 	return nil
 }

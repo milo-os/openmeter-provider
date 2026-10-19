@@ -24,6 +24,7 @@ import (
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	om "github.com/openmeterio/openmeter/api/client/go"
+	omv3 "github.com/openmeterio/openmeter/api/v3"
 )
 
 // CustomerKey is OpenMeter's external customer key. In this codebase it is
@@ -169,49 +170,50 @@ type Client interface {
 	// has no hard feature delete in this API generation — DELETE sets
 	// archivedAt. NotFound is treated as success.
 	DeleteFeature(ctx context.Context, idOrKey string) error
-	// ArchiveFeaturesIfUnreferenced archives each member of candidateKeys
+	// ArchiveFeaturesIfUnreferenced archives each feature in candidateIDs
 	// that no non-deleted plan version references. Features still referenced
 	// by a plan (including archived versions that may carry subscriptions)
 	// are left active.
-	ArchiveFeaturesIfUnreferenced(ctx context.Context, candidateKeys []string) error
+	ArchiveFeaturesIfUnreferenced(ctx context.Context, candidateIDs []string) error
 	// ArchiveUnreferencedMeterFeatures archives every active feature bound to
 	// meterSlug that no non-deleted plan version references. Used by the
 	// MeterDefinition finalizer so the meter can be deleted (OpenMeter rejects
 	// deleting a meter with active features).
 	ArchiveUnreferencedMeterFeatures(ctx context.Context, meterSlug string) error
 
-	// Plans (see plan.go).
+	// Plans (see plan.go). They go through OpenMeter's v3 API, the only one
+	// that can carry unit conversions.
 
 	// EnsurePlan converges the plan identified by desired.Key to a published
 	// (active) version whose content matches desired. A matching active
 	// version is a no-op; a pending draft is updated and published; any
 	// other difference creates and publishes a new version, which makes
 	// OpenMeter archive the previous active one.
-	EnsurePlan(ctx context.Context, desired DesiredPlan) (om.Plan, error)
-	// ListPlanVersions returns every version of the plan identified by key,
-	// ordered by ascending version. Deleted versions are included only when
-	// includeDeleted is set. An empty slice means no version exists.
-	ListPlanVersions(ctx context.Context, key string, includeDeleted bool) ([]om.Plan, error)
+	EnsurePlan(ctx context.Context, desired DesiredPlan) (omv3.BillingPlan, error)
+	// ListPlanVersions returns every non-deleted version of the plan
+	// identified by key, ordered by ascending version. An empty slice means
+	// no version exists.
+	ListPlanVersions(ctx context.Context, key string) ([]omv3.BillingPlan, error)
 	// DeletePlan deletes a single plan version, archiving it first when it
 	// is active (OpenMeter refuses to delete an active plan). Already-deleted
 	// versions and NotFound are treated as success.
-	DeletePlan(ctx context.Context, plan om.Plan) error
+	DeletePlan(ctx context.Context, plan omv3.BillingPlan) error
+	// PlanUsageRateCards returns the usage-based rate cards of the plan
+	// version with the given id, deleted or not, ready to price usage.
+	PlanUsageRateCards(ctx context.Context, planID string) ([]UsageRateCard, error)
 
 	// Subscriptions (see subscription.go).
 
 	// EnsureSubscription converges the customer to exactly one live
 	// subscription on the active version of desired.PlanKey: it creates one,
 	// changes another plan's subscription to it, or migrates an older
-	// version, both immediately. Returns ErrCustomerNotFound,
+	// version, both immediately (through the v3 API when the plan converts
+	// usage, dropping the subscription's metadata). Returns ErrCustomerNotFound,
 	// ErrPlanNotPublished, or ErrCustomerBillingNotReady when it cannot.
 	EnsureSubscription(ctx context.Context, desired DesiredSubscription) (SubscriptionState, error)
 	// ListSubscriptions returns every subscription of the customer, live or
 	// ended. Returns ErrCustomerNotFound when the customer does not exist.
 	ListSubscriptions(ctx context.Context, customerKey CustomerKey) ([]om.Subscription, error)
-	// GetSubscription returns a subscription with its phases and every
-	// version of their items (itemTimelines), each with its price and
-	// feature.
-	GetSubscription(ctx context.Context, id string) (om.SubscriptionExpanded, error)
 	// CancelSubscriptions ends every live subscription of the customer
 	// immediately. A missing customer is treated as success.
 	CancelSubscriptions(ctx context.Context, customerKey CustomerKey) error
@@ -246,6 +248,7 @@ type Client interface {
 // across each resource type's own file.
 type client struct {
 	api *om.ClientWithResponses
+	v3  *v3API
 }
 
 // requestTimeout bounds every OpenMeter HTTP call. The generated SDK
@@ -264,7 +267,8 @@ func NewClient(server string, apiSecret string) (Client, error) {
 		return nil, fmt.Errorf("openmeter: empty server URL")
 	}
 
-	httpClient := om.WithHTTPClient(&http.Client{Timeout: requestTimeout})
+	hc := &http.Client{Timeout: requestTimeout}
+	httpClient := om.WithHTTPClient(hc)
 
 	var api *om.ClientWithResponses
 	var err error
@@ -276,5 +280,5 @@ func NewClient(server string, apiSecret string) (Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("openmeter: new client: %w", err)
 	}
-	return &client{api: api}, nil
+	return &client{api: api, v3: newV3API(server, apiSecret, hc)}, nil
 }
