@@ -1,4 +1,4 @@
-# Three meters, one per thing the customer pays for, so the invoice has one
+# Four meters, one per thing the customer pays for, so the invoice has one
 # line each.
 apiVersion: billing.miloapis.com/v1alpha1
 kind: MeterDefinition
@@ -48,5 +48,24 @@ spec:
   billing:
     consumedUnit: GBy
     pricingUnit: GBy
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource
+---
+# Measured in a smaller unit than it is priced in: byte-seconds, priced per
+# GiB-second (servicepricing.yaml inv-memory converts it).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: inv-memory-byte-seconds
+spec:
+  meterName: inv-memory-byte-seconds
+  phase: Published
+  displayName: "Memory byte-seconds"
+  measurement:
+    aggregation: Sum
+    unit: By.s
+  billing:
+    consumedUnit: By.s
+    pricingUnit: By.s
   monitoredResourceTypes:
     - e2e.miloapis.com/Resource

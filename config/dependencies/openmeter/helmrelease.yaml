@@ -63,6 +63,12 @@ spec:
     # deep-merged with the Kafka/ClickHouse/Postgres/Svix wiring the chart
     # generates for the bundled dependencies).
     config:
+      # Rate cards convert metered usage into their pricing unit before
+      # pricing (ServicePricing spec.unitConversion -> unit_config), e.g.
+      # bytes priced per GiB. Off by default; with it off OpenMeter refuses
+      # to bill those lines rather than billing raw units.
+      unitConfig:
+        enabled: true
       sink:
         # Cross-flush event deduplication. OpenMeter's default
         # (sink.dedupe.enabled: false, app/config/sink.go) only drops

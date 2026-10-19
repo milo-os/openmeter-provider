@@ -34,14 +34,14 @@ var (
 )
 
 // fakeOpenMeter answers GetCustomer from customers (keyed by account UID),
-// QueryMeter with query, recording every query, and the subscription calls
-// from subscriptions (keyed by account UID).
+// QueryMeter with query, recording every query, and the subscription and
+// plan rate card calls from subscriptions (keyed by account UID).
 type fakeOpenMeter struct {
 	openmeter.Client
 
 	customers       map[string]string
 	query           func(q openmeter.MeterQuery) ([]openmeter.MeterQueryRow, error)
-	subscriptions   map[string][]om.SubscriptionExpanded
+	subscriptions   map[string][]fakeSubscription
 	subscriptionErr error
 
 	mu                sync.Mutex
@@ -59,23 +59,20 @@ func (f *fakeOpenMeter) ListSubscriptions(_ context.Context, key openmeter.Custo
 	}
 	var out []om.Subscription
 	for _, s := range f.subscriptions[string(key)] {
-		out = append(out, om.Subscription{
-			Id: s.Id, ActiveFrom: s.ActiveFrom, ActiveTo: s.ActiveTo, DeletedAt: s.DeletedAt,
-			Currency: s.Currency, BillingAnchor: s.BillingAnchor, BillingCadence: s.BillingCadence,
-		})
+		out = append(out, s.sub)
 	}
 	return out, nil
 }
 
-func (f *fakeOpenMeter) GetSubscription(_ context.Context, id string) (om.SubscriptionExpanded, error) {
+func (f *fakeOpenMeter) PlanUsageRateCards(_ context.Context, planID string) ([]openmeter.UsageRateCard, error) {
 	for _, subs := range f.subscriptions {
 		for _, s := range subs {
-			if s.Id == id {
-				return s, nil
+			if s.sub.Plan != nil && s.sub.Plan.Id == planID {
+				return s.cards, nil
 			}
 		}
 	}
-	return om.SubscriptionExpanded{}, fmt.Errorf("subscription %s not found", id)
+	return nil, fmt.Errorf("plan %s not found", planID)
 }
 
 func (f *fakeOpenMeter) GetCustomer(_ context.Context, key openmeter.CustomerKey) (om.Customer, error) {

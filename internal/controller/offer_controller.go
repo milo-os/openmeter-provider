@@ -164,10 +164,16 @@ func (r *OfferReconciler) reconcileSync(
 		}
 	}
 
+	featureIDs := make(map[string]string, len(mapping.Features))
 	for _, feature := range mapping.Features {
-		if _, err := r.OpenMeterClient.EnsureFeature(ctx, feature); err != nil {
+		f, err := r.OpenMeterClient.EnsureFeature(ctx, feature)
+		if err != nil {
 			return r.openMeterFailed(ctx, logger, offer, fmt.Errorf("ensure feature %q: %w", feature.Key, err))
 		}
+		featureIDs[feature.Key] = f.Id
+	}
+	if err := mapping.setFeatureIDs(featureIDs); err != nil {
+		return r.openMeterFailed(ctx, logger, offer, err)
 	}
 
 	plan, err := r.OpenMeterClient.EnsurePlan(ctx, mapping.Plan)
@@ -264,8 +270,10 @@ func (r *OfferReconciler) setSyncedCondition(
 // reconcileDelete removes every version of the Offer's plan, then archives
 // the features they referenced that no other plan still uses. Feature GC
 // must follow plan deletion: before it, the Offer's own plan references the
-// features and nothing would be archived. Deleted versions are listed too,
-// so a retry after a partial failure still knows which features to collect.
+// features and nothing would be archived. OpenMeter's v3 API does not list
+// deleted versions, so when a retry finds the versions already deleted their
+// features stay active; the MeterDefinition finalizer archives them before
+// deleting the meter.
 func (r *OfferReconciler) reconcileDelete(
 	ctx context.Context,
 	logger logr.Logger,
@@ -276,7 +284,7 @@ func (r *OfferReconciler) reconcileDelete(
 		return ctrl.Result{}, nil
 	}
 
-	versions, err := r.OpenMeterClient.ListPlanVersions(ctx, planKey, true)
+	versions, err := r.OpenMeterClient.ListPlanVersions(ctx, planKey)
 	if err != nil {
 		// Never release the finalizer without knowing whether a published
 		// plan exists: it would stay assignable with no Offer behind it.
@@ -289,13 +297,13 @@ func (r *OfferReconciler) reconcileDelete(
 		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 
-	var featureKeys []string
+	var featureIDs []string
 	seen := map[string]struct{}{}
 	for _, v := range versions {
-		for _, key := range openmeter.PlanFeatureKeys(v) {
-			if _, dup := seen[key]; !dup {
-				seen[key] = struct{}{}
-				featureKeys = append(featureKeys, key)
+		for _, id := range openmeter.PlanFeatureIDs(v) {
+			if _, dup := seen[id]; !dup {
+				seen[id] = struct{}{}
+				featureIDs = append(featureIDs, id)
 			}
 		}
 	}
@@ -322,7 +330,7 @@ func (r *OfferReconciler) reconcileDelete(
 		deleted++
 	}
 
-	if err := r.OpenMeterClient.ArchiveFeaturesIfUnreferenced(ctx, featureKeys); err != nil {
+	if err := r.OpenMeterClient.ArchiveFeaturesIfUnreferenced(ctx, featureIDs); err != nil {
 		if !openmeter.IsPermanent(err) {
 			logger.Info("archive features failed; requeueing", "err", err.Error())
 			r.event(offer, "Warning", EventReasonDeleteFailed, fmt.Sprintf("archive features: %v", err))

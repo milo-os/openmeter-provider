@@ -1,8 +1,8 @@
 # One usage price per meter. The displayName is what the customer reads on
 # the Stripe invoice: OpenMeter titles each line
 # "<displayName>: usage in period (<quantity> x <unit price>)".
-# Lines: 25 x $0.04 + 50 x $0.02 + 10 x $0.09 = $2.90 (Stripe charges at
-# least $0.50 per invoice).
+# Lines: 25 x $0.04 + 50 x $0.02 + 10 x $0.09 + 50 x $0.01 = $3.40 (Stripe
+# charges at least $0.50 per invoice).
 apiVersion: billing.miloapis.com/v1alpha1
 kind: ServicePricing
 metadata:
@@ -44,3 +44,23 @@ spec:
   serviceRef: networking.miloapis.com
   rates:
     - flat: "0.09"
+---
+# Memory is metered in byte-seconds and priced per GiB-second: the usage is
+# converted before the rate applies, so the invoice line reads 50 (GiB-s)
+# x $0.01, not 53687091200 byte-seconds x a per-byte price.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-memory
+spec:
+  displayName: "Compute: memory GiB-seconds"
+  chargeType: Usage
+  currency: USD
+  metric: inv-memory-byte-seconds
+  pricingUnit: GiB-second
+  unitConversion:
+    meterUnitsPerPricingUnit: "1073741824"
+    description: "Memory is metered in byte-seconds and priced per GiB-second; 1 GiB = 2^30 bytes"
+  serviceRef: compute.miloapis.com
+  rates:
+    - flat: "0.01"

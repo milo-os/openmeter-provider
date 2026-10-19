@@ -18,13 +18,17 @@ OM_API="http://openmeter-api.openmeter-system.svc.cluster.local/api/v1"
 
 # What the customer is billed for, one invoice line each:
 #   meter (event type) | OpenMeter meter slug | line name (ServicePricing
-#   displayName) | units published | line total (USD)
+#   displayName) | units published | units billed, in the ServicePricing's
+#   pricingUnit | unit price (USD) | line total (USD)
+# Memory is published in byte-seconds and billed per GiB-second (its
+# ServicePricing's unitConversion); the others are billed as published.
 LINES=(
-  "inv-vcpu-hours|inv_vcpu_hours|Compute: vCPU hours|25|1.00"
-  "inv-storage-gb-months|inv_storage_gb_months|Block storage: GB-months|50|1.00"
-  "inv-egress-gb|inv_egress_gb|Network egress: GB|10|0.90"
+  "inv-vcpu-hours|inv_vcpu_hours|Compute: vCPU hours|25|25|0.04|1.00"
+  "inv-storage-gb-months|inv_storage_gb_months|Block storage: GB-months|50|50|0.02|1.00"
+  "inv-egress-gb|inv_egress_gb|Network egress: GB|10|10|0.09|0.90"
+  "inv-memory-byte-seconds|inv_memory_byte_seconds|Compute: memory GiB-seconds|53687091200|50|0.01|0.50"
 )
-INVOICE_TOTAL=2.90
+INVOICE_TOTAL=3.40
 
 # The API version stripe-go v80 (OpenMeter v1.0.0-beta.232) is pinned to.
 # Objects fetched for the relayed webhook are rendered in it.

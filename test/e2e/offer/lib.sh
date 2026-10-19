@@ -7,7 +7,7 @@
 # goes through a long-lived busybox pod (QUERY_POD) via `kubectl exec`.
 # Assertions never depend on generated feature or rate card keys: features
 # are resolved through the plan's rate cards and identified by their
-# meter and filters, flat fees by their service-pricing metadata.
+# meter and filters, flat fees by the ServicePricing their description names.
 
 OM_API="http://openmeter-api.openmeter-system.svc.cluster.local/api/v1"
 
@@ -57,10 +57,10 @@ usage_cards() {
 }
 
 # flat_card PLAN_JSON SERVICE_PRICING — the flat-fee card built from the
-# named ServicePricing.
+# named ServicePricing (its description is "ServicePricing <name> (...)").
 flat_card() {
   echo "$1" | jq -c --arg sp "$2" \
-    '.phases[0].rateCards[] | select(.type == "flat_fee" and .metadata["miloapis.com/service-pricing"] == $sp)'
+    '.phases[0].rateCards[] | select(.type == "flat_fee" and (.description // "" | startswith("ServicePricing " + $sp + " ")))'
 }
 
 # fail MESSAGE [JSON] — print and exit 1.

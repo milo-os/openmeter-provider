@@ -14,6 +14,7 @@ import (
 	"time"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
+	omv3 "github.com/openmeterio/openmeter/api/v3"
 )
 
 // serveSubscriptions emulates OpenMeter's subscription lifecycle closely
@@ -25,7 +26,9 @@ import (
 //     change/migrate only from active, continue only from canceled, delete
 //     only when scheduled);
 //   - next_billing_cycle ends the current subscription in 30 days and
-//     schedules its successor then; immediate ends it now.
+//     schedules its successor then; immediate ends it now;
+//   - v1 change and migrate refuse a target plan that converts usage, which
+//     only the v3 change route (immediate) accepts. It keeps no metadata.
 //
 // Statuses are stored, not computed from time.
 func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) bool {
@@ -51,6 +54,38 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 		writeJSON(http.StatusOK, om.SubscriptionPaginatedResponse{
 			Items: subs[start:end], Page: page, PageSize: pageSize, TotalCount: len(subs),
 		})
+		return true
+	}
+
+	if strings.HasPrefix(r.URL.Path, "/api/v3/openmeter/subscriptions/") && strings.HasSuffix(r.URL.Path, "/change") {
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v3/openmeter/subscriptions/"), "/change")
+		sub, ok := f.subscriptions[id]
+		if !ok {
+			problem(http.StatusNotFound, "subscription not found")
+			return true
+		}
+		if sub.Status != om.SubscriptionStatusActive {
+			problem(http.StatusForbidden, fmt.Sprintf("transition not allowed in state %s", sub.Status))
+			return true
+		}
+		var body omv3.BillingSubscriptionChange
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Plan.Key == nil || body.Plan.Version == nil {
+			problem(http.StatusBadRequest, "bad body")
+			return true
+		}
+		if e, err := body.Timing.AsBillingSubscriptionEditTimingEnum(); err != nil || e != omv3.BillingSubscriptionEditTimingEnumImmediate {
+			problem(http.StatusBadRequest, "only immediate timing is emulated")
+			return true
+		}
+		plan, ok := f.planVersion(*body.Plan.Key, *body.Plan.Version)
+		if !ok || plan.Status != omv3.BillingPlanStatusActive {
+			problem(http.StatusBadRequest, "plan is not active")
+			return true
+		}
+		f.v3Changes++
+		f.endSubscription(&sub, false)
+		next := f.newSubscription(sub.CustomerId, plan, om.SubscriptionStatusActive, time.Now(), nil)
+		writeJSON(http.StatusOK, map[string]any{"current": map[string]string{"id": sub.Id}, "next": map[string]string{"id": next.Id}})
 		return true
 	}
 
@@ -136,6 +171,10 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 			problem(http.StatusBadRequest, "plan is not active")
 			return true
 		}
+		if planHasUnitConfig(plan) {
+			problem(http.StatusBadRequest, "unit_config is not representable in v1")
+			return true
+		}
 		f.endSubscription(&sub, false)
 		next := f.newSubscription(sub.CustomerId, plan, om.SubscriptionStatusActive, time.Now(), body.Metadata)
 		writeJSON(http.StatusOK, om.SubscriptionChangeResponseBody{Current: sub, Next: om.SubscriptionExpanded{Id: next.Id}})
@@ -147,7 +186,7 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 		}
 		var body om.MigrateSubscriptionJSONBody
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		var plan om.Plan
+		var plan omv3.BillingPlan
 		found := false
 		for _, p := range f.plans {
 			if p.Key == sub.Plan.Key && body.TargetVersion != nil && p.Version == *body.TargetVersion && p.DeletedAt == nil {
@@ -160,6 +199,9 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 			return true
 		case plan.Version <= sub.Plan.Version:
 			problem(http.StatusBadRequest, "already at version")
+			return true
+		case planHasUnitConfig(plan):
+			problem(http.StatusBadRequest, "unit_config is not representable in v1")
 			return true
 		}
 		nextCycle := timingIsNextCycle(body.Timing)
@@ -212,7 +254,7 @@ func timingIsNextCycle(t *om.SubscriptionTiming) bool {
 	return err == nil && e == om.SubscriptionTimingEnumNextBillingCycle
 }
 
-func (f *fakeServer) newSubscription(customerID string, plan om.Plan, status om.SubscriptionStatus, from time.Time, metadata *om.Metadata) om.Subscription {
+func (f *fakeServer) newSubscription(customerID string, plan omv3.BillingPlan, status om.SubscriptionStatus, from time.Time, metadata *om.Metadata) om.Subscription {
 	f.subscriptionSeq++
 	f.subscriptionWrites++
 	sub := om.Subscription{
@@ -258,13 +300,22 @@ func (f *fakeServer) liveSubscription(customerID string) bool {
 	return false
 }
 
-func (f *fakeServer) activePlan(key string) (om.Plan, bool) {
+func (f *fakeServer) activePlan(key string) (omv3.BillingPlan, bool) {
 	for _, p := range f.plans {
-		if p.Key == key && p.Status == om.PlanStatusActive && p.DeletedAt == nil {
+		if p.Key == key && p.Status == omv3.BillingPlanStatusActive && p.DeletedAt == nil {
 			return p, true
 		}
 	}
-	return om.Plan{}, false
+	return omv3.BillingPlan{}, false
+}
+
+func (f *fakeServer) planVersion(key string, version int) (omv3.BillingPlan, bool) {
+	for _, p := range f.plans {
+		if p.Key == key && p.Version == version && p.DeletedAt == nil {
+			return p, true
+		}
+	}
+	return omv3.BillingPlan{}, false
 }
 
 // customerSubscriptions lists a customer's subscriptions newest first, like
@@ -299,21 +350,34 @@ func (f *fakeServer) seedCustomer(key string) {
 }
 
 // seedPlanVersion stores a plan version with the given status.
-func (f *fakeServer) seedPlanVersion(key string, version int, status om.PlanStatus) {
+func (f *fakeServer) seedPlanVersion(key string, version int, status omv3.BillingPlanStatus) {
 	f.planSeq++
 	id := fmt.Sprintf("plan-%d", f.planSeq)
-	f.plans[id] = om.Plan{Id: id, Key: key, Name: key, Version: version, Status: status}
+	f.plans[id] = omv3.BillingPlan{Id: id, Key: key, Name: key, Version: version, Status: status}
 }
 
 // publishPlanVersion archives the active version of key and activates version.
 func (f *fakeServer) publishPlanVersion(key string, version int) {
 	for id, p := range f.plans {
-		if p.Key == key && p.Status == om.PlanStatusActive {
-			p.Status = om.PlanStatusArchived
+		if p.Key == key && p.Status == omv3.BillingPlanStatusActive {
+			p.Status = omv3.BillingPlanStatusArchived
 			f.plans[id] = p
 		}
 	}
-	f.seedPlanVersion(key, version, om.PlanStatusActive)
+	f.seedPlanVersion(key, version, omv3.BillingPlanStatusActive)
+}
+
+// convertUsage gives every version of key a rate card that converts usage.
+func (f *fakeServer) convertUsage(key string) {
+	for id, p := range f.plans {
+		if p.Key == key {
+			p.Phases = []omv3.BillingPlanPhase{{Key: "default", Name: "default", RateCards: []omv3.BillingRateCard{{
+				Key: "memory", Name: "memory",
+				UnitConfig: &omv3.BillingUnitConfig{Operation: omv3.BillingUnitConfigOperationDivide, ConversionFactor: "1073741824"},
+			}}}}
+			f.plans[id] = p
+		}
+	}
 }
 
 func desiredSub(planKey string) DesiredSubscription {
@@ -487,7 +551,7 @@ func TestNextSubscriptionStep(t *testing.T) {
 func TestEnsureSubscription_CreatesThenConverges(t *testing.T) {
 	c, f := newTestClient(t)
 	f.seedCustomer("cust")
-	f.seedPlanVersion("p", 1, om.PlanStatusActive)
+	f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
 
 	state, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
 	if err != nil {
@@ -512,8 +576,8 @@ func TestEnsureSubscription_CreatesThenConverges(t *testing.T) {
 func TestEnsureSubscription_ChangesPlanImmediately(t *testing.T) {
 	c, f := newTestClient(t)
 	f.seedCustomer("cust")
-	f.seedPlanVersion("p", 1, om.PlanStatusActive)
-	f.seedPlanVersion("q", 1, om.PlanStatusActive)
+	f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+	f.seedPlanVersion("q", 1, omv3.BillingPlanStatusActive)
 	if _, err := c.EnsureSubscription(context.Background(), desiredSub("p")); err != nil {
 		t.Fatalf("subscribe to p: %v", err)
 	}
@@ -536,7 +600,7 @@ func TestEnsureSubscription_ChangesPlanImmediately(t *testing.T) {
 func TestEnsureSubscription_MigratesNewVersionImmediately(t *testing.T) {
 	c, f := newTestClient(t)
 	f.seedCustomer("cust")
-	f.seedPlanVersion("p", 1, om.PlanStatusActive)
+	f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
 	if _, err := c.EnsureSubscription(context.Background(), desiredSub("p")); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
@@ -567,13 +631,83 @@ func TestEnsureSubscription_MigratesNewVersionImmediately(t *testing.T) {
 	}
 }
 
+// TestEnsureSubscription_UnitConversionGoesThroughV3: OpenMeter's v1 API
+// refuses to change or migrate a subscription onto a plan that converts
+// usage, so both go through v3 (which keeps no metadata). Creating one
+// still goes through v1 and keeps it.
+func TestEnsureSubscription_UnitConversionGoesThroughV3(t *testing.T) {
+	t.Run("create keeps v1", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.seedCustomer("cust")
+		f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+		f.convertUsage("p")
+		state, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
+		if err != nil {
+			t.Fatalf("EnsureSubscription: %v", err)
+		}
+		if f.v3Changes != 0 || state.Current.Metadata == nil {
+			t.Errorf("v3 changes = %d, metadata = %v; want a v1 create with metadata", f.v3Changes, state.Current.Metadata)
+		}
+	})
+
+	t.Run("change onto a converting plan", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.seedCustomer("cust")
+		f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+		f.seedPlanVersion("q", 1, omv3.BillingPlanStatusActive)
+		f.convertUsage("q")
+		if _, err := c.EnsureSubscription(context.Background(), desiredSub("p")); err != nil {
+			t.Fatalf("subscribe to p: %v", err)
+		}
+		state, err := c.EnsureSubscription(context.Background(), desiredSub("q"))
+		if err != nil {
+			t.Fatalf("switch to q: %v", err)
+		}
+		if state.Current.Plan.Key != "q" || f.v3Changes != 1 {
+			t.Fatalf("current = %s, v3 changes = %d; want q through v3", state.Current.Plan.Key, f.v3Changes)
+		}
+		if got, want := f.subsByStatus("cust"), []string{"inactive:p@1", "active:q@1"}; !equalStrings(got, want) {
+			t.Errorf("subscriptions = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("migrate onto a converting version", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.seedCustomer("cust")
+		f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+		if _, err := c.EnsureSubscription(context.Background(), desiredSub("p")); err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		f.publishPlanVersion("p", 2)
+		f.convertUsage("p")
+		state, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
+		if err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		if state.Current.Plan.Version != 2 || f.v3Changes != 1 {
+			t.Fatalf("current = v%d, v3 changes = %d; want v2 through v3", state.Current.Plan.Version, f.v3Changes)
+		}
+		if got, want := f.subsByStatus("cust"), []string{"inactive:p@1", "active:p@2"}; !equalStrings(got, want) {
+			t.Errorf("subscriptions = %v, want %v", got, want)
+		}
+
+		writes := f.subscriptionWrites
+		if _, err := c.EnsureSubscription(context.Background(), desiredSub("p")); err != nil {
+			t.Fatalf("second EnsureSubscription: %v", err)
+		}
+		if f.subscriptionWrites != writes {
+			t.Errorf("converged subscription issued %d more writes", f.subscriptionWrites-writes)
+		}
+	})
+}
+
 // scheduleExternalMigration reproduces a next-billing-cycle migration made in
 // OpenMeter directly (this client never schedules one): the subscription is
 // canceled at the end of the cycle with its successor scheduled then.
 func scheduleExternalMigration(t *testing.T, f *fakeServer, subID string, version int) {
 	t.Helper()
 	sub := f.subscriptions[subID]
-	var plan om.Plan
+	var plan omv3.BillingPlan
 	for _, p := range f.plans {
 		if p.Key == sub.Plan.Key && p.Version == version {
 			plan = p
@@ -589,7 +723,7 @@ func scheduleExternalMigration(t *testing.T, f *fakeServer, subID string, versio
 func TestEnsureSubscription_ExternalPendingMigrationIsConverged(t *testing.T) {
 	c, f := newTestClient(t)
 	f.seedCustomer("cust")
-	f.seedPlanVersion("p", 1, om.PlanStatusActive)
+	f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
 	state, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -613,8 +747,8 @@ func TestEnsureSubscription_ExternalPendingMigrationIsConverged(t *testing.T) {
 func TestEnsureSubscription_SwitchDuringPendingMigration(t *testing.T) {
 	c, f := newTestClient(t)
 	f.seedCustomer("cust")
-	f.seedPlanVersion("p", 1, om.PlanStatusActive)
-	f.seedPlanVersion("q", 1, om.PlanStatusActive)
+	f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+	f.seedPlanVersion("q", 1, omv3.BillingPlanStatusActive)
 	state, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -638,7 +772,7 @@ func TestEnsureSubscription_SwitchDuringPendingMigration(t *testing.T) {
 func TestEnsureSubscription_RestoresExternallyCanceled(t *testing.T) {
 	c, f := newTestClient(t)
 	f.seedCustomer("cust")
-	f.seedPlanVersion("p", 1, om.PlanStatusActive)
+	f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
 	state, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -664,7 +798,7 @@ func TestEnsureSubscription_Errors(t *testing.T) {
 	}{
 		{
 			name:    "missing customer",
-			setup:   func(f *fakeServer) { f.seedPlanVersion("p", 1, om.PlanStatusActive) },
+			setup:   func(f *fakeServer) { f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive) },
 			desired: desiredSub("p"),
 			check: func(t *testing.T, err error) {
 				if !errors.Is(err, ErrCustomerNotFound) {
@@ -676,7 +810,7 @@ func TestEnsureSubscription_Errors(t *testing.T) {
 			name: "plan only has a draft",
 			setup: func(f *fakeServer) {
 				f.seedCustomer("cust")
-				f.seedPlanVersion("p", 1, om.PlanStatusDraft)
+				f.seedPlanVersion("p", 1, omv3.BillingPlanStatusDraft)
 			},
 			desired: desiredSub("p"),
 			check: func(t *testing.T, err error) {
@@ -689,7 +823,7 @@ func TestEnsureSubscription_Errors(t *testing.T) {
 			name: "customer cannot be invoiced",
 			setup: func(f *fakeServer) {
 				f.seedCustomer("cust")
-				f.seedPlanVersion("p", 1, om.PlanStatusActive)
+				f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
 				f.billingNotReady = true
 			},
 			desired: desiredSub("p"),
@@ -732,7 +866,7 @@ func TestCancelSubscriptions(t *testing.T) {
 	t.Run("active is canceled immediately", func(t *testing.T) {
 		c, f := newTestClient(t)
 		f.seedCustomer("cust")
-		f.seedPlanVersion("p", 1, om.PlanStatusActive)
+		f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
 		if _, err := c.EnsureSubscription(context.Background(), desiredSub("p")); err != nil {
 			t.Fatalf("subscribe: %v", err)
 		}
@@ -747,7 +881,7 @@ func TestCancelSubscriptions(t *testing.T) {
 	t.Run("pending migration is ended entirely", func(t *testing.T) {
 		c, f := newTestClient(t)
 		f.seedCustomer("cust")
-		f.seedPlanVersion("p", 1, om.PlanStatusActive)
+		f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
 		state, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
 		if err != nil {
 			t.Fatalf("subscribe: %v", err)
