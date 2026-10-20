@@ -19,3 +19,5 @@ spec:
       namespace: openmeter-system
     - name: inv-memory
       namespace: openmeter-system
+    - name: inv-egress-tiered
+      namespace: openmeter-system

@@ -19,16 +19,31 @@ OM_API="http://openmeter-api.openmeter-system.svc.cluster.local/api/v1"
 # What the customer is billed for, one invoice line each:
 #   meter (event type) | OpenMeter meter slug | line name (ServicePricing
 #   displayName) | units published | units billed, in the ServicePricing's
-#   pricingUnit | unit price (USD) | line total (USD)
-# Memory is published in byte-seconds and billed per GiB-second (its
+#   pricingUnit | price (USD) | line total (USD)
+# The price is a unit price, or for tiered pricing each tier's billed units
+# and unit price ("2x0,3x0.10,3x0.05"). Memory is published in byte-seconds
+# and billed per GiB-second, tiered egress in bytes and billed per GiB (their
 # ServicePricing's unitConversion); the others are billed as published.
 LINES=(
   "inv-vcpu-hours|inv_vcpu_hours|Compute: vCPU hours|25|25|0.04|1.00"
   "inv-storage-gb-months|inv_storage_gb_months|Block storage: GB-months|50|50|0.02|1.00"
   "inv-egress-gb|inv_egress_gb|Network egress: GB|10|10|0.09|0.90"
   "inv-memory-byte-seconds|inv_memory_byte_seconds|Compute: memory GiB-seconds|53687091200|50|0.01|0.50"
+  "inv-egress-bytes|inv_egress_bytes|Network egress: GiB, tiered|8589934592|8|2x0,3x0.10,3x0.05|0.45"
 )
-INVOICE_TOTAL=3.40
+INVOICE_TOTAL=3.85
+
+# price_tiers BILLED PRICE — the line's price as a JSON array of
+# {quantity, price}, one per tier (a unit price is one tier).
+price_tiers() {
+  local billed=$1 price=$2
+  case "$price" in
+    *x*) ;;
+    *) price="${billed}x${price}" ;;
+  esac
+  echo "$price" | tr ',' '\n' | jq -R -s -c \
+    'split("\n") | map(select(. != "") | split("x") | {quantity: (.[0] | tonumber), price: (.[1] | tonumber)})'
+}
 
 # The API version stripe-go v80 (OpenMeter v1.0.0-beta.232) is pinned to.
 # Objects fetched for the relayed webhook are rendered in it.
