@@ -1,8 +1,8 @@
 # One usage price per meter. The displayName is what the customer reads on
 # the Stripe invoice: OpenMeter titles each line
 # "<displayName>: usage in period (<quantity> x <unit price>)".
-# Lines: 25 x $0.04 + 50 x $0.02 + 10 x $0.09 + 50 x $0.01 = $3.40 (Stripe
-# charges at least $0.50 per invoice).
+# Lines: 25 x $0.04 + 50 x $0.02 + 10 x $0.09 + 50 x $0.01 + 8 GiB in tiers
+# ($0.45) = $3.85 (Stripe charges at least $0.50 per invoice).
 apiVersion: billing.miloapis.com/v1alpha1
 kind: ServicePricing
 metadata:
@@ -64,3 +64,28 @@ spec:
   serviceRef: compute.miloapis.com
   rates:
     - flat: "0.01"
+---
+# Egress is metered in bytes and priced per GiB in graduated tiers: the usage
+# is converted first, so the tier bounds are in GiB. 8 GiB bill as 2 free,
+# 3 x $0.10 and 3 x $0.05 = $0.45, not as 8589934592 bytes past the first 2.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-egress-tiered
+spec:
+  displayName: "Network egress: GiB, tiered"
+  chargeType: Usage
+  currency: USD
+  metric: inv-egress-bytes
+  pricingUnit: GiB
+  unitConversion:
+    meterUnitsPerPricingUnit: "1073741824"
+    description: "Egress is metered in bytes and priced per GiB; 1 GiB = 2^30 bytes"
+  serviceRef: networking.miloapis.com
+  rates:
+    - tiered:
+        - upTo: "2"
+          rate: "0"
+        - upTo: "5"
+          rate: "0.10"
+        - rate: "0.05"

@@ -51,23 +51,25 @@ num_eq "$total" "$want_total" || fail "invoice total is ${total}, want ${want_to
 echo "OK: invoice ${id} ${status}, total ${total} ${currency}, Stripe invoice ${stripe_invoice_id}"
 
 # One line per ServicePricing, titled with its displayName, billing the usage
-# in the ServicePricing's pricingUnit at its rate: the quantity is the
-# published usage converted, and the unit price is the Offer's, unchanged.
-# OpenMeter only sets meteredQuantity (the usage as published) on lines that
-# convert; on the others it is the quantity itself.
+# in the ServicePricing's pricingUnit at its rates: the quantity is the
+# published usage converted, and each tier (one for a unit price) bills its
+# share of it at the Offer's price, unchanged. OpenMeter only sets
+# meteredQuantity (the usage as published) on lines that convert; on the
+# others it is the quantity itself.
 for line in "${LINES[@]}"; do
   IFS='|' read -r _ _ name published billed rate line_total <<<"$line"
   got=$(echo "$invoice" | jq -c --arg n "$name" '[.lines[]? | select(.name == $n)] | if length == 1 then .[0] else null end')
   [ "$got" != "null" ] || fail "invoice has no single line \"${name}\"" "$(echo "$invoice" | jq -c '[.lines[]? | .name]')"
-  summary=$(echo "$got" | jq -c '{quantity, meteredQuantity, total: .totals.total, perUnit: [.children[]? | .perUnitAmount]}')
+  summary=$(echo "$got" | jq -c '{quantity, meteredQuantity, total: .totals.total, tiers: [.children[]? | {name, quantity, perUnitAmount}]}')
   num_eq "$(echo "$got" | jq -r .totals.total)" "$line_total" ||
     fail "invoice line \"${name}\" total, want ${line_total}" "$summary"
   num_eq "$(echo "$got" | jq -r .quantity)" "$billed" ||
     fail "invoice line \"${name}\" quantity, want ${billed} in the pricing unit" "$summary"
   num_eq "$(echo "$got" | jq -r '.meteredQuantity // .quantity')" "$published" ||
     fail "invoice line \"${name}\" metered quantity, want the ${published} units published" "$summary"
-  echo "$got" | jq -e --arg r "$rate" '[.children[]? | .perUnitAmount | tonumber] == [$r | tonumber]' >/dev/null ||
-    fail "invoice line \"${name}\" unit price, want ${rate} as in the Offer" "$summary"
+  echo "$got" | jq -e --argjson want "$(price_tiers "$billed" "$rate")" \
+    '[.children[]? | {quantity: (.quantity | tonumber), price: (.perUnitAmount | tonumber)}] | sort == ($want | sort)' >/dev/null ||
+    fail "invoice line \"${name}\" prices, want ${rate} (units x price per tier) as in the Offer" "$summary"
 done
 echo "OK: invoice has the ${#LINES[@]} lines: $(echo "$invoice" | jq -c '[.lines[]? | "\(.name) \(.totals.total)"]')"
 
@@ -87,14 +89,21 @@ esac
 echo "OK: Stripe invoice ${stripe_invoice_id} is ${s_status} for ${s_total} cents, customer ${s_customer}"
 
 # What the customer reads on the Stripe invoice: OpenMeter titles each line
-# "<displayName>: usage in period (<quantity> x <unit price>)", the quantity
-# in the ServicePricing's pricingUnit (the unit price is checked above).
+# "<displayName>: usage in period (<quantity> x <unit price>)", or one line
+# per tier, "<displayName>: usage price for tier <n> (<quantity> x <unit
+# price>)", the quantity in the ServicePricing's pricingUnit (the prices are
+# checked above). A displayName's lines add up to its line total.
 slines=$(stripe GET "/invoices/${stripe_invoice_id}/lines?limit=100" | jq -c '[.data[]? | {description, amount}]')
 for line in "${LINES[@]}"; do
-  IFS='|' read -r _ _ name _ billed _ line_total <<<"$line"
+  IFS='|' read -r _ _ name _ billed rate line_total <<<"$line"
   cents=$(awk -v t="$line_total" 'BEGIN { printf "%d", t * 100 + 0.5 }')
-  echo "$slines" | jq -e --arg p "${name}: usage in period (${billed} x " --argjson c "$cents" \
-    'map(select((.description | startswith($p)) and .amount == $c)) | length == 1' >/dev/null ||
-    fail "Stripe invoice has no line \"${name}: usage in period (${billed} x ...)\" for ${cents} cents" "$slines"
+  echo "$slines" | jq -e --arg p "${name}: " --argjson c "$cents" \
+    'map(select(.description | startswith($p)) | .amount) | add == $c' >/dev/null ||
+    fail "Stripe invoice lines for \"${name}\" don't add up to ${cents} cents" "$slines"
+  for tier in $(price_tiers "$billed" "$rate" | jq -r '.[] | select(.price > 0) | .quantity'); do
+    echo "$slines" | jq -e --arg p "${name}: " --arg q "(${tier} x " \
+      'map(select((.description | startswith($p)) and (.description | contains($q)))) | length >= 1' >/dev/null ||
+      fail "Stripe invoice has no line \"${name}: ... (${tier} x ...)\"" "$slines"
+  done
 done
 echo "OK: Stripe invoice lines: $(echo "$slines" | jq -c 'map(.description)')"

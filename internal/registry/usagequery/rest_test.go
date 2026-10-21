@@ -168,6 +168,7 @@ func world(t *testing.T) client.Reader {
 		meterDefinition("egress-gb", billingv1alpha1.MeterAggregationSum, billingv1alpha1.PhasePublished, egressRegion),
 		meterDefinition("old-meter", billingv1alpha1.MeterAggregationSum, billingv1alpha1.PhaseDeprecated),
 		meterDefinition("draft-meter", billingv1alpha1.MeterAggregationSum, billingv1alpha1.PhaseDraft),
+		meterDefinition("retired-meter", billingv1alpha1.MeterAggregationSum, billingv1alpha1.PhaseRetired),
 	).Build()
 }
 
@@ -447,6 +448,8 @@ func TestCreate_InvalidSpec(t *testing.T) {
 }
 
 func TestCreate_Meters(t *testing.T) {
+	// Retired meters accept no more usage and draft ones none yet, so they
+	// are left out unless asked for (next case).
 	t.Run("every published and deprecated meter, by name", func(t *testing.T) {
 		r := NewREST(world(t), &fakeOpenMeter{customers: everyCustomer()})
 		got, err := create(t, inParent("Organization", "acme"), r, baseQuery())
@@ -458,6 +461,23 @@ func TestCreate_Meters(t *testing.T) {
 			names = append(names, m.MeterDefinition)
 		}
 		if want := []string{"cpu-hours", "egress-gb", "old-meter", "peak-storage"}; !slices.Equal(names, want) {
+			t.Errorf("meters = %v, want %v", names, want)
+		}
+	})
+
+	t.Run("a retired or draft meter is read only when named", func(t *testing.T) {
+		r := NewREST(world(t), &fakeOpenMeter{customers: everyCustomer()})
+		q := baseQuery()
+		q.Spec.Meters = []string{"retired-meter", "draft-meter"}
+		got, err := create(t, inParent("Organization", "acme"), r, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, m := range got.Status.Meters {
+			names = append(names, m.MeterDefinition)
+		}
+		if want := []string{"retired-meter", "draft-meter"}; !slices.Equal(names, want) {
 			t.Errorf("meters = %v, want %v", names, want)
 		}
 	})

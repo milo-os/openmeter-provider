@@ -1,4 +1,4 @@
-# Four meters, one per thing the customer pays for, so the invoice has one
+# Five meters, one per thing the customer pays for, so the invoice has one
 # line each.
 apiVersion: billing.miloapis.com/v1alpha1
 kind: MeterDefinition
@@ -67,5 +67,24 @@ spec:
   billing:
     consumedUnit: By.s
     pricingUnit: By.s
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource
+---
+# Measured in bytes, priced per GiB in graduated tiers
+# (servicepricing.yaml inv-egress-tiered converts it).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: inv-egress-bytes
+spec:
+  meterName: inv-egress-bytes
+  phase: Published
+  displayName: "Network egress bytes"
+  measurement:
+    aggregation: Sum
+    unit: By
+  billing:
+    consumedUnit: By
+    pricingUnit: By
   monitoredResourceTypes:
     - e2e.miloapis.com/Resource
