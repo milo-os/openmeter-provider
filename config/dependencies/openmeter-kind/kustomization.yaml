@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Extends the production OpenMeter dependency to fit a single-node kind
+# cluster (local dev and the CI e2e runner's 4 CPUs). The bundled Kafka's
+# three controllers request 500m each under the chart's default preset and
+# Redis runs three replicas nobody reads from, which together left the node
+# without CPU to schedule openmeter-provider itself. Limits stay as they are.
+resources:
+  - ../openmeter
+
+patches:
+  - patch: |-
+      - op: add
+        path: /spec/values/kafka/controller
+        value:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 750m
+              memory: 768Mi
+      - op: add
+        path: /spec/values/redis/replica
+        value:
+          replicaCount: 1
+    target:
+      kind: HelmRelease
+      name: openmeter
