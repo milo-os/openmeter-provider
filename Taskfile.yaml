@@ -510,7 +510,7 @@ tasks:
         echo "📦 Installing OpenMeter..."
 
         echo "Applying OpenMeter resources..."
-        task test-infra:kubectl -- apply -k config/dependencies/openmeter
+        task test-infra:kubectl -- apply -k config/dependencies/openmeter-kind
 
         echo "Waiting for OpenMeter namespace to be created..."
         task test-infra:kubectl -- wait --for=jsonpath='{.status.phase}'=Active namespace/openmeter-system --timeout=1000s 2>/dev/null || echo "⚠️  Namespace not ready yet"
