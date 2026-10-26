@@ -104,7 +104,7 @@ stripe_invoice_page() {
   t=${t%%\?*}
   t=${t#*_}
   t=${t:0:$((${#t} / 4 * 4))}
-  printf '%s' "$t" | base64 -d 2>/dev/null | LC_ALL=C cut -d, -f1,2 | LC_ALL=C tr -cd '[:print:]'
+  printf '%s' "$t" | base64 -d 2>/dev/null | LC_ALL=C head -n 1 | LC_ALL=C cut -d, -f1,2 | LC_ALL=C tr -cd '[:print:]'
 }
 
 # customer_key — the BillingAccount UID (OpenMeter customer key).
