@@ -75,14 +75,11 @@ func (c *client) PlanUsageRateCards(ctx context.Context, planID string) ([]Usage
 			if err != nil {
 				return nil, fmt.Errorf("rate card %s: %w", rc.Key, err)
 			}
-			card := UsageRateCard{Key: rc.Key, MeterSlug: *feature.MeterSlug, Price: price}
-			if rc.Discounts != nil && rc.Discounts.Percentage != nil {
-				pct := float64(*rc.Discounts.Percentage)
-				card.Discounts = &productcatalog.Discounts{
-					Percentage: &productcatalog.PercentageDiscount{
-						Percentage: models.NewPercentage(pct),
-					},
-				}
+			card := UsageRateCard{
+				Key:       rc.Key,
+				MeterSlug: *feature.MeterSlug,
+				Price:     price,
+				Discounts: percentageDiscount(rc.Discounts),
 			}
 			if feature.AdvancedMeterGroupByFilters != nil {
 				card.Filters = *feature.AdvancedMeterGroupByFilters
@@ -177,6 +174,20 @@ func unitConfig(uc omv3.BillingUnitConfig) (*productcatalog.UnitConfig, error) {
 		out.Precision = *uc.Precision
 	}
 	return out, out.Validate()
+}
+
+// percentageDiscount converts a rate card's percentage discount into
+// OpenMeter's rating model, or nil when it has none. Only percentages are
+// read: the provider never writes usage discounts.
+func percentageDiscount(d *omv3.BillingRateCardDiscounts) *productcatalog.Discounts {
+	if d == nil || d.Percentage == nil {
+		return nil
+	}
+	return &productcatalog.Discounts{
+		Percentage: &productcatalog.PercentageDiscount{
+			Percentage: models.NewPercentage(float64(*d.Percentage)),
+		},
+	}
 }
 
 // UsageToPrice is usage of one rate card over part of one billing period.
