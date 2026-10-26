@@ -303,7 +303,7 @@ func TestPlanFeatureIDs(t *testing.T) {
 // TestPlanUsageRateCards reads a plan version's usage rate cards with what
 // pricing needs: the feature's meter and filters (archived features
 // included, since older versions may reference them), the price and the
-// unit conversion. Flat fees are left out.
+// unit conversion and the discount. Flat fees are left out.
 func TestPlanUsageRateCards(t *testing.T) {
 	c, f := newTestClient(t)
 	region := "us-east"
@@ -317,6 +317,8 @@ func TestPlanUsageRateCards(t *testing.T) {
 
 	memory := usageRateCard("memory", "memory")
 	memory.UnitConfig = &omv3.BillingUnitConfig{Operation: omv3.BillingUnitConfigOperationDivide, ConversionFactor: "1073741824"}
+	discount := float32(30)
+	memory.Discounts = &omv3.BillingRateCardDiscounts{Percentage: &discount}
 	fee := omv3.BillingRateCard{Key: "fee", Name: "fee"}
 	if err := fee.Price.FromBillingPriceFlat(omv3.BillingPriceFlat{Type: omv3.BillingPriceFlatTypeFlat, Amount: "5"}); err != nil {
 		t.Fatal(err)
@@ -340,8 +342,14 @@ func TestPlanUsageRateCards(t *testing.T) {
 	if mem.UnitConfig == nil || mem.UnitConfig.ConversionFactor.String() != "1073741824" {
 		t.Errorf("memory card unit config = %+v", mem.UnitConfig)
 	}
+	if mem.Discounts == nil || mem.Discounts.Percentage == nil || mem.Discounts.Percentage.Percentage.String() != "30%" {
+		t.Errorf("memory card discounts = %+v, want 30%%", mem.Discounts)
+	}
 	if cards[1].MeterSlug != "old_meter" {
 		t.Errorf("card on an archived feature = %+v", cards[1])
+	}
+	if cards[1].Discounts != nil {
+		t.Errorf("card without a discount has discounts = %+v", cards[1].Discounts)
 	}
 
 	if _, err := c.PlanUsageRateCards(context.Background(), "missing"); err == nil {

@@ -17,7 +17,7 @@ set -euo pipefail
 . ./lib.sh
 
 field=$1
-cache=/tmp/e2e-stripe-customer-invoice.env
+cache=$STRIPE_CUSTOMER_CACHE
 
 ci=$(kubectl create --dry-run=client -o json -f billingaccount.yaml | jq -c .spec.contactInfo)
 name=$(echo "$ci" | jq -r 'if (.businessName // "") != "" then .businessName else .name end')

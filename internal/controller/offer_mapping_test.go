@@ -705,6 +705,9 @@ func TestBuildOfferMapping_Discounts(t *testing.T) {
 			offer.Spec.ServicePricings[i].Discount = &billingv1alpha1.Discount{Percentage: 15}
 		}
 		m := mustMapping(t, offer)
+		if len(m.Plan.Phases[0].RateCards) == 0 {
+			t.Fatal("mapping has no rate cards to check")
+		}
 		for i, rc := range m.Plan.Phases[0].RateCards {
 			if rc.Discounts == nil || rc.Discounts.Percentage == nil {
 				t.Fatalf("rate card %d (%s) missing discount", i, rc.Key)
@@ -721,6 +724,9 @@ func TestBuildOfferMapping_Discounts(t *testing.T) {
 			offer.Spec.ServicePricings[i].Discount = &billingv1alpha1.Discount{Percentage: 100}
 		}
 		m := mustMapping(t, offer)
+		if len(m.Plan.Phases[0].RateCards) == 0 {
+			t.Fatal("mapping has no rate cards to check")
+		}
 		for i, rc := range m.Plan.Phases[0].RateCards {
 			if rc.Discounts == nil || rc.Discounts.Percentage == nil {
 				t.Fatalf("rate card %d (%s) missing discount", i, rc.Key)
@@ -737,6 +743,9 @@ func TestBuildOfferMapping_Discounts(t *testing.T) {
 			offer.Spec.ServicePricings[i].Discount = &billingv1alpha1.Discount{Percentage: 0}
 		}
 		m := mustMapping(t, offer)
+		if len(m.Plan.Phases[0].RateCards) == 0 {
+			t.Fatal("mapping has no rate cards to check")
+		}
 		for i, rc := range m.Plan.Phases[0].RateCards {
 			if rc.Discounts != nil {
 				t.Errorf("rate card %d (%s) has unexpected discount: %+v", i, rc.Key, rc.Discounts)

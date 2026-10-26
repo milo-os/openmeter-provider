@@ -58,9 +58,13 @@ echo "OK: invoice ${id} ${status}, total ${total} ${currency}, Stripe invoice ${
 # others it is the quantity itself.
 for line in "${LINES[@]}"; do
   IFS='|' read -r _ _ name published billed rate line_total discount_pct <<<"$line"
+  gross=$(price_tiers "$billed" "$rate" | jq -r 'map(.quantity * .price) | add')
+  want_discount=$(awk -v g="$gross" -v t="$line_total" 'BEGIN { printf "%.2f", g - t }')
+  num_eq "$line_total" "$(awk -v g="$gross" -v p="$discount_pct" 'BEGIN { printf "%.2f", g * (100 - p) / 100 }')" ||
+    fail "LINES: \"${name}\" total ${line_total} is not ${discount_pct}% off its list price ${gross}"
   got=$(echo "$invoice" | jq -c --arg n "$name" '[.lines[]? | select(.name == $n)] | if length == 1 then .[0] else null end')
   [ "$got" != "null" ] || fail "invoice has no single line \"${name}\"" "$(echo "$invoice" | jq -c '[.lines[]? | .name]')"
-  summary=$(echo "$got" | jq -c '{quantity, meteredQuantity, total: .totals.total, tiers: [.children[]? | {name, quantity, perUnitAmount}]}')
+  summary=$(echo "$got" | jq -c '{quantity, meteredQuantity, total: .totals.total, discountsTotal: .totals.discountsTotal, tiers: [.children[]? | {name, quantity, perUnitAmount}]}')
   num_eq "$(echo "$got" | jq -r .totals.total)" "$line_total" ||
     fail "invoice line \"${name}\" total, want ${line_total}" "$summary"
   num_eq "$(echo "$got" | jq -r .quantity)" "$billed" ||
@@ -71,19 +75,16 @@ for line in "${LINES[@]}"; do
     '[.children[]? | {quantity: (.quantity | tonumber), price: (.perUnitAmount | tonumber)}] | sort == ($want | sort)' >/dev/null ||
     fail "invoice line \"${name}\" prices, want ${rate} (units x price per tier) as in the Offer" "$summary"
 
-  # Explicitly verify discount calculations:
-  if [ "${discount_pct:-0}" -eq 100 ]; then
-    num_eq "$line_total" "0.00" || fail "100% discount line ${name} must be 0 pricing, got ${line_total}"
-    num_eq "$(echo "$got" | jq -r '.totals.total')" "0" || fail "100% discount line ${name} OpenMeter total must be 0"
-  elif [ "${discount_pct:-0}" -eq 30 ]; then
-    num_eq "$line_total" "0.70" || fail "30% discount line ${name} must be 0.70, got ${line_total}"
-    num_eq "$(echo "$got" | jq -r '.totals.total')" "0.70" || fail "30% discount line ${name} OpenMeter total must be 0.70"
-  fi
+  # The discount is the share of the list price (the tiers above, unchanged)
+  # the line's discount percentage takes off, and shows as the line's
+  # discountsTotal; the line total is what is left.
+  num_eq "$(echo "$got" | jq -r '.totals.discountsTotal // 0')" "$want_discount" ||
+    fail "invoice line \"${name}\" discounts total, want ${want_discount} (${discount_pct}% of ${gross})" "$summary"
 done
 echo "OK: invoice has the ${#LINES[@]} lines: $(echo "$invoice" | jq -c '[.lines[]? | "\(.name) \(.totals.total)"]')"
 
 # The Stripe invoice is what the customer is charged for.
-want_customer=$(kubectl get stripepaymentmethod e2e-inv-payment-method -n "$NS" -o jsonpath='{.status.stripeCustomerId}')
+want_customer=$(kubectl get stripepaymentmethod "$PAYMENT_METHOD" -n "$NS" -o jsonpath='{.status.stripeCustomerId}')
 want_cents=$(awk -v t="$want_total" 'BEGIN { printf "%d", t * 100 + 0.5 }')
 sinv=$(stripe GET "/invoices/${stripe_invoice_id}")
 s_status=$(echo "$sinv" | jq -r .status)
@@ -104,7 +105,7 @@ echo "OK: Stripe invoice ${stripe_invoice_id} is ${s_status} for ${s_total} cent
 # checked above). A displayName's lines add up to its line total.
 slines=$(stripe GET "/invoices/${stripe_invoice_id}/lines?limit=100" | jq -c '[.data[]? | {description, amount}]')
 for line in "${LINES[@]}"; do
-  IFS='|' read -r _ _ name _ billed rate line_total discount_pct <<<"$line"
+  IFS='|' read -r _ _ name _ billed rate line_total _ <<<"$line"
   cents=$(awk -v t="$line_total" 'BEGIN { printf "%d", t * 100 + 0.5 }')
   echo "$slines" | jq -e --arg p "${name}: " --argjson c "$cents" \
     'map(select(.description | startswith($p)) | .amount) | add == $c' >/dev/null ||

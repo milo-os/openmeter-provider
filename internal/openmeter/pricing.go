@@ -203,7 +203,8 @@ type UsageToPrice struct {
 var usageRater = ratingservice.New(ratingservice.Config{UnitConfigEnabled: true})
 
 // PriceUsage returns what u costs, the way OpenMeter prices it on an invoice
-// line, before taxes and credits. Discounts are applied, and report net of discount.
+// line, before taxes and credits, net of the rate card's discount. A minimum
+// commitment is not applied: u may cover only part of a billing period.
 //
 // OpenMeter's SimulateInvoice endpoint would do the same, but in
 // v1.0.0-beta.232 it creates lines without a line engine and prices every

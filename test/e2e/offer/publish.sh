@@ -40,7 +40,6 @@ if [ "$step" = "snapshot" ] || [ "$step" = "all" ]; then
       echo "publish.sh: ServicePricing ${ns}/${name} referenced by ${offer} not found"
       exit 1
     fi
-    ref_discount=$(echo "$refs" | jq -c ".[$i].discount // null")
     discount=$(echo "$refs" | jq -c --argjson od "$offer_discount" ".[$i].discount // \$od")
     if [ "$discount" != "null" ]; then
       snapshot=$(echo "$snapshot" | jq -c --argjson sp "$sp" --argjson disc "$discount" '. + [{name: $sp.metadata.name, spec: $sp.spec, discount: $disc}]')

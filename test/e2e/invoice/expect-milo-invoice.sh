@@ -1,11 +1,12 @@
 #!/bin/bash
-# expect-milo-invoice.sh PHASE — the BillingAccount controller projected the
-# OpenMeter invoice onto exactly one Milo Invoice, in PHASE, with its
+# expect-milo-invoice.sh [PHASE] — the BillingAccount controller projected the
+# OpenMeter invoice onto exactly one Milo Invoice, in PHASE (any phase when
+# omitted: Stripe settles an invoice that nets to 0 by itself), with its
 # amounts and a link to its Stripe invoice page (documentUri).
 set -euo pipefail
 . ./lib.sh
 
-want_phase=$1
+want_phase=${1:-any}
 
 invoice=$(the_invoice) || fail "expected exactly one OpenMeter invoice" "$(account_invoices)"
 id=$(echo "$invoice" | jq -r .id)
@@ -20,13 +21,17 @@ check() {
     jq -c --arg id "$id" '[.items[] | select(.metadata.annotations["openmeter.miloapis.com/invoiceId"] == $id)]')
   [ "$(echo "$matches" | jq 'length')" = "1" ] || return 1
   obj=$(echo "$matches" | jq -c '.[0]')
-  [ "$(echo "$obj" | jq -r .status.phase)" = "$want_phase" ] &&
-    [ -n "$(echo "$obj" | jq -r '.status.documentUri // empty')" ]
+  phase=$(echo "$obj" | jq -r .status.phase)
+  if [ "$want_phase" != "any" ] && [ "$phase" != "$want_phase" ]; then
+    return 1
+  fi
+  [ -n "$(echo "$obj" | jq -r '.status.documentUri // empty')" ]
 }
 
 retry 20 check || fail "no Milo Invoice for OpenMeter invoice ${id} in phase ${want_phase} with a documentUri" "${matches:-[]}"
 
 name=$(echo "$obj" | jq -r .metadata.name)
+phase=$(echo "$obj" | jq -r .status.phase)
 st=$(echo "$obj" | jq -c .status)
 expect() {
   [ "$(echo "$obj" | jq -r "$1")" = "true" ] || fail "Invoice ${name}: $2" "$obj"
@@ -46,7 +51,7 @@ page=$(stripe_invoice_page "$(echo "$obj" | jq -r .status.documentUri)")
 [ -n "$page" ] && [ "$page" = "$(stripe_invoice_page "$hosted")" ] ||
   fail "Invoice ${name}: documentUri is not Stripe invoice ${stripe_invoice_id}'s hosted page ${hosted}" "$obj"
 
-case "$want_phase" in
+case "$phase" in
   Open)
     num_eq "$(echo "$st" | jq -r .amountDue)" "$total" || fail "Invoice ${name}: amountDue is not ${total}" "$st"
     num_eq "$(echo "$st" | jq -r .amountPaid)" 0 || fail "Invoice ${name}: amountPaid is not 0" "$st"
@@ -58,5 +63,5 @@ case "$want_phase" in
     expect '.status.paidAt != null' "paidAt is not set"
     ;;
 esac
-echo "OK: Invoice ${name} is ${want_phase} for ${total} USD (OpenMeter invoice ${id})"
+echo "OK: Invoice ${name} is ${phase} for ${total} USD (OpenMeter invoice ${id})"
 kubectl get invoices.billing.miloapis.com "$name" -n "$NS" -o yaml

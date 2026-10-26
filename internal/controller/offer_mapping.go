@@ -264,7 +264,7 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 			sp.Name, dimension, meter.Name, meter.Dimensions)
 	}
 
-	discounts, err := b.resolveDiscount(sp)
+	discounts, err := resolveDiscount(sp)
 	if err != nil {
 		return err
 	}
@@ -326,7 +326,7 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 
 // resolveDiscount reads the discount for a service pricing snapshot and validates it.
 // Omitting discount or percentage 0 maps to no discount on the rate card.
-func (b *mappingBuilder) resolveDiscount(sp billingv1alpha1.ServicePricingSnapshot) (*omv3.BillingRateCardDiscounts, error) {
+func resolveDiscount(sp billingv1alpha1.ServicePricingSnapshot) (*omv3.BillingRateCardDiscounts, error) {
 	discount := sp.Discount
 	if discount == nil {
 		return nil, nil
@@ -416,7 +416,7 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	if sp.Spec.Amount == "" {
 		return invalidOffer("service pricing %q: %s pricing has no amount", sp.Name, sp.Spec.ChargeType)
 	}
-	discounts, err := b.resolveDiscount(sp)
+	discounts, err := resolveDiscount(sp)
 	if err != nil {
 		return err
 	}

@@ -43,7 +43,7 @@ spec:
                 phase: Running
         - script:
             timeout: 30s
-            content: bash expect-stripe.sh
+            content: bash ../invoice/expect-stripe.sh
 
     - name: publish a usage Offer with 100% general discount
       try:
@@ -70,12 +70,12 @@ spec:
     - name: create a BillingAccount with a Stripe payment method and bind the project
       try:
         - script:
-            content: bash stripe-customer.sh customerId
+            content: bash ../invoice/stripe-customer.sh customerId
             outputs:
               - name: stripeCustomerId
                 value: ($stdout)
         - script:
-            content: bash stripe-customer.sh paymentMethodId
+            content: bash ../invoice/stripe-customer.sh paymentMethodId
             outputs:
               - name: stripePaymentMethodId
                 value: ($stdout)
@@ -125,38 +125,38 @@ spec:
       try:
         - script:
             timeout: 60s
-            content: bash publish-usage.sh
+            content: bash ../invoice/publish-usage.sh
         - script:
             timeout: 600s
-            content: bash wait-usage.sh
+            content: bash ../invoice/wait-usage.sh
 
     - name: invoice the usage and issue it through Stripe
       cleanup:
         - script:
             timeout: 30s
-            content: bash release-account.sh
+            content: bash ../invoice/release-account.sh
       try:
         - script:
             timeout: 60s
-            content: bash invoice-usage.sh
+            content: bash ../invoice/invoice-usage.sh
         - script:
             timeout: 330s
-            content: bash issue-invoice.sh
+            content: bash ../invoice/issue-invoice.sh
 
     - name: the issued invoice appears as an Open or Paid Milo Invoice
       try:
         - script:
             timeout: 150s
-            content: bash expect-milo-invoice.sh
+            content: bash ../invoice/expect-milo-invoice.sh
 
     - name: paying in Stripe marks the Milo Invoice Paid
       try:
         - script:
             timeout: 120s
-            content: bash pay-invoice.sh
+            content: bash ../invoice/pay-invoice.sh
         - script:
             timeout: 150s
-            content: bash expect-milo-invoice.sh Paid
+            content: bash ../invoice/expect-milo-invoice.sh Paid
 
     - name: the paid account can be deleted
       try:
