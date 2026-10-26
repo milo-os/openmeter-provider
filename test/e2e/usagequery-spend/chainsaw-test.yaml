@@ -8,16 +8,17 @@ spec:
     billing account's plan the way its invoice prices it.
 
     An organization (e2e-sp, namespace organization-e2e-sp) has one billing
-    account entitled to an Offer that prices two meters: requests with one
+    account entitled to an Offer that prices four meters: requests with one
     rate for us-east4 and a catch-all for other regions (two rate cards on
-    one meter), and egress with graduated tiers. Usage is sent straight to
+    one meter), egress with graduated tiers, storage with graduated tiers
+    discounted 20% and backup at a flat rate discounted 100%. Usage is sent straight to
     OpenMeter in two batches around a boundary W (ingest.sh), and the
     suite checks (amounts in lib.sh):
 
       - the spend over the whole subscription, per meter and in total
         (status.spend), in the organization and in its project;
-      - the spend from W only, where egress continues the tiers after the
-        usage before W instead of starting over;
+      - the spend from W only, where egress and storage continue the tiers
+        after the usage before W instead of starting over;
       - that the whole-subscription spend, per meter and in total, equals
         the lines OpenMeter is gathering for the account's invoice;
       - no spend without includeSpend.
@@ -58,7 +59,7 @@ spec:
         - apply:
             file: project.yaml
 
-    - name: publish an Offer pricing two meters
+    - name: publish an Offer pricing four meters
       try:
         - apply:
             file: meters.yaml

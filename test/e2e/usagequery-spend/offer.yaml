@@ -15,3 +15,12 @@ spec:
       namespace: organization-e2e-sp
     - name: e2e-sp-egress
       namespace: organization-e2e-sp
+    # Discounted per service: 20% off a graduated price, and 100% off a flat one.
+    - name: e2e-sp-storage
+      namespace: organization-e2e-sp
+      discount:
+        percentage: 20
+    - name: e2e-sp-backup
+      namespace: organization-e2e-sp
+      discount:
+        percentage: 100
