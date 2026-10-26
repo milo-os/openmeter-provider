@@ -286,20 +286,79 @@ func TestReconcile_OpenMeterMeterNotYetSynced(t *testing.T) {
 // TestReconcile_InvalidPricing: an unrepresentable snapshot touches nothing
 // in OpenMeter and backs off on the permanent schedule.
 func TestReconcile_InvalidPricing(t *testing.T) {
-	offer := withFinalizer(baseOffer())
-	offer.Spec.ServicePricings = []billingv1alpha1.ServicePricingSnapshot{
-		usagePricing("u", matchRate("region", "us-east", "1"), matchRate("tier", "premium", "2")),
+	tests := []struct {
+		name  string
+		offer *billingv1alpha1.Offer
+	}{
+		{
+			name: "unrepresentable rates",
+			offer: func() *billingv1alpha1.Offer {
+				o := withFinalizer(baseOffer())
+				o.Spec.ServicePricings = []billingv1alpha1.ServicePricingSnapshot{
+					usagePricing("u", matchRate("region", "us-east", "1"), matchRate("tier", "premium", "2")),
+				}
+				return o
+			}(),
+		},
+		{
+			name: "negative snapshot discount",
+			offer: func() *billingv1alpha1.Offer {
+				o := withFinalizer(cpuOffer())
+				o.Spec.ServicePricings[0].Discount = &billingv1alpha1.Discount{Percentage: -5}
+				return o
+			}(),
+		},
+		{
+			name: "invalid snapshot discount",
+			offer: func() *billingv1alpha1.Offer {
+				o := withFinalizer(cpuOffer())
+				o.Spec.ServicePricings[0].Discount = &billingv1alpha1.Discount{Percentage: 150}
+				return o
+			}(),
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, omc, _ := newOfferReconciler(t, cpuMeter(), tt.offer)
+
+			if res := reconcileOnce(t, r); res.RequeueAfter != permanentRequeueAfter {
+				t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, permanentRequeueAfter)
+			}
+			if len(omc.calls) != 0 {
+				t.Errorf("OpenMeter called for an invalid offer: %v", omc.calls)
+			}
+			if cond := syncedCondition(t, r); cond == nil || cond.Reason != conditionReasonInvalidPricing {
+				t.Errorf("condition = %+v, want %s", cond, conditionReasonInvalidPricing)
+			}
+		})
+	}
+}
+
+func TestReconcile_Discounts(t *testing.T) {
+	offer := withFinalizer(cpuOffer())
+	for i := range offer.Spec.ServicePricings {
+		offer.Spec.ServicePricings[i].Discount = &billingv1alpha1.Discount{Percentage: 15}
+	}
+
 	r, omc, _ := newOfferReconciler(t, cpuMeter(), offer)
 
-	if res := reconcileOnce(t, r); res.RequeueAfter != permanentRequeueAfter {
-		t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, permanentRequeueAfter)
+	if res := reconcileOnce(t, r); res.RequeueAfter != 0 {
+		t.Errorf("unexpected requeue on success: %+v", res)
 	}
-	if len(omc.calls) != 0 {
-		t.Errorf("OpenMeter called for an invalid offer: %v", omc.calls)
+
+	if len(omc.ensurePlanCalls) != 1 {
+		t.Fatalf("ensurePlanCalls = %d, want 1", len(omc.ensurePlanCalls))
 	}
-	if cond := syncedCondition(t, r); cond == nil || cond.Reason != conditionReasonInvalidPricing {
-		t.Errorf("condition = %+v, want %s", cond, conditionReasonInvalidPricing)
+	plan := omc.ensurePlanCalls[0]
+	for _, rc := range plan.Phases[0].RateCards {
+		if rc.Discounts == nil || rc.Discounts.Percentage == nil || *rc.Discounts.Percentage != 15 {
+			t.Errorf("rate card %s discount = %+v, want 15%%", rc.Key, rc.Discounts)
+		}
+	}
+
+	cond := syncedCondition(t, r)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Errorf("condition = %+v, want True", cond)
 	}
 }
 

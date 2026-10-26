@@ -10,6 +10,7 @@ import (
 	"github.com/alpacahq/alpacadecimal"
 	omv3 "github.com/openmeterio/openmeter/api/v3"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
+	"github.com/openmeterio/openmeter/pkg/models"
 )
 
 // mustPrice converts a v3 rate card price, as plans carry it.
@@ -146,5 +147,77 @@ func TestPriceNeedsEarlierUsage(t *testing.T) {
 	}
 	if !PriceNeedsEarlierUsage(mustPrice(t, graduatedPrice)) {
 		t.Error("a tiered price depends on earlier usage")
+	}
+}
+
+func TestPriceUsage_Discounts(t *testing.T) {
+	from := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	pctDiscount := func(pct float64) *productcatalog.Discounts {
+		return &productcatalog.Discounts{
+			Percentage: &productcatalog.PercentageDiscount{
+				Percentage: models.NewPercentage(pct),
+			},
+		}
+	}
+	tests := []struct {
+		name      string
+		price     string
+		quantity  string
+		discounts *productcatalog.Discounts
+		want      string
+	}{
+		{
+			name:      "unit price 15% discount",
+			price:     `{"type":"unit","amount":"1"}`,
+			quantity:  "10", // 10 * 1 = 10, net 15% discount = 8.5
+			discounts: pctDiscount(15),
+			want:      "8.5",
+		},
+		{
+			name:      "unit price 100% discount",
+			price:     `{"type":"unit","amount":"1"}`,
+			quantity:  "10", // 10 * 1 = 10, net 100% discount = 0
+			discounts: pctDiscount(100),
+			want:      "0",
+		},
+		{
+			name:      "unit price 0% discount",
+			price:     `{"type":"unit","amount":"1"}`,
+			quantity:  "10",
+			discounts: pctDiscount(0),
+			want:      "10",
+		},
+		{
+			name:      "graduated price 15% discount",
+			price:     graduatedPrice,
+			quantity:  "150", // 100*1 + 50*0.5 = 125, 125 * 0.85 = 106.25
+			discounts: pctDiscount(15),
+			want:      "106.25",
+		},
+		{
+			name:      "graduated price 100% discount",
+			price:     graduatedPrice,
+			quantity:  "150",
+			discounts: pctDiscount(100),
+			want:      "0",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := PriceUsage(UsageToPrice{
+				Price:     mustPrice(t, tt.price),
+				Currency:  "USD",
+				From:      from,
+				To:        from.Add(time.Hour),
+				Quantity:  alpacadecimal.RequireFromString(tt.quantity),
+				Discounts: tt.discounts,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Equal(alpacadecimal.RequireFromString(tt.want)) {
+				t.Errorf("got %s, want %s", got, tt.want)
+			}
+		})
 	}
 }

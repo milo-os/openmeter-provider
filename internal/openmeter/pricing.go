@@ -17,6 +17,7 @@ import (
 	ratingservice "github.com/openmeterio/openmeter/openmeter/billing/rating/service"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
 	"github.com/openmeterio/openmeter/pkg/currencyx"
+	"github.com/openmeterio/openmeter/pkg/models"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
 )
 
@@ -35,6 +36,8 @@ type UsageRateCard struct {
 	Price *productcatalog.Price
 	// UnitConfig converts metered usage into the pricing unit, when set.
 	UnitConfig *productcatalog.UnitConfig
+	// Discounts is the rate card's discount, when set.
+	Discounts *productcatalog.Discounts
 }
 
 // PlanUsageRateCards returns the usage-based rate cards of the plan version
@@ -73,6 +76,14 @@ func (c *client) PlanUsageRateCards(ctx context.Context, planID string) ([]Usage
 				return nil, fmt.Errorf("rate card %s: %w", rc.Key, err)
 			}
 			card := UsageRateCard{Key: rc.Key, MeterSlug: *feature.MeterSlug, Price: price}
+			if rc.Discounts != nil && rc.Discounts.Percentage != nil {
+				pct := float64(*rc.Discounts.Percentage)
+				card.Discounts = &productcatalog.Discounts{
+					Percentage: &productcatalog.PercentageDiscount{
+						Percentage: models.NewPercentage(pct),
+					},
+				}
+			}
 			if feature.AdvancedMeterGroupByFilters != nil {
 				card.Filters = *feature.AdvancedMeterGroupByFilters
 			}
@@ -173,6 +184,7 @@ type UsageToPrice struct {
 	// Price is the rate card's price and UnitConfig its unit conversion.
 	Price      *productcatalog.Price
 	UnitConfig *productcatalog.UnitConfig
+	Discounts  *productcatalog.Discounts
 	// Currency is the ISO 4217 code the subscription is billed in.
 	Currency string
 	// From is the inclusive start and To the exclusive end of the usage, all
@@ -191,9 +203,7 @@ type UsageToPrice struct {
 var usageRater = ratingservice.New(ratingservice.Config{UnitConfigEnabled: true})
 
 // PriceUsage returns what u costs, the way OpenMeter prices it on an invoice
-// line, before taxes and credits. Discounts and a minimum commitment are not
-// applied: the provider's plans have no discounts, and u may cover only
-// part of a billing period.
+// line, before taxes and credits. Discounts are applied, and report net of discount.
 //
 // OpenMeter's SimulateInvoice endpoint would do the same, but in
 // v1.0.0-beta.232 it creates lines without a line engine and prices every
@@ -203,12 +213,18 @@ func PriceUsage(u UsageToPrice) (alpacadecimal.Decimal, error) {
 		return alpacadecimal.Zero, errors.New("rate card has no price")
 	}
 
+	var rateCardDiscounts billing.Discounts
+	if u.Discounts != nil {
+		rateCardDiscounts = billing.DiscountsFromProductCatalog(*u.Discounts).UpsertCorrelationIDs()
+	}
+
 	quantity, preQuantity := u.Quantity, u.PreLinePeriodQuantity
 	line := &billing.StandardLine{
 		StandardLineBase: billing.StandardLineBase{
-			Currency:  currencyx.FiatCode(u.Currency),
-			Period:    timeutil.ClosedPeriod{From: u.From, To: u.To},
-			InvoiceAt: u.To,
+			Currency:          currencyx.FiatCode(u.Currency),
+			Period:            timeutil.ClosedPeriod{From: u.From, To: u.To},
+			InvoiceAt:         u.To,
+			RateCardDiscounts: rateCardDiscounts,
 		},
 		UsageBased: &billing.UsageBasedLine{
 			Price:                        u.Price,

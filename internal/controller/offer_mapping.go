@@ -264,6 +264,11 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 			sp.Name, dimension, meter.Name, meter.Dimensions)
 	}
 
+	discounts, err := b.resolveDiscount(sp)
+	if err != nil {
+		return err
+	}
+
 	// Feature filters are keyed by the meter's group-by key for the
 	// dimension, which the MeterDefinition controller derives with the same
 	// openmeter.GroupByKey (identity for plain identifiers like "region").
@@ -313,9 +318,29 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 			BillingCadence: &cadence,
 			Price:          price,
 			UnitConfig:     conversion,
+			Discounts:      discounts,
 		})
 	}
 	return nil
+}
+
+// resolveDiscount reads the discount for a service pricing snapshot and validates it.
+// Omitting discount or percentage 0 maps to no discount on the rate card.
+func (b *mappingBuilder) resolveDiscount(sp billingv1alpha1.ServicePricingSnapshot) (*omv3.BillingRateCardDiscounts, error) {
+	discount := sp.Discount
+	if discount == nil {
+		return nil, nil
+	}
+	if discount.Percentage < 0 || discount.Percentage > 100 {
+		return nil, invalidOffer("service pricing %q: discount percentage %d is invalid; must be between 0 and 100", sp.Name, discount.Percentage)
+	}
+	if discount.Percentage == 0 {
+		return nil, nil
+	}
+	pct := float32(discount.Percentage)
+	return &omv3.BillingRateCardDiscounts{
+		Percentage: &pct,
+	}, nil
 }
 
 // usagePrice maps a PricingRate to an OpenMeter usage price.
@@ -391,6 +416,10 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	if sp.Spec.Amount == "" {
 		return invalidOffer("service pricing %q: %s pricing has no amount", sp.Name, sp.Spec.ChargeType)
 	}
+	discounts, err := b.resolveDiscount(sp)
+	if err != nil {
+		return err
+	}
 	key := boundedKey(sanitizeKeyPart(sp.Name), "flat_fee", sp.Name)
 	name := sp.Spec.DisplayName
 	if name == "" {
@@ -404,6 +433,7 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 		Name:        name,
 		Description: &description,
 		PaymentTerm: &paymentTerm,
+		Discounts:   discounts,
 	}
 	if err := card.Price.FromBillingPriceFlat(omv3.BillingPriceFlat{
 		Type:   omv3.BillingPriceFlatTypeFlat,
