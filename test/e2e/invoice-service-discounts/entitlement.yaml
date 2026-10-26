@@ -1,0 +1,9 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingEntitlement
+metadata:
+  name: e2e-inv-sd-entitlement
+spec:
+  billingAccountRef:
+    name: e2e-inv-sd-account
+  offerRef:
+    name: e2e-inv-sd-offer

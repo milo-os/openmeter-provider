@@ -21,3 +21,12 @@ spec:
       namespace: openmeter-system
     - name: inv-egress-tiered
       namespace: openmeter-system
+    - name: inv-backup
+      namespace: openmeter-system
+      discount:
+        percentage: 100
+    - name: inv-api
+      namespace: openmeter-system
+      discount:
+        percentage: 30
+

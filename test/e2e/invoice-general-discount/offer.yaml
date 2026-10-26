@@ -1,0 +1,25 @@
+# Authored as Draft with general Offer discount 100%, published with ../offer/publish.sh.
+# Every servicePricing inherits the 100% discount, billing everything at $0.00.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-inv-gd-offer
+  annotations:
+    kubernetes.io/display-name: "E2E Invoice General Discount 100% Offer"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+  discount:
+    percentage: 100
+  servicePricingRefs:
+    - name: inv-gd-compute
+      namespace: openmeter-system
+    - name: inv-gd-storage
+      namespace: openmeter-system
+    - name: inv-gd-egress
+      namespace: openmeter-system
+    - name: inv-gd-memory
+      namespace: openmeter-system
+    - name: inv-gd-egress-tiered
+      namespace: openmeter-system

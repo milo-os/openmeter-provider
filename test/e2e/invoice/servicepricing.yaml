@@ -89,3 +89,32 @@ spec:
         - upTo: "5"
           rate: "0.10"
         - rate: "0.05"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-backup
+spec:
+  displayName: "Backup storage: GB"
+  chargeType: Usage
+  currency: USD
+  metric: inv-backup-gb
+  pricingUnit: GBy
+  serviceRef: storage.miloapis.com
+  rates:
+    - flat: "0.05"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-api
+spec:
+  displayName: "API: requests"
+  chargeType: Usage
+  currency: USD
+  metric: inv-api-requests
+  pricingUnit: "1"
+  serviceRef: compute.miloapis.com
+  rates:
+    - flat: "0.01"
+

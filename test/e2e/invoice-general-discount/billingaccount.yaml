@@ -1,0 +1,18 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-inv-gd-account
+spec:
+  currencyCode: USD
+  contactInfo:
+    name: Ada Lovelace
+    businessName: Acme Cloud Inc.
+    email: billing-gd@acme-cloud.example
+    address:
+      line1: 354 Oyster Point Blvd
+      city: South San Francisco
+      region: CA
+      postalCode: "94080"
+      country: US
+  defaultPaymentMethodRef:
+    name: e2e-inv-gd-payment-method

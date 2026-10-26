@@ -1,0 +1,177 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: invoice-general-discount
+spec:
+  description: |
+    Tests invoice creation and verification with a 100% general Offer discount:
+    - Offer e2e-inv-gd-offer sets spec.discount.percentage: 100.
+    - All snapshotted service pricings inherit the 100% discount.
+    - All services are billed at $0.00, resulting in an invoice total of $0.00.
+    - Verifies that OpenMeter and Stripe invoice total is $0.00 and Stripe status is paid.
+    - Verifies the Milo Invoice is projected with total 0 USD.
+  namespace: openmeter-system
+  steps:
+    - name: purge stale usage events for the suite's project
+      try:
+        - script:
+            timeout: 45s
+            content: |
+              set -eu
+              NATS_POD=$(kubectl get pod -n nats-system -l app.kubernetes.io/component=nats-box --no-headers -o name | head -1)
+              if [ -z "$NATS_POD" ]; then
+                echo "WARNING: no nats-box pod found, skipping purge"
+                exit 0
+              fi
+              kubectl exec -n nats-system "$NATS_POD" -- \
+                nats --server nats://nats:4222 \
+                stream purge billing-usage \
+                --subject "billing.usage.e2e-invoice-gd.>" -f || true
+
+    - name: start the OpenMeter query pod and check Stripe is set up
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-inv-gd
+              status:
+                phase: Running
+        - script:
+            timeout: 30s
+            content: bash expect-stripe.sh
+
+    - name: publish a usage Offer with 100% general discount
+      try:
+        - apply:
+            file: meter.yaml
+        - apply:
+            file: servicepricing.yaml
+        - apply:
+            file: offer.yaml
+        - script:
+            timeout: 30s
+            content: bash ../offer/publish.sh e2e-inv-gd-offer
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-inv-gd-offer
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+
+    - name: create a BillingAccount with a Stripe payment method and bind the project
+      try:
+        - script:
+            content: bash stripe-customer.sh customerId
+            outputs:
+              - name: stripeCustomerId
+                value: ($stdout)
+        - script:
+            content: bash stripe-customer.sh paymentMethodId
+            outputs:
+              - name: stripePaymentMethodId
+                value: ($stdout)
+        - apply:
+            file: paymentmethod.yaml
+        - patch:
+            file: paymentmethod-active.yaml
+            subresource: status
+        - patch:
+            file: stripepaymentmethod-active.yaml
+            subresource: status
+        - apply:
+            file: billingaccount.yaml
+        - patch:
+            file: billingaccount-payment-method-ready.yaml
+            subresource: status
+        - apply:
+            file: billingaccountbinding.yaml
+        - patch:
+            file: billingaccountbinding-active.yaml
+            subresource: status
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-inv-gd-account
+                (finalizers[?@ == 'openmeter.miloapis.com/customer-link']): ['openmeter.miloapis.com/customer-link']
+
+    - name: entitle the account to the Offer
+      try:
+        - apply:
+            file: entitlement.yaml
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              metadata:
+                name: e2e-inv-gd-entitlement
+              status:
+                (conditions[?type == 'OpenMeterSubscriptionSynced']):
+                  - status: "True"
+
+    - name: publish usage and wait until OpenMeter has all of it
+      try:
+        - script:
+            timeout: 60s
+            content: bash publish-usage.sh
+        - script:
+            timeout: 600s
+            content: bash wait-usage.sh
+
+    - name: invoice the usage and issue it through Stripe
+      cleanup:
+        - script:
+            timeout: 30s
+            content: bash release-account.sh
+      try:
+        - script:
+            timeout: 60s
+            content: bash invoice-usage.sh
+        - script:
+            timeout: 330s
+            content: bash issue-invoice.sh
+
+    - name: the issued invoice appears as an Open or Paid Milo Invoice
+      try:
+        - script:
+            timeout: 150s
+            content: bash expect-milo-invoice.sh
+
+    - name: paying in Stripe marks the Milo Invoice Paid
+      try:
+        - script:
+            timeout: 120s
+            content: bash pay-invoice.sh
+        - script:
+            timeout: 150s
+            content: bash expect-milo-invoice.sh Paid
+
+    - name: the paid account can be deleted
+      try:
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              name: e2e-inv-gd-entitlement
+        - script:
+            timeout: 10s
+            content: kubectl delete billingaccount e2e-inv-gd-account -n "$NAMESPACE" --wait=false
+        - error:
+            timeout: 180s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-inv-gd-account

@@ -1,0 +1,10 @@
+# Ids come from stripe-customer.sh: the account's own Stripe test
+# customer, with a test card attached.
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripePaymentMethod
+metadata:
+  name: e2e-inv-sd-payment-method
+status:
+  phase: Active
+  stripeCustomerId: ($stripeCustomerId)
+  stripePaymentMethodId: ($stripePaymentMethodId)

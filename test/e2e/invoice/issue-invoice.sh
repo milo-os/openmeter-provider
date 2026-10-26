@@ -57,7 +57,7 @@ echo "OK: invoice ${id} ${status}, total ${total} ${currency}, Stripe invoice ${
 # meteredQuantity (the usage as published) on lines that convert; on the
 # others it is the quantity itself.
 for line in "${LINES[@]}"; do
-  IFS='|' read -r _ _ name published billed rate line_total <<<"$line"
+  IFS='|' read -r _ _ name published billed rate line_total discount_pct <<<"$line"
   got=$(echo "$invoice" | jq -c --arg n "$name" '[.lines[]? | select(.name == $n)] | if length == 1 then .[0] else null end')
   [ "$got" != "null" ] || fail "invoice has no single line \"${name}\"" "$(echo "$invoice" | jq -c '[.lines[]? | .name]')"
   summary=$(echo "$got" | jq -c '{quantity, meteredQuantity, total: .totals.total, tiers: [.children[]? | {name, quantity, perUnitAmount}]}')
@@ -70,6 +70,15 @@ for line in "${LINES[@]}"; do
   echo "$got" | jq -e --argjson want "$(price_tiers "$billed" "$rate")" \
     '[.children[]? | {quantity: (.quantity | tonumber), price: (.perUnitAmount | tonumber)}] | sort == ($want | sort)' >/dev/null ||
     fail "invoice line \"${name}\" prices, want ${rate} (units x price per tier) as in the Offer" "$summary"
+
+  # Explicitly verify discount calculations:
+  if [ "${discount_pct:-0}" -eq 100 ]; then
+    num_eq "$line_total" "0.00" || fail "100% discount line ${name} must be 0 pricing, got ${line_total}"
+    num_eq "$(echo "$got" | jq -r '.totals.total')" "0" || fail "100% discount line ${name} OpenMeter total must be 0"
+  elif [ "${discount_pct:-0}" -eq 30 ]; then
+    num_eq "$line_total" "0.70" || fail "30% discount line ${name} must be 0.70, got ${line_total}"
+    num_eq "$(echo "$got" | jq -r '.totals.total')" "0.70" || fail "30% discount line ${name} OpenMeter total must be 0.70"
+  fi
 done
 echo "OK: invoice has the ${#LINES[@]} lines: $(echo "$invoice" | jq -c '[.lines[]? | "\(.name) \(.totals.total)"]')"
 
@@ -95,7 +104,7 @@ echo "OK: Stripe invoice ${stripe_invoice_id} is ${s_status} for ${s_total} cent
 # checked above). A displayName's lines add up to its line total.
 slines=$(stripe GET "/invoices/${stripe_invoice_id}/lines?limit=100" | jq -c '[.data[]? | {description, amount}]')
 for line in "${LINES[@]}"; do
-  IFS='|' read -r _ _ name _ billed rate line_total <<<"$line"
+  IFS='|' read -r _ _ name _ billed rate line_total discount_pct <<<"$line"
   cents=$(awk -v t="$line_total" 'BEGIN { printf "%d", t * 100 + 0.5 }')
   echo "$slines" | jq -e --arg p "${name}: " --argjson c "$cents" \
     'map(select(.description | startswith($p)) | .amount) | add == $c' >/dev/null ||
