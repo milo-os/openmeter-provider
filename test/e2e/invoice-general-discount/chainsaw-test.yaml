@@ -6,7 +6,8 @@ spec:
   description: |
     Tests invoice creation and verification with a 100% general Offer discount:
     - Offer e2e-inv-gd-offer sets spec.discount.percentage: 100.
-    - All snapshotted service pricings inherit the 100% discount.
+    - All snapshotted service pricings inherit the 100% discount (simulated by
+      publish.sh; billing's Offer controller is tested in the billing repository).
     - All services are billed at $0.00, resulting in an invoice total of $0.00.
     - Verifies that OpenMeter and Stripe invoice total is $0.00 and Stripe status is paid.
     - Verifies the Milo Invoice is projected with total 0 USD.

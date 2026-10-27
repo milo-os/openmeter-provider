@@ -62,6 +62,9 @@ case "$phase" in
     num_eq "$(echo "$st" | jq -r .amountDue)" 0 || fail "Invoice ${name}: amountDue is not 0" "$st"
     expect '.status.paidAt != null' "paidAt is not set"
     ;;
+  *)
+    fail "Invoice ${name}: unexpected phase ${phase}" "$st"
+    ;;
 esac
 echo "OK: Invoice ${name} is ${phase} for ${total} USD (OpenMeter invoice ${id})"
 kubectl get invoices.billing.miloapis.com "$name" -n "$NS" -o yaml

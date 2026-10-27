@@ -12,6 +12,8 @@ spec:
 
     Verifies that the 100% discount service gets 0 pricing at the end ($0.00)
     and that the 15% discount service works correctly ($0.85 net).
+    Discount overrides are snapshotted via publish.sh; billing's Offer controller
+    is tested in the billing repository.
   namespace: openmeter-system
   steps:
     - name: purge stale usage events for the suite's project

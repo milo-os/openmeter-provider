@@ -40,6 +40,10 @@ if [ "$step" = "snapshot" ] || [ "$step" = "all" ]; then
       echo "publish.sh: ServicePricing ${ns}/${name} referenced by ${offer} not found"
       exit 1
     fi
+    # Note: billing's Offer controller does not run in openmeter-provider e2e tests.
+    # Discount inheritance (ref.discount first, then offer.spec.discount) is simulated
+    # here to match billing's internal/controller/offer_controller.go. Upstream Offer
+    # resolution is covered in the billing repository.
     discount=$(echo "$refs" | jq -c --argjson od "$offer_discount" ".[$i].discount // \$od")
     if [ "$discount" != "null" ]; then
       snapshot=$(echo "$snapshot" | jq -c --argjson sp "$sp" --argjson disc "$discount" '. + [{name: $sp.metadata.name, spec: $sp.spec, discount: $disc}]')

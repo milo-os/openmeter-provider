@@ -699,67 +699,50 @@ func TestBuildOfferMapping_RejectsUnrepresentable(t *testing.T) {
 }
 
 func TestBuildOfferMapping_Discounts(t *testing.T) {
-	t.Run("snapshot discount 15 percent", func(t *testing.T) {
-		offer := cpuOffer()
-		for i := range offer.Spec.ServicePricings {
-			offer.Spec.ServicePricings[i].Discount = &billingv1alpha1.Discount{Percentage: 15}
-		}
-		m := mustMapping(t, offer)
-		if len(m.Plan.Phases[0].RateCards) == 0 {
-			t.Fatal("mapping has no rate cards to check")
-		}
-		for i, rc := range m.Plan.Phases[0].RateCards {
-			if rc.Discounts == nil || rc.Discounts.Percentage == nil {
-				t.Fatalf("rate card %d (%s) missing discount", i, rc.Key)
+	pctPtr := func(v float32) *float32 { return &v }
+	tests := []struct {
+		name string
+		pct  int32
+		want *float32
+	}{
+		{"snapshot discount 15 percent", 15, pctPtr(15)},
+		{"snapshot discount 100 percent", 100, pctPtr(100)},
+		{"snapshot discount 0 percent means no discount", 0, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			offer := cpuOffer()
+			for i := range offer.Spec.ServicePricings {
+				offer.Spec.ServicePricings[i].Discount = &billingv1alpha1.Discount{Percentage: tt.pct}
 			}
-			if *rc.Discounts.Percentage != 15 {
-				t.Errorf("rate card %d (%s) discount = %v, want 15", i, rc.Key, *rc.Discounts.Percentage)
+			m := mustMapping(t, offer)
+			if len(m.Plan.Phases[0].RateCards) == 0 {
+				t.Fatal("mapping has no rate cards to check")
 			}
-		}
-		if len(m.Plan.Phases[0].RateCards) > 1 {
-			if m.Plan.Phases[0].RateCards[0].Discounts == m.Plan.Phases[0].RateCards[1].Discounts {
-				t.Error("rate cards share the same Discounts pointer")
+			for i, rc := range m.Plan.Phases[0].RateCards {
+				if tt.want == nil {
+					if rc.Discounts != nil {
+						t.Errorf("rate card %d (%s) has unexpected discount: %+v", i, rc.Key, rc.Discounts)
+					}
+					continue
+				}
+				if rc.Discounts == nil || rc.Discounts.Percentage == nil {
+					t.Fatalf("rate card %d (%s) missing discount", i, rc.Key)
+				}
+				if *rc.Discounts.Percentage != *tt.want {
+					t.Errorf("rate card %d (%s) discount = %v, want %v", i, rc.Key, *rc.Discounts.Percentage, *tt.want)
+				}
 			}
-			if m.Plan.Phases[0].RateCards[0].Discounts.Percentage == m.Plan.Phases[0].RateCards[1].Discounts.Percentage {
-				t.Error("rate cards share the same Discounts.Percentage pointer")
+			if tt.want != nil && len(m.Plan.Phases[0].RateCards) > 1 {
+				if m.Plan.Phases[0].RateCards[0].Discounts == m.Plan.Phases[0].RateCards[1].Discounts {
+					t.Error("rate cards share the same Discounts pointer")
+				}
+				if m.Plan.Phases[0].RateCards[0].Discounts.Percentage == m.Plan.Phases[0].RateCards[1].Discounts.Percentage {
+					t.Error("rate cards share the same Discounts.Percentage pointer")
+				}
 			}
-		}
-	})
-
-	t.Run("snapshot discount 100 percent", func(t *testing.T) {
-		offer := cpuOffer()
-		for i := range offer.Spec.ServicePricings {
-			offer.Spec.ServicePricings[i].Discount = &billingv1alpha1.Discount{Percentage: 100}
-		}
-		m := mustMapping(t, offer)
-		if len(m.Plan.Phases[0].RateCards) == 0 {
-			t.Fatal("mapping has no rate cards to check")
-		}
-		for i, rc := range m.Plan.Phases[0].RateCards {
-			if rc.Discounts == nil || rc.Discounts.Percentage == nil {
-				t.Fatalf("rate card %d (%s) missing discount", i, rc.Key)
-			}
-			if *rc.Discounts.Percentage != 100 {
-				t.Errorf("rate card %d (%s) discount = %v, want 100", i, rc.Key, *rc.Discounts.Percentage)
-			}
-		}
-	})
-
-	t.Run("snapshot discount 0 percent means no discount", func(t *testing.T) {
-		offer := cpuOffer()
-		for i := range offer.Spec.ServicePricings {
-			offer.Spec.ServicePricings[i].Discount = &billingv1alpha1.Discount{Percentage: 0}
-		}
-		m := mustMapping(t, offer)
-		if len(m.Plan.Phases[0].RateCards) == 0 {
-			t.Fatal("mapping has no rate cards to check")
-		}
-		for i, rc := range m.Plan.Phases[0].RateCards {
-			if rc.Discounts != nil {
-				t.Errorf("rate card %d (%s) has unexpected discount: %+v", i, rc.Key, rc.Discounts)
-			}
-		}
-	})
+		})
+	}
 }
 
 func TestBuildOfferMapping_DiscountOverrides(t *testing.T) {
@@ -794,7 +777,7 @@ func TestBuildOfferMapping_DiscountOverrides(t *testing.T) {
 		Discount: &billingv1alpha1.Discount{Percentage: 100},
 	}
 
-	// 3. recurring fee: snapshot discount 0% (no discount)
+	// 3. recurring fee: snapshot discount 25%
 	spRecurring := billingv1alpha1.ServicePricingSnapshot{
 		Name: "base-fee",
 		Spec: billingv1alpha1.ServicePricingSpec{
@@ -803,10 +786,10 @@ func TestBuildOfferMapping_DiscountOverrides(t *testing.T) {
 			Amount:      "10.00",
 			Interval:    billingv1alpha1.ChargeIntervalMonthly,
 		},
-		Discount: &billingv1alpha1.Discount{Percentage: 0},
+		Discount: &billingv1alpha1.Discount{Percentage: 25},
 	}
 
-	// 4. one-time fee: nil discount (no discount)
+	// 4. one-time fee: snapshot discount 50%
 	spOneTime := billingv1alpha1.ServicePricingSnapshot{
 		Name: "setup-fee",
 		Spec: billingv1alpha1.ServicePricingSpec{
@@ -815,9 +798,35 @@ func TestBuildOfferMapping_DiscountOverrides(t *testing.T) {
 			Amount:      "50.00",
 			Trigger:     billingv1alpha1.ChargeTriggerBillingAccountActivation,
 		},
+		Discount: &billingv1alpha1.Discount{Percentage: 50},
 	}
 
-	offer.Spec.ServicePricings = []billingv1alpha1.ServicePricingSnapshot{spCompute, spStorage, spRecurring, spOneTime}
+	// 5. recurring fee with 0% discount (explicitly no discount)
+	spRecurringZero := billingv1alpha1.ServicePricingSnapshot{
+		Name: "support-fee",
+		Spec: billingv1alpha1.ServicePricingSpec{
+			DisplayName: "Support Fee",
+			ChargeType:  billingv1alpha1.ChargeTypeRecurring,
+			Amount:      "5.00",
+			Interval:    billingv1alpha1.ChargeIntervalMonthly,
+		},
+		Discount: &billingv1alpha1.Discount{Percentage: 0},
+	}
+
+	// 6. one-time fee with nil discount (no discount)
+	spOneTimeNil := billingv1alpha1.ServicePricingSnapshot{
+		Name: "migration-fee",
+		Spec: billingv1alpha1.ServicePricingSpec{
+			DisplayName: "Migration Fee",
+			ChargeType:  billingv1alpha1.ChargeTypeOneTime,
+			Amount:      "100.00",
+			Trigger:     billingv1alpha1.ChargeTriggerBillingAccountActivation,
+		},
+	}
+
+	offer.Spec.ServicePricings = []billingv1alpha1.ServicePricingSnapshot{
+		spCompute, spStorage, spRecurring, spOneTime, spRecurringZero, spOneTimeNil,
+	}
 
 	m, err := buildOfferMapping(offer, meters)
 	if err != nil {
@@ -841,12 +850,22 @@ func TestBuildOfferMapping_DiscountOverrides(t *testing.T) {
 	}
 
 	recurringCard, ok := byName["Base Fee"]
-	if !ok || recurringCard.Discounts != nil {
-		t.Errorf("base fee card discount = %+v (ok=%v), want nil (0%% discount)", recurringCard.Discounts, ok)
+	if !ok || recurringCard.Discounts == nil || recurringCard.Discounts.Percentage == nil || *recurringCard.Discounts.Percentage != 25 {
+		t.Errorf("base fee card discount = %+v (ok=%v), want 25%%", recurringCard.Discounts, ok)
 	}
 
 	oneTimeCard, ok := byName["Setup Fee"]
-	if !ok || oneTimeCard.Discounts != nil {
-		t.Errorf("setup fee card discount = %+v (ok=%v), want nil", oneTimeCard.Discounts, ok)
+	if !ok || oneTimeCard.Discounts == nil || oneTimeCard.Discounts.Percentage == nil || *oneTimeCard.Discounts.Percentage != 50 {
+		t.Errorf("setup fee card discount = %+v (ok=%v), want 50%%", oneTimeCard.Discounts, ok)
+	}
+
+	supportCard, ok := byName["Support Fee"]
+	if !ok || supportCard.Discounts != nil {
+		t.Errorf("support fee card discount = %+v (ok=%v), want nil (0%% discount)", supportCard.Discounts, ok)
+	}
+
+	migrationCard, ok := byName["Migration Fee"]
+	if !ok || migrationCard.Discounts != nil {
+		t.Errorf("migration fee card discount = %+v (ok=%v), want nil", migrationCard.Discounts, ok)
 	}
 }
