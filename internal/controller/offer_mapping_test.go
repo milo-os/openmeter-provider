@@ -667,6 +667,20 @@ func TestBuildOfferMapping_RejectsUnrepresentable(t *testing.T) {
 				ChargeType: billingv1alpha1.ChargeType("Bogus"),
 			}}},
 			"unsupported charge type"},
+		{"service pricing discount negative",
+			[]billingv1alpha1.ServicePricingSnapshot{func() billingv1alpha1.ServicePricingSnapshot {
+				sp := usagePricing("u", billingv1alpha1.PricingRate{Flat: "1"})
+				sp.Discount = &billingv1alpha1.Discount{Percentage: -5}
+				return sp
+			}()},
+			"must be between 0 and 100"},
+		{"service pricing discount over 100",
+			[]billingv1alpha1.ServicePricingSnapshot{func() billingv1alpha1.ServicePricingSnapshot {
+				sp := usagePricing("u", billingv1alpha1.PricingRate{Flat: "1"})
+				sp.Discount = &billingv1alpha1.Discount{Percentage: 105}
+				return sp
+			}()},
+			"must be between 0 and 100"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -681,5 +695,177 @@ func TestBuildOfferMapping_RejectsUnrepresentable(t *testing.T) {
 				t.Errorf("err = %q, want it to mention %q", err, tt.wantMsg)
 			}
 		})
+	}
+}
+
+func TestBuildOfferMapping_Discounts(t *testing.T) {
+	pctPtr := func(v float32) *float32 { return &v }
+	tests := []struct {
+		name string
+		pct  int32
+		want *float32
+	}{
+		{"snapshot discount 15 percent", 15, pctPtr(15)},
+		{"snapshot discount 100 percent", 100, pctPtr(100)},
+		{"snapshot discount 0 percent means no discount", 0, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			offer := cpuOffer()
+			for i := range offer.Spec.ServicePricings {
+				offer.Spec.ServicePricings[i].Discount = &billingv1alpha1.Discount{Percentage: tt.pct}
+			}
+			m := mustMapping(t, offer)
+			if len(m.Plan.Phases[0].RateCards) == 0 {
+				t.Fatal("mapping has no rate cards to check")
+			}
+			for i, rc := range m.Plan.Phases[0].RateCards {
+				if tt.want == nil {
+					if rc.Discounts != nil {
+						t.Errorf("rate card %d (%s) has unexpected discount: %+v", i, rc.Key, rc.Discounts)
+					}
+					continue
+				}
+				if rc.Discounts == nil || rc.Discounts.Percentage == nil {
+					t.Fatalf("rate card %d (%s) missing discount", i, rc.Key)
+				}
+				if *rc.Discounts.Percentage != *tt.want {
+					t.Errorf("rate card %d (%s) discount = %v, want %v", i, rc.Key, *rc.Discounts.Percentage, *tt.want)
+				}
+			}
+			if tt.want != nil && len(m.Plan.Phases[0].RateCards) > 1 {
+				if m.Plan.Phases[0].RateCards[0].Discounts == m.Plan.Phases[0].RateCards[1].Discounts {
+					t.Error("rate cards share the same Discounts pointer")
+				}
+				if m.Plan.Phases[0].RateCards[0].Discounts.Percentage == m.Plan.Phases[0].RateCards[1].Discounts.Percentage {
+					t.Error("rate cards share the same Discounts.Percentage pointer")
+				}
+			}
+		})
+	}
+}
+
+func TestBuildOfferMapping_DiscountOverrides(t *testing.T) {
+	meters := map[string]meterInfo{
+		"compute.miloapis.com/cpu": {
+			Name:       "compute.miloapis.com/cpu",
+			Slug:       cpuSlug,
+			Dimensions: []string{"region", "tier"},
+		},
+		"storage.miloapis.com/bytes": {
+			Name: "storage.miloapis.com/bytes",
+			Slug: "storage_miloapis_com_bytes",
+		},
+	}
+
+	offer := baseOffer()
+
+	// 1. compute usage: snapshot discount 15%
+	spCompute := usagePricing("compute-usage", billingv1alpha1.PricingRate{Flat: "0.10"})
+	spCompute.Discount = &billingv1alpha1.Discount{Percentage: 15}
+
+	// 2. storage usage: snapshot discount 100%
+	spStorage := billingv1alpha1.ServicePricingSnapshot{
+		Name: "storage-usage",
+		Spec: billingv1alpha1.ServicePricingSpec{
+			DisplayName: "Storage Usage",
+			ChargeType:  billingv1alpha1.ChargeTypeUsage,
+			Metric:      "storage.miloapis.com/bytes",
+			PricingUnit: "gib",
+			Rates:       []billingv1alpha1.PricingRate{{Flat: "0.05"}},
+		},
+		Discount: &billingv1alpha1.Discount{Percentage: 100},
+	}
+
+	// 3. recurring fee: snapshot discount 25%
+	spRecurring := billingv1alpha1.ServicePricingSnapshot{
+		Name: "base-fee",
+		Spec: billingv1alpha1.ServicePricingSpec{
+			DisplayName: "Base Fee",
+			ChargeType:  billingv1alpha1.ChargeTypeRecurring,
+			Amount:      "10.00",
+			Interval:    billingv1alpha1.ChargeIntervalMonthly,
+		},
+		Discount: &billingv1alpha1.Discount{Percentage: 25},
+	}
+
+	// 4. one-time fee: snapshot discount 50%
+	spOneTime := billingv1alpha1.ServicePricingSnapshot{
+		Name: "setup-fee",
+		Spec: billingv1alpha1.ServicePricingSpec{
+			DisplayName: "Setup Fee",
+			ChargeType:  billingv1alpha1.ChargeTypeOneTime,
+			Amount:      "50.00",
+			Trigger:     billingv1alpha1.ChargeTriggerBillingAccountActivation,
+		},
+		Discount: &billingv1alpha1.Discount{Percentage: 50},
+	}
+
+	// 5. recurring fee with 0% discount (explicitly no discount)
+	spRecurringZero := billingv1alpha1.ServicePricingSnapshot{
+		Name: "support-fee",
+		Spec: billingv1alpha1.ServicePricingSpec{
+			DisplayName: "Support Fee",
+			ChargeType:  billingv1alpha1.ChargeTypeRecurring,
+			Amount:      "5.00",
+			Interval:    billingv1alpha1.ChargeIntervalMonthly,
+		},
+		Discount: &billingv1alpha1.Discount{Percentage: 0},
+	}
+
+	// 6. one-time fee with nil discount (no discount)
+	spOneTimeNil := billingv1alpha1.ServicePricingSnapshot{
+		Name: "migration-fee",
+		Spec: billingv1alpha1.ServicePricingSpec{
+			DisplayName: "Migration Fee",
+			ChargeType:  billingv1alpha1.ChargeTypeOneTime,
+			Amount:      "100.00",
+			Trigger:     billingv1alpha1.ChargeTriggerBillingAccountActivation,
+		},
+	}
+
+	offer.Spec.ServicePricings = []billingv1alpha1.ServicePricingSnapshot{
+		spCompute, spStorage, spRecurring, spOneTime, spRecurringZero, spOneTimeNil,
+	}
+
+	m, err := buildOfferMapping(offer, meters)
+	if err != nil {
+		t.Fatalf("buildOfferMapping: %v", err)
+	}
+
+	// Check each rate card by Name
+	byName := make(map[string]omv3.BillingRateCard)
+	for _, rc := range m.Plan.Phases[0].RateCards {
+		byName[rc.Name] = rc
+	}
+
+	computeCard, ok := byName["Compute Usage"]
+	if !ok || computeCard.Discounts == nil || computeCard.Discounts.Percentage == nil || *computeCard.Discounts.Percentage != 15 {
+		t.Errorf("compute card discount = %+v (ok=%v), want 15%%", computeCard.Discounts, ok)
+	}
+
+	storageCard, ok := byName["Storage Usage"]
+	if !ok || storageCard.Discounts == nil || storageCard.Discounts.Percentage == nil || *storageCard.Discounts.Percentage != 100 {
+		t.Errorf("storage card discount = %+v (ok=%v), want 100%%", storageCard.Discounts, ok)
+	}
+
+	recurringCard, ok := byName["Base Fee"]
+	if !ok || recurringCard.Discounts == nil || recurringCard.Discounts.Percentage == nil || *recurringCard.Discounts.Percentage != 25 {
+		t.Errorf("base fee card discount = %+v (ok=%v), want 25%%", recurringCard.Discounts, ok)
+	}
+
+	oneTimeCard, ok := byName["Setup Fee"]
+	if !ok || oneTimeCard.Discounts == nil || oneTimeCard.Discounts.Percentage == nil || *oneTimeCard.Discounts.Percentage != 50 {
+		t.Errorf("setup fee card discount = %+v (ok=%v), want 50%%", oneTimeCard.Discounts, ok)
+	}
+
+	supportCard, ok := byName["Support Fee"]
+	if !ok || supportCard.Discounts != nil {
+		t.Errorf("support fee card discount = %+v (ok=%v), want nil (0%% discount)", supportCard.Discounts, ok)
+	}
+
+	migrationCard, ok := byName["Migration Fee"]
+	if !ok || migrationCard.Discounts != nil {
+		t.Errorf("migration fee card discount = %+v (ok=%v), want nil", migrationCard.Discounts, ok)
 	}
 }

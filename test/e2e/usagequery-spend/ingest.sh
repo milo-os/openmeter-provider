@@ -37,12 +37,14 @@ send() {
 # Whole seconds apart, so START < A < W < B.
 sleep 2
 a=$(now)
-send "$(event 1 "$REQUESTS" "$a" 4 us-east4; event 2 "$REQUESTS" "$a" 2 eu-west1; event 3 "$EGRESS" "$a" 8)"
+send "$(event 1 "$REQUESTS" "$a" 4 us-east4; event 2 "$REQUESTS" "$a" 2 eu-west1; event 3 "$EGRESS" "$a" 8
+  event 6 "$STORAGE" "$a" 5; event 7 "$BACKUP" "$a" 10)"
 sleep 2
 w=$(now)
 sleep 2
 b=$(now)
-send "$(event 4 "$REQUESTS" "$b" 6 us-east4; event 5 "$EGRESS" "$b" 20)"
+send "$(event 4 "$REQUESTS" "$b" 6 us-east4; event 5 "$EGRESS" "$b" 20
+  event 8 "$STORAGE" "$b" 10; event 9 "$BACKUP" "$b" 30)"
 end=$(date -u -v+1H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '1 hour' '+%Y-%m-%dT%H:%M:%SZ')
 
 printf "START=%s\nW=%s\nEND=%s\n" "$start" "$w" "$end" >"$TIMES_FILE"

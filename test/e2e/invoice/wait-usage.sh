@@ -9,7 +9,7 @@ id=$(customer_id)
 [ -n "$id" ] || fail "OpenMeter customer for ${ACCOUNT} not found"
 
 for line in "${LINES[@]}"; do
-  IFS='|' read -r _ slug name want _ _ _ <<<"$line"
+  IFS='|' read -r _ slug name want _ _ _ _ <<<"$line"
   check() {
     body=$(om GET "/meters/${slug}/query?filterCustomerId=${id}") || return 1
     got=$(echo "$body" | jq -r '[.data[]?.value] | add // 0')

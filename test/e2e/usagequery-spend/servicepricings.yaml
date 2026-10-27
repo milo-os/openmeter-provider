@@ -2,6 +2,8 @@
 # so the plan has two rate cards (features with filters) on one meter.
 # Egress: graduated tiers, so the price of usage depends on the usage
 # before it in the billing period.
+# Storage: the same graduated tiers as egress, discounted 20% by the Offer.
+# Backup: a flat rate, discounted 100% by the Offer.
 apiVersion: billing.miloapis.com/v1alpha1
 kind: ServicePricing
 metadata:
@@ -38,3 +40,36 @@ spec:
         - upTo: "100"
           rate: "0.5"
         - rate: "0.1"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: e2e-sp-storage
+spec:
+  displayName: "Storage"
+  chargeType: Usage
+  currency: USD
+  metric: e2e-sp-storage
+  pricingUnit: GBy
+  serviceRef: storage.miloapis.com
+  rates:
+    - tiered:
+        - upTo: "10"
+          rate: "1"
+        - upTo: "100"
+          rate: "0.5"
+        - rate: "0.1"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: e2e-sp-backup
+spec:
+  displayName: "Backup"
+  chargeType: Usage
+  currency: USD
+  metric: e2e-sp-backup
+  pricingUnit: GBy
+  serviceRef: storage.miloapis.com
+  rates:
+    - flat: "0.2"

@@ -12,6 +12,7 @@ import (
 	"github.com/alpacahq/alpacadecimal"
 	om "github.com/openmeterio/openmeter/api/client/go"
 	"github.com/openmeterio/openmeter/openmeter/productcatalog"
+	"github.com/openmeterio/openmeter/pkg/models"
 
 	usagev1alpha1 "go.miloapis.com/billing/api/usage/v1alpha1"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
@@ -492,5 +493,41 @@ func TestSpend_TotalOfEveryMeter(t *testing.T) {
 	wantSpend(t, meterResult(t, got, "peak-storage"), "12", "USD")
 	if s := got.Status.Spend; s == nil || s.Amount != "32" || s.Currency != "USD" || got.Status.SpendError != "" {
 		t.Errorf("status.spend = %+v, spendError %q; want 32 USD", s, got.Status.SpendError)
+	}
+}
+
+func TestSpend_WithDiscounts(t *testing.T) {
+	peakSlug := openmeter.MeterSlug("compute.miloapis.com/peak-storage")
+	cpuCard := spendCard("cpu", cpuSlug, unitPrice2, nil)
+	cpuCard.Discounts = &productcatalog.Discounts{
+		Percentage: &productcatalog.PercentageDiscount{
+			Percentage: models.NewPercentage(15),
+		},
+	}
+	peakCard := spendCard("peak", peakSlug, unitPrice3, nil)
+	peakCard.Discounts = &productcatalog.Discounts{
+		Percentage: &productcatalog.PercentageDiscount{
+			Percentage: models.NewPercentage(100),
+		},
+	}
+
+	omc := &fakeOpenMeter{customers: everyCustomer(), subscriptions: map[string][]fakeSubscription{
+		"organization-acme/acme-main": {monthly("s1", "USD", day(1, 0), day(1, 0), cpuCard, peakCard)},
+	}}
+	omc.query = func(q openmeter.MeterQuery) ([]openmeter.MeterQueryRow, error) {
+		value := 10.0 // cpu-hours: 10 * 2 = 20, net 15% discount = 17
+		if q.Slug == peakSlug {
+			value = 4 // peak-storage: 4 * 3 = 12, net 100% discount = 0
+		}
+		return []openmeter.MeterQueryRow{{WindowStart: q.From, WindowEnd: q.To, CustomerID: "01ACMEMAIN", GroupBy: map[string]string{}, Value: value}}, nil
+	}
+	got, err := create(t, inParent("Organization", "acme"), NewREST(world(t), omc), spendQuery("cpu-hours", "peak-storage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSpend(t, meterResult(t, got, "cpu-hours"), "17", "USD")
+	wantSpend(t, meterResult(t, got, "peak-storage"), "0", "USD")
+	if s := got.Status.Spend; s == nil || s.Amount != "17" || s.Currency != "USD" || got.Status.SpendError != "" {
+		t.Errorf("status.spend = %+v, spendError %q; want 17 USD", s, got.Status.SpendError)
 	}
 }

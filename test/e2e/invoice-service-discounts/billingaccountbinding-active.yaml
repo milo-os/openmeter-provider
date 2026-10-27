@@ -1,0 +1,8 @@
+# Status patch simulating billing's BillingAccountBinding controller (not
+# running in e2e).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccountBinding
+metadata:
+  name: e2e-inv-sd-binding
+status:
+  phase: Active

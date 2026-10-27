@@ -88,3 +88,38 @@ spec:
     pricingUnit: By
   monitoredResourceTypes:
     - e2e.miloapis.com/Resource
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: inv-backup-gb
+spec:
+  meterName: inv-backup-gb
+  phase: Published
+  displayName: "Backup storage GB"
+  measurement:
+    aggregation: Sum
+    unit: GBy
+  billing:
+    consumedUnit: GBy
+    pricingUnit: GBy
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: inv-api-requests
+spec:
+  meterName: inv-api-requests
+  phase: Published
+  displayName: "API requests"
+  measurement:
+    aggregation: Sum
+    unit: "1"
+  billing:
+    consumedUnit: "1"
+    pricingUnit: "1"
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource
+

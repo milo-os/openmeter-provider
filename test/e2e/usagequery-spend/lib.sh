@@ -15,6 +15,8 @@ PROJECT=e2e-sp-web
 ACCOUNT=e2e-sp-account
 REQUESTS=e2e-sp-requests
 EGRESS=e2e-sp-egress
+STORAGE=e2e-sp-storage
+BACKUP=e2e-sp-backup
 
 # Times shared between steps (chainsaw script outputs do not carry over):
 # START (the subscription's start, to the second), W (between the two
@@ -26,21 +28,34 @@ TIMES_FILE=/tmp/e2e-usagequery-spend-times.env
 #   meter            batch A (before W)        batch B (after W)
 #   e2e-sp-requests  us-east4 4, eu-west1 2    us-east4 6
 #   e2e-sp-egress    8                         20
+#   e2e-sp-storage   5                         10
+#   e2e-sp-backup    10                        30
 #
 # Prices (servicepricings.yaml): requests 0.5 in us-east4, 0.25 elsewhere;
-# egress graduated, 1 up to 10, 0.5 up to 100, 0.1 above.
+# egress and storage graduated, 1 up to 10, 0.5 up to 100, 0.1 above; backup
+# flat 0.2. The Offer discounts storage 20% and backup 100%.
 #
 # Whole subscription: requests 10 x 0.5 + 2 x 0.25 = 5.5
 #                     egress   10 x 1 + 18 x 0.5   = 19
 # From W only:        requests 6 x 0.5             = 3
 #                     egress   continues after A's 8 units:
 #                              2 x 1 + 18 x 0.5    = 11 (not 15)
-# Total (status.spend):  whole subscription 24.5, from W 14
+#
+# Discounted, after the discount (list price in brackets):
+# Whole subscription: storage  10 x 1 + 5 x 0.5    = 12.5, less 20%   = 10
+#                     backup   40 x 0.2            = 8, less 100%     = 0
+# From W only:        storage  continues after A's 5 units:
+#                              5 x 1 + 5 x 0.5     = 7.5, less 20%    = 6
+#                     backup   30 x 0.2            = 6, less 100%     = 0
+# Discount on the invoice lines (whole subscription): storage 2.5, backup 8
+#
+# Total (status.spend):  whole subscription 34.5, from W 20
 
-# spend_spec START END — a spec reading both meters' totals with spend.
+# spend_spec START END — a spec reading every meter's totals with spend.
 spend_spec() {
-  jq -cn --arg start "$1" --arg end "$2" --arg r "$REQUESTS" --arg e "$EGRESS" '{
-    startTime: $start, endTime: $end, meters: [$r, $e],
+  jq -cn --arg start "$1" --arg end "$2" --arg r "$REQUESTS" --arg e "$EGRESS" \
+    --arg s "$STORAGE" --arg b "$BACKUP" '{
+    startTime: $start, endTime: $end, meters: [$r, $e, $s, $b],
     groupings: [{groupBy: []}], includeSpend: true
   }'
 }

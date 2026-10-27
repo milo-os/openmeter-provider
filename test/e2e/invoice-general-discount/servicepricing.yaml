@@ -1,0 +1,82 @@
+# One usage price per meter.
+# General offer discount is 100%, so all lines net to $0.00.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-gd-compute
+spec:
+  displayName: "Compute: vCPU hours"
+  chargeType: Usage
+  currency: USD
+  metric: inv-gd-vcpu-hours
+  pricingUnit: "{vCPU-hour}"
+  serviceRef: compute.miloapis.com
+  rates:
+    - flat: "0.04"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-gd-storage
+spec:
+  displayName: "Block storage: GB-months"
+  chargeType: Usage
+  currency: USD
+  metric: inv-gd-storage-gb-months
+  pricingUnit: "{GB-month}"
+  serviceRef: storage.miloapis.com
+  rates:
+    - flat: "0.02"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-gd-egress
+spec:
+  displayName: "Network egress: GB"
+  chargeType: Usage
+  currency: USD
+  metric: inv-gd-egress-gb
+  pricingUnit: GBy
+  serviceRef: networking.miloapis.com
+  rates:
+    - flat: "0.09"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-gd-memory
+spec:
+  displayName: "Compute: memory GiB-seconds"
+  chargeType: Usage
+  currency: USD
+  metric: inv-gd-memory-byte-seconds
+  pricingUnit: GiB-second
+  serviceRef: compute.miloapis.com
+  rates:
+    - flat: "0.01"
+  unitConversion:
+    meterUnitsPerPricingUnit: "1073741824"
+    description: "1 GiB = 1,073,741,824 bytes"
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: inv-gd-egress-tiered
+spec:
+  displayName: "Network egress: GiB, tiered"
+  chargeType: Usage
+  currency: USD
+  metric: inv-gd-egress-bytes
+  pricingUnit: GiB
+  serviceRef: networking.miloapis.com
+  rates:
+    - tiered:
+        - upTo: "2"
+          rate: "0"
+        - upTo: "5"
+          rate: "0.10"
+        - rate: "0.05"
+  unitConversion:
+    meterUnitsPerPricingUnit: "1073741824"
+    description: "1 GiB = 1,073,741,824 bytes"

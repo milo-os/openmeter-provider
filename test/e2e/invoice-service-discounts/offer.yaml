@@ -1,0 +1,29 @@
+# Authored as Draft with refs and published with ../offer/publish.sh.
+# ServicePricing inv-sd-compute has a 15% discount.
+# ServicePricing inv-sd-storage has a 100% discount.
+# Others have no discount.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-inv-sd-offer
+  annotations:
+    kubernetes.io/display-name: "E2E Invoice Service Discounts Offer"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Usage
+  servicePricingRefs:
+    - name: inv-sd-compute
+      namespace: openmeter-system
+      discount:
+        percentage: 15
+    - name: inv-sd-storage
+      namespace: openmeter-system
+      discount:
+        percentage: 100
+    - name: inv-sd-egress
+      namespace: openmeter-system
+    - name: inv-sd-memory
+      namespace: openmeter-system
+    - name: inv-sd-egress-tiered
+      namespace: openmeter-system

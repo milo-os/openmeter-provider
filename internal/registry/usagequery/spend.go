@@ -58,6 +58,7 @@ type pricedRange struct {
 	price      *productcatalog.Price
 	unitConfig *productcatalog.UnitConfig
 	filters    map[string]om.FilterString
+	discounts  *productcatalog.Discounts
 	// from and to bound the usage to price; earlierFrom is where the
 	// billing period's usage starts counting for this item, so tiered
 	// prices continue from the usage between earlierFrom and from.
@@ -271,6 +272,7 @@ func cardRanges(sub om.Subscription, card openmeter.UsageRateCard, planBySlug ma
 			price:       card.Price,
 			unitConfig:  card.UnitConfig,
 			filters:     card.Filters,
+			discounts:   card.Discounts,
 			from:        t.Truncate(time.Second),
 			to:          partEnd.Truncate(time.Second),
 			earlierFrom: latest(period.From, sub.ActiveFrom).Truncate(time.Second),
@@ -302,6 +304,7 @@ func (c *spendCalculator) priceRange(ctx context.Context, plan meterPlan, r pric
 	amount, err := openmeter.PriceUsage(openmeter.UsageToPrice{
 		Price:                 r.price,
 		UnitConfig:            r.unitConfig,
+		Discounts:             r.discounts,
 		Currency:              r.currency,
 		From:                  r.from,
 		To:                    r.to,

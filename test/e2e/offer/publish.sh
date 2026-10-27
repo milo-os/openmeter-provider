@@ -24,7 +24,9 @@ if [ "$step" = "ga" ] || [ "$step" = "all" ]; then
 fi
 
 if [ "$step" = "snapshot" ] || [ "$step" = "all" ]; then
-  refs=$(kubectl get offer "$offer" -o json | jq -c '.spec.servicePricingRefs // []')
+  offer_json=$(kubectl get offer "$offer" -o json)
+  refs=$(echo "$offer_json" | jq -c '.spec.servicePricingRefs // []')
+  offer_discount=$(echo "$offer_json" | jq -c '.spec.discount // null')
   if [ "$(echo "$refs" | jq 'length')" -eq 0 ]; then
     echo "publish.sh: offer ${offer} has no servicePricingRefs to snapshot"
     exit 1
@@ -38,7 +40,16 @@ if [ "$step" = "snapshot" ] || [ "$step" = "all" ]; then
       echo "publish.sh: ServicePricing ${ns}/${name} referenced by ${offer} not found"
       exit 1
     fi
-    snapshot=$(echo "$snapshot" | jq -c --argjson sp "$sp" '. + [{name: $sp.metadata.name, spec: $sp.spec}]')
+    # Note: billing's Offer controller does not run in openmeter-provider e2e tests.
+    # Discount inheritance (ref.discount first, then offer.spec.discount) is simulated
+    # here to match billing's internal/controller/offer_controller.go. Upstream Offer
+    # resolution is covered in the billing repository.
+    discount=$(echo "$refs" | jq -c --argjson od "$offer_discount" ".[$i].discount // \$od")
+    if [ "$discount" != "null" ]; then
+      snapshot=$(echo "$snapshot" | jq -c --argjson sp "$sp" --argjson disc "$discount" '. + [{name: $sp.metadata.name, spec: $sp.spec, discount: $disc}]')
+    else
+      snapshot=$(echo "$snapshot" | jq -c --argjson sp "$sp" '. + [{name: $sp.metadata.name, spec: $sp.spec}]')
+    fi
   done
   kubectl patch offer "$offer" --type merge -p "{\"spec\":{\"servicePricings\":${snapshot}}}"
   echo "Snapshotted $(echo "$snapshot" | jq 'length') service pricing(s) into ${offer}."
