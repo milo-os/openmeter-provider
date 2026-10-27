@@ -264,8 +264,7 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 			sp.Name, dimension, meter.Name, meter.Dimensions)
 	}
 
-	discounts, err := resolveDiscount(sp)
-	if err != nil {
+	if _, err := resolveDiscount(sp); err != nil {
 		return err
 	}
 
@@ -298,6 +297,12 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 		if err != nil {
 			return err
 		}
+
+		discounts, err := resolveDiscount(sp)
+		if err != nil {
+			return err
+		}
+
 		name := sp.Spec.DisplayName
 		if name == "" {
 			name = sp.Name

@@ -716,6 +716,14 @@ func TestBuildOfferMapping_Discounts(t *testing.T) {
 				t.Errorf("rate card %d (%s) discount = %v, want 15", i, rc.Key, *rc.Discounts.Percentage)
 			}
 		}
+		if len(m.Plan.Phases[0].RateCards) > 1 {
+			if m.Plan.Phases[0].RateCards[0].Discounts == m.Plan.Phases[0].RateCards[1].Discounts {
+				t.Error("rate cards share the same Discounts pointer")
+			}
+			if m.Plan.Phases[0].RateCards[0].Discounts.Percentage == m.Plan.Phases[0].RateCards[1].Discounts.Percentage {
+				t.Error("rate cards share the same Discounts.Percentage pointer")
+			}
+		}
 	})
 
 	t.Run("snapshot discount 100 percent", func(t *testing.T) {
