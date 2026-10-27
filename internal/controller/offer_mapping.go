@@ -336,6 +336,9 @@ func resolveDiscount(sp billingv1alpha1.ServicePricingSnapshot) (*omv3.BillingRa
 	if discount == nil {
 		return nil, nil
 	}
+	// Upstream CRD validation (+kubebuilder:validation:Minimum=0, Maximum=100) and
+	// billing's offer controller already reject out-of-range discounts; checked here
+	// as a defensive backstop.
 	if discount.Percentage < 0 || discount.Percentage > 100 {
 		return nil, invalidOffer("service pricing %q: discount percentage %d is invalid; must be between 0 and 100", sp.Name, discount.Percentage)
 	}
