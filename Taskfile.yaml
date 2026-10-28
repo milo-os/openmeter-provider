@@ -20,15 +20,13 @@ vars:
   # openmeter-provider reconciles billing's MeterDefinition kind, so its CRD
   # must be present in the cluster for the controller to start its watch.
   BILLING_REPO_REF: "v0.5.6"
-  # stripe-provider commit to pull the StripePaymentMethod and
+  # stripe-provider release to pull the StripePaymentMethod and
   # StripeCustomer CRDs from. BillingAccountReconciler watches both kinds
   # (see stripe_customer.go); without them in the cluster, the controller
   # manager fails to start its watches ("no matches for kind ...").
-  # StripeCustomer isn't in a release tag yet, so this is the full SHA of
-  # the commit go.mod's replace directive pins (kustomize fetches a full
-  # SHA, not the 12-character one in the pseudo-version). Bump the two
-  # together, and go back to a tag once one includes StripeCustomer.
-  STRIPE_PROVIDER_REPO_REF: "53a3d79b1f9d8768d0da05ef0f7fe6cdf2d0d82e"
+  # StripeCustomer arrived in v0.1.14. Keep this on the release go.mod's
+  # replace directive pins, and bump the two together.
+  STRIPE_PROVIDER_REPO_REF: "v0.1.14"
   # Milo's Project CRD, which the usage API server reads to find a project's
   # organization. Only Project is installed: dev has no Milo.
   MILO_REPO_REF: "v0.36.2"
