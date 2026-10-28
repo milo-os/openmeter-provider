@@ -450,6 +450,28 @@ func paymentMethodObjects(account *billingv1alpha1.BillingAccount) []client.Obje
 	return []client.Object{pm, spm}
 }
 
+// publishedStripeCustomer returns the StripeCustomer stripe-provider
+// publishes for account, controlled by ownerUID.
+func publishedStripeCustomer(account *billingv1alpha1.BillingAccount, customerID string, ownerUID types.UID) *stripev1alpha1.StripeCustomer {
+	return &stripev1alpha1.StripeCustomer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: account.Name, Namespace: account.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: billingv1alpha1.GroupVersion.String(), Kind: "BillingAccount",
+				Name: account.Name, UID: ownerUID, Controller: new(true),
+			}},
+		},
+		Spec:   stripev1alpha1.StripeCustomerSpec{BillingAccountRef: stripev1alpha1.BillingAccountLocalRef{Name: account.Name}},
+		Status: stripev1alpha1.StripeCustomerStatus{StripeCustomerID: customerID},
+	}
+}
+
+func invoiceBilled(account *billingv1alpha1.BillingAccount) {
+	account.Status.PaymentArrangement = &billingv1alpha1.BillingAccountPaymentArrangement{
+		Name: "msa", Type: billingv1alpha1.BillingArrangementTypeInvoice,
+	}
+}
+
 func withDefaultPaymentMethod(account *billingv1alpha1.BillingAccount, status metav1.ConditionStatus) {
 	account.Spec.DefaultPaymentMethodRef = &billingv1alpha1.DefaultPaymentMethodRef{Name: "pm-1"}
 	account.Status.Conditions = []metav1.Condition{{
@@ -494,7 +516,9 @@ func TestReconcile_ClearsStaleDefaultPaymentMethod(t *testing.T) {
 func TestReconcile_UnknownPaymentMethodStateLeavesStripeDataAlone(t *testing.T) {
 	account := baseBillingAccount()
 	withDefaultPaymentMethod(account, metav1.ConditionUnknown)
-	h := newSyncHarness(t, account, paymentMethodObjects(account)...)
+	// Not even with a published customer to fall back on.
+	objs := append(paymentMethodObjects(account), publishedStripeCustomer(account, "cus_1", account.UID))
+	h := newSyncHarness(t, account, objs...)
 	pm := "pm_card"
 	h.omc.stripeAppData["id-uid-1"] = om.StripeCustomerAppData{StripeCustomerId: "cus_1", StripeDefaultPaymentMethodId: &pm}
 
@@ -524,9 +548,7 @@ func TestReconcile_NoStripeCustomerKnownIsANoop(t *testing.T) {
 // once, not failed.
 func TestReconcile_InvoiceArrangementWithoutStripeCustomerWarns(t *testing.T) {
 	account := baseBillingAccount()
-	account.Status.PaymentArrangement = &billingv1alpha1.BillingAccountPaymentArrangement{
-		Name: "msa", Type: billingv1alpha1.BillingArrangementTypeInvoice,
-	}
+	invoiceBilled(account)
 	h := newSyncHarness(t, account)
 
 	for range 2 {
@@ -540,6 +562,73 @@ func TestReconcile_InvoiceArrangementWithoutStripeCustomerWarns(t *testing.T) {
 	}
 	if n := countEvents(events, EventReasonSynced); n != 1 {
 		t.Errorf("%d Synced events, want 1: %v", n, events)
+	}
+}
+
+// TestReconcile_InvoiceArrangementUsesThePublishedStripeCustomer: an
+// account billed by invoice with no card is invoiced to the Stripe
+// customer stripe-provider publishes for it, with no payment method.
+func TestReconcile_InvoiceArrangementUsesThePublishedStripeCustomer(t *testing.T) {
+	account := baseBillingAccount()
+	invoiceBilled(account)
+	h := newSyncHarness(t, account, publishedStripeCustomer(account, "cus_invoice", account.UID))
+
+	h.reconcile(t)
+	if !slices.Equal(h.omc.stripeEnsureCalls, []string{"cus_invoice/"}) {
+		t.Errorf("stripe upserts = %v, want cus_invoice with no payment method", h.omc.stripeEnsureCalls)
+	}
+	if n := countEvents(h.events(), EventReasonStripeCustomerMissing); n != 0 {
+		t.Errorf("%d StripeCustomerMissing events, want 0", n)
+	}
+}
+
+// TestReconcile_PublishedStripeCustomerOfAnEarlierAccountIsIgnored: a
+// StripeCustomer controlled by another UID names the Stripe customer of a
+// deleted account with the same name, so it must never be invoiced.
+func TestReconcile_PublishedStripeCustomerOfAnEarlierAccountIsIgnored(t *testing.T) {
+	account := baseBillingAccount()
+	invoiceBilled(account)
+	h := newSyncHarness(t, account, publishedStripeCustomer(account, "cus_old", "uid-deleted"))
+
+	h.reconcile(t)
+	if len(h.omc.stripeEnsureCalls) != 0 {
+		t.Errorf("stripe upserts = %v, want none", h.omc.stripeEnsureCalls)
+	}
+	if n := countEvents(h.events(), EventReasonStripeCustomerMissing); n != 1 {
+		t.Errorf("%d StripeCustomerMissing events, want 1", n)
+	}
+}
+
+// TestReconcile_CardOutranksThePublishedStripeCustomer: while the account
+// has a usable card, its StripePaymentMethod's customer and the card are
+// used, as before StripeCustomer existed.
+func TestReconcile_CardOutranksThePublishedStripeCustomer(t *testing.T) {
+	account := baseBillingAccount()
+	withDefaultPaymentMethod(account, metav1.ConditionTrue)
+	invoiceBilled(account)
+	objs := append(paymentMethodObjects(account), publishedStripeCustomer(account, "cus_published", account.UID))
+	h := newSyncHarness(t, account, objs...)
+
+	h.reconcile(t)
+	if !slices.Equal(h.omc.stripeEnsureCalls, []string{"cus_1/pm_card"}) {
+		t.Errorf("stripe upserts = %v, want cus_1/pm_card", h.omc.stripeEnsureCalls)
+	}
+}
+
+// TestReconcile_RemovedCardFallsBackToThePublishedStripeCustomer: once the
+// card is unusable, the account keeps its published customer and the card
+// is cleared from it.
+func TestReconcile_RemovedCardFallsBackToThePublishedStripeCustomer(t *testing.T) {
+	account := baseBillingAccount()
+	withDefaultPaymentMethod(account, metav1.ConditionFalse)
+	objs := append(paymentMethodObjects(account), publishedStripeCustomer(account, "cus_1", account.UID))
+	h := newSyncHarness(t, account, objs...)
+	pm := "pm_detached"
+	h.omc.stripeAppData["id-uid-1"] = om.StripeCustomerAppData{StripeCustomerId: "cus_1", StripeDefaultPaymentMethodId: &pm}
+
+	h.reconcile(t)
+	if !slices.Equal(h.omc.stripeEnsureCalls, []string{"cus_1/"}) {
+		t.Errorf("stripe upserts = %v, want the payment method cleared on cus_1", h.omc.stripeEnsureCalls)
 	}
 }
 

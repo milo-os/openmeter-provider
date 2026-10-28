@@ -22,8 +22,8 @@ import (
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )
 
-// stripeCustomer is the resolved Stripe identity for a BillingAccount's
-// default payment method.
+// stripeCustomer is the resolved Stripe identity for a BillingAccount: its
+// Stripe customer, and the default payment method's card when it has one.
 type stripeCustomer struct {
 	CustomerID      openmeter.StripeCustomerID
 	PaymentMethodID string
@@ -36,8 +36,57 @@ type stripeCustomer struct {
 	NoPaymentMethod bool
 }
 
-// resolveStripeCustomer returns the Stripe customer/payment-method ids for
-// the account's default payment method when
+// resolveStripeCustomer returns the account's Stripe customer and, when it
+// has a usable default payment method, that card.
+//
+// The card's own customer wins while the account has one, as it always
+// has. Without a usable card, the customer comes from the StripeCustomer
+// stripe-provider publishes for the account, so an account billed by
+// invoice, which needn't ever add a card, still has a Stripe customer for
+// OpenMeter to invoice. "Not known yet" stays not known: the published
+// customer isn't used then, so a card that is only briefly unreported is
+// never cleared.
+func (r *BillingAccountReconciler) resolveStripeCustomer(
+	ctx context.Context,
+	account *billingv1alpha1.BillingAccount,
+) (stripeCustomer, error) {
+	card, err := r.resolveDefaultPaymentMethod(ctx, account)
+	if err != nil || card.CustomerID != "" || !card.NoPaymentMethod {
+		return card, err
+	}
+	published, err := r.publishedStripeCustomerID(ctx, account)
+	if err != nil {
+		return stripeCustomer{}, err
+	}
+	card.CustomerID = published
+	return card, nil
+}
+
+// publishedStripeCustomerID returns the Stripe customer id stripe-provider
+// publishes on the account's StripeCustomer, or "" when there is none yet.
+// stripe-provider names the StripeCustomer after the account and makes the
+// account its controller; one controlled by another UID was left by an
+// earlier account with the same name, is waiting to be garbage collected,
+// and is ignored.
+func (r *BillingAccountReconciler) publishedStripeCustomerID(
+	ctx context.Context,
+	account *billingv1alpha1.BillingAccount,
+) (openmeter.StripeCustomerID, error) {
+	var sc stripev1alpha1.StripeCustomer
+	if err := r.Get(ctx, types.NamespacedName{Name: account.Name, Namespace: account.Namespace}, &sc); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("get StripeCustomer %s/%s: %w", account.Namespace, account.Name, err)
+	}
+	if owner := metav1.GetControllerOf(&sc); owner == nil || owner.UID != account.UID {
+		return "", nil
+	}
+	return openmeter.StripeCustomerID(sc.Status.StripeCustomerID), nil
+}
+
+// resolveDefaultPaymentMethod returns the Stripe customer/payment-method ids
+// for the account's default payment method when
 // DefaultPaymentMethodReady=True. Mirrors amberflo-provider's
 // resolveStripeCustomerID resolution path exactly:
 //
@@ -53,7 +102,7 @@ type stripeCustomer struct {
 // goes away, and OpenMeter would keep putting it on every Stripe invoice)
 // from "not known yet" (whatever was synced is left alone, the way
 // amberflo-provider preserves ExtraTraits across a transient flap).
-func (r *BillingAccountReconciler) resolveStripeCustomer(
+func (r *BillingAccountReconciler) resolveDefaultPaymentMethod(
 	ctx context.Context,
 	account *billingv1alpha1.BillingAccount,
 ) (stripeCustomer, error) {
@@ -114,11 +163,14 @@ func (r *BillingAccountReconciler) resolveStripeCustomer(
 }
 
 // reconcileStripeAppData converges the OpenMeter customer's Stripe app data
-// with the account's default payment method, and returns a short summary of
-// the resulting state for the Synced fingerprint.
+// with the account's Stripe customer and default payment method, and
+// returns a short summary of the resulting state for the Synced
+// fingerprint.
 //
 //   - A resolved Stripe customer is upserted (with its payment method, or
-//     none — which clears a stored one).
+//     none — which clears a stored one). An account billed by invoice
+//     resolves to its published StripeCustomer with no payment method:
+//     OpenMeter emails it invoices rather than charging a card.
 //   - No usable default payment method, while OpenMeter still stores one:
 //     re-upsert the stored Stripe customer without it. Otherwise OpenMeter
 //     keeps putting a detached card on every Stripe invoice
@@ -136,15 +188,13 @@ func (r *BillingAccountReconciler) resolveStripeCustomer(
 //     BillingArrangement) but OpenMeter has no Stripe customer for it:
 //     StripeCustomerMissing. OpenMeter's Stripe app can't invoice a
 //     customer without Stripe app data ("customer has no data for stripe
-//     app"), and the only Stripe customer id this controller can learn comes
-//     from a StripePaymentMethod, which an invoice-billed account need not
-//     have. OpenMeter can mint a Stripe customer itself, but only as a side
-//     effect of creating a Stripe Checkout session, and that customer would
-//     lack stripe-provider's metadata.billing_account tag — stripe-provider
-//     would then create a second Stripe customer for the same account as
-//     soon as a payment method is added. So this is surfaced, not papered
-//     over: the Stripe customer id has to be published independently of
-//     payment methods (by stripe-provider) for these accounts to invoice.
+//     app"). stripe-provider publishes the account's StripeCustomer once
+//     billing reports the arrangement, so this is normally brief; it
+//     persists only while stripe-provider can't create the Stripe customer
+//     (see the StripeCustomer's Ready condition). OpenMeter could mint a
+//     Stripe customer itself, but only as a side effect of a Stripe
+//     Checkout session, and stripe-provider would then create a second one
+//     for the same account, so this waits for stripe-provider's.
 func (r *BillingAccountReconciler) reconcileStripeAppData(
 	ctx context.Context,
 	logger logr.Logger,
@@ -192,8 +242,8 @@ func (r *BillingAccountReconciler) reconcileStripeAppData(
 		r.notices.forget(notConfiguredKey)
 		if invoiceTerms {
 			msg := fmt.Sprintf(
-				"account is billed by invoice (BillingArrangement %s) but OpenMeter has no Stripe customer for it, so OpenMeter cannot invoice it through Stripe; a Stripe customer id must be published for the account (stripe-provider only exposes one on a StripePaymentMethod)",
-				account.Status.PaymentArrangement.Name)
+				"account is billed by invoice (BillingArrangement %s) but has no Stripe customer yet, so OpenMeter cannot invoice it through Stripe; waiting for stripe-provider to publish one on StripeCustomer %s",
+				account.Status.PaymentArrangement.Name, account.Name)
 			logger.Info("Stripe customer missing for an invoice-billed account", "arrangement", account.Status.PaymentArrangement.Name)
 			if r.notices.changed(missingKey, msg) && r.Recorder != nil {
 				r.Recorder.Event(account, "Warning", EventReasonStripeCustomerMissing, msg)
