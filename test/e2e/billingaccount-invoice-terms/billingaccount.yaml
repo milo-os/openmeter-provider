@@ -1,0 +1,9 @@
+# An account that never adds a card: it pays by invoice.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-invoice-terms
+spec:
+  currencyCode: USD
+  contactInfo:
+    email: ap@example.com

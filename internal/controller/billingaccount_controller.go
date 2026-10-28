@@ -302,6 +302,7 @@ type BillingAccountReconciler struct {
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=paymentmethods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripepaymentmethods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile runs a single sync iteration for a BillingAccount.
@@ -628,6 +629,12 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Watches(&stripev1alpha1.StripePaymentMethod{},
 			handler.EnqueueRequestsFromMapFunc(r.mapStripePaymentMethodToAccount),
+		).
+		// stripe-provider publishing the Stripe customer for an account
+		// with no card is what lets it be invoiced.
+		Watches(&stripev1alpha1.StripeCustomer{},
+			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(),
+				&billingv1alpha1.BillingAccount{}, handler.OnlyControllerOwner()),
 		).
 		Complete(r)
 }

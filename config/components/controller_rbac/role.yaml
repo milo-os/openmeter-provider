@@ -65,6 +65,7 @@ rules:
 - apiGroups:
   - stripe.billing.miloapis.com
   resources:
+  - stripecustomers
   - stripepaymentmethods
   verbs:
   - get
