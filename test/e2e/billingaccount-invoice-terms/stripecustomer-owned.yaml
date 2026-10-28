@@ -1,0 +1,13 @@
+# Makes the account the StripeCustomer's controller, as stripe-provider
+# does when it creates one. The UID is the live account's.
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripeCustomer
+metadata:
+  name: e2e-invoice-terms
+  ownerReferences:
+    - apiVersion: billing.miloapis.com/v1alpha1
+      kind: BillingAccount
+      name: e2e-invoice-terms
+      uid: ($customerKey)
+      controller: true
+      blockOwnerDeletion: true

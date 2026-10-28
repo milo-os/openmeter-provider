@@ -1,0 +1,18 @@
+# Status patch simulating billing's own controller publishing the account's
+# active Invoice BillingArrangement. This cluster runs only
+# openmeter-provider, so nothing else would set it. Net 45, not billing's
+# standard 30, so the BillingProfile check proves the terms were applied.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-invoice-terms
+status:
+  paymentArrangement:
+    name: e2e-invoice-terms-msa
+    type: Invoice
+    startsAt: "2024-01-01T00:00:00Z"
+    invoice:
+      netDays: 45
+      creditLimit: "10000"
+      accountsPayableEmail: ap@example.com
+      purchaseOrderNumber: PO-E2E

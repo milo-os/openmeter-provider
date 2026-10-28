@@ -1,0 +1,9 @@
+# Status patch simulating stripe-provider publishing the Stripe customer.
+# The id comes from ../billingaccount/resolve-stripe-customer.sh: with a real
+# Stripe app, OpenMeter checks the customer exists in Stripe.
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripeCustomer
+metadata:
+  name: e2e-invoice-terms
+status:
+  stripeCustomerId: ($stripeCustomerId)

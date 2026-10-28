@@ -1,0 +1,12 @@
+# The StripeCustomer stripe-provider publishes for the account, fabricated
+# here because stripe-provider doesn't run in this cluster. Created with no
+# owner first: stripe-provider makes the account its controller, and
+# openmeter-provider ignores one that isn't controlled by the account (an
+# earlier account with the same name left it behind).
+apiVersion: stripe.billing.miloapis.com/v1alpha1
+kind: StripeCustomer
+metadata:
+  name: e2e-invoice-terms
+spec:
+  billingAccountRef:
+    name: e2e-invoice-terms

@@ -1,0 +1,167 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: billingaccount-invoice-terms
+spec:
+  description: |
+    An account billed by invoice that never adds a card is invoiced through
+    the Stripe customer stripe-provider publishes for it on a StripeCustomer.
+
+    The account starts paying by invoice (an Invoice BillingArrangement on
+    status.paymentArrangement): its BillingProfile sends invoices due after
+    the arrangement's net days, and with no Stripe customer yet the
+    reconciler reports StripeCustomerMissing. A StripeCustomer the account
+    doesn't control is ignored. Once the account controls it, the OpenMeter
+    customer's Stripe app data names that Stripe customer with no payment
+    method, so OpenMeter emails the invoice rather than charging a card.
+
+    As in the billingaccount suite, billing's controllers and stripe-provider
+    don't run here: the arrangement and the StripeCustomer are fabricated
+    with apply and patch steps, and the Stripe customer id comes from
+    ../billingaccount/resolve-stripe-customer.sh (a real test-mode customer
+    when OpenMeter has a real Stripe app, which validates it).
+
+    The customer key (the BillingAccount's UID) is read in every step that
+    needs it: chainsaw script outputs don't carry over between steps.
+  namespace: organization-e2e-it
+  steps:
+    - name: start the OpenMeter query pod
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-it
+                namespace: openmeter-system
+              status:
+                phase: Running
+
+    - name: an account billed by invoice sends invoices and waits for a Stripe customer
+      description: |
+        Create the account, wait for its first sync, then patch on an
+        Invoice arrangement at net 45. The per-account BillingProfile moves
+        to send_invoice, due after 45 days, and with no StripeCustomer the
+        reconciler warns once that OpenMeter has no Stripe customer to
+        invoice.
+      try:
+        - apply:
+            file: billingaccount.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Event
+              involvedObject:
+                apiVersion: billing.miloapis.com/v1alpha1
+                kind: BillingAccount
+                name: e2e-invoice-terms
+              reason: Synced
+              type: Normal
+        - patch:
+            file: billingaccount-invoice-terms.yaml
+            subresource: status
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: v1
+              kind: Event
+              involvedObject:
+                apiVersion: billing.miloapis.com/v1alpha1
+                kind: BillingAccount
+                name: e2e-invoice-terms
+              reason: StripeCustomerMissing
+              type: Warning
+        - script:
+            timeout: 35s
+            content: |
+              sh verify-invoice-billing-profile.sh e2e-invoice-terms "$NAMESPACE"
+
+    - name: a StripeCustomer the account doesn't control is ignored
+      description: |
+        Publish a Stripe customer on a StripeCustomer with no controller, as
+        one left behind by an earlier account with the same name would be,
+        and confirm OpenMeter is never given it.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-invoice-terms -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - script:
+            content: |
+              QUERY_POD=openmeter-query-it sh ../billingaccount/resolve-stripe-customer.sh "$NAMESPACE" customerId
+            outputs:
+              - name: stripeCustomerId
+                value: ($stdout)
+        - apply:
+            file: stripecustomer.yaml
+        - patch:
+            file: stripecustomer-published.yaml
+            subresource: status
+        - script:
+            timeout: 50s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+            content: |
+              sh verify-no-stripe-app-data.sh "$CUSTOMER_KEY"
+
+    - name: once the account controls the StripeCustomer, OpenMeter invoices that customer
+      description: |
+        Make the account the StripeCustomer's controller, as stripe-provider
+        does. The StripeCustomer watch re-syncs the account, and its Stripe
+        app data names the published customer with no default payment
+        method.
+      try:
+        - script:
+            content: |
+              kubectl get billingaccount e2e-invoice-terms -n "$NAMESPACE" -o jsonpath='{.metadata.uid}'
+            outputs:
+              - name: customerKey
+                value: ($stdout)
+        - script:
+            content: |
+              QUERY_POD=openmeter-query-it sh ../billingaccount/resolve-stripe-customer.sh "$NAMESPACE" customerId
+            outputs:
+              - name: stripeCustomerId
+                value: ($stdout)
+        - patch:
+            file: stripecustomer-owned.yaml
+        - script:
+            timeout: 35s
+            env:
+              - name: CUSTOMER_KEY
+                value: ($customerKey)
+              - name: STRIPE_CUSTOMER_ID
+                value: ($stripeCustomerId)
+            content: |
+              sh verify-stripe-customer.sh "$CUSTOMER_KEY" "$STRIPE_CUSTOMER_ID"
+
+    - name: delete the account
+      description: |
+        The account's finalizers release it, and its StripeCustomer is
+        garbage collected with it.
+      try:
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              name: e2e-invoice-terms
+        - error:
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-invoice-terms
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: stripe.billing.miloapis.com/v1alpha1
+              kind: StripeCustomer
+              metadata:
+                name: e2e-invoice-terms
