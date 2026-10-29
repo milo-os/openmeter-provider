@@ -146,8 +146,8 @@ spec:
             timeout: 70s
             content: |
               bash expect-subscriptions.sh \
-                '(live | length == 1) and (live | on($a; 1) | length == 1) and live[0].status == "active" and live[0].metadata["miloapis.com/billing-entitlement"] == $be' \
-                "exactly one active subscription on Offer A v1, tagged with the entitlement"
+                '(live | length == 1) and (live | on($a; 1) | length == 1) and live[0].status == "active" and live[0].metadata["miloapis.com/billing-entitlement"] == $be and live[0].billingAnchor[8:19] == "01T00:00:00"' \
+                "exactly one active subscription on Offer A v1, tagged with the entitlement, billing on the 1st"
 
     - name: re-publishing Offer A migrates the subscription to v2
       description: |
@@ -164,8 +164,8 @@ spec:
             timeout: 70s
             content: |
               bash expect-subscriptions.sh \
-                '(live | length == 1) and (live | on($a; 2) | .[0].status == "active") and (on($a; 1) | all(.status == "inactive")) and live[0].metadata["miloapis.com/billing-entitlement"] == $be' \
-                "one active subscription on Offer A v2, v1 ended, metadata kept"
+                '(live | length == 1) and (live | on($a; 2) | .[0].status == "active") and (on($a; 1) | all(.status == "inactive")) and live[0].metadata["miloapis.com/billing-entitlement"] == $be and live[0].billingAnchor[8:19] == "01T00:00:00"' \
+                "one active subscription on Offer A v2, v1 ended, metadata and billing day kept"
 
     - name: switching offerRef to Offer B changes the plan immediately
       description: |
@@ -183,8 +183,8 @@ spec:
             timeout: 70s
             content: |
               bash expect-subscriptions.sh \
-                '(live | length == 1) and (live | on($b; 1) | .[0].status == "active") and live[0].metadata["miloapis.com/billing-entitlement"] == $be and (map(select(.plan.key == $a)) | all(.status == "inactive"))' \
-                "one active subscription on Offer B; nothing left on Offer A"
+                '(live | length == 1) and (live | on($b; 1) | .[0].status == "active") and live[0].metadata["miloapis.com/billing-entitlement"] == $be and (map(select(.plan.key == $a)) | all(.status == "inactive")) and live[0].billingAnchor[8:19] == "01T00:00:00"' \
+                "one active subscription on Offer B, still billing on the 1st; nothing left on Offer A"
 
     - name: deleting the entitlement cancels the subscription
       try:

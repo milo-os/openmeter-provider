@@ -65,7 +65,9 @@ type DesiredBillingProfile struct {
 	//
 	// Note that Collection.Interval (a sibling of Alignment, copied from the
 	// default profile) IS honored, but it is a grace period that delays
-	// collection, not a cadence, so it is not a substitute.
+	// collection, not a cadence, so it is not a substitute. What OpenMeter
+	// does honor is a subscription's billing anchor, which the entitlement
+	// controller sets to the invoice day (DesiredSubscription.BillingAnchor).
 	// See billingProfileNeedsUpdate and TODO.md.
 	InvoiceFrequency string
 	// InvoiceDayOfMonth (1-28) is encoded as the day-of-month of the

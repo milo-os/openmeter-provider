@@ -261,7 +261,9 @@ func (n *notices) forgetPrefix(prefix string) {
 // billingprofile_sync.go) — but only partly: OpenMeter honors netDays
 // (Workflow.Invoicing.DueAfter) and silently discards the collection
 // alignment carrying invoiceFrequency/invoiceDayOfMonth, verified live
-// against a real instance. See DesiredBillingProfile's field docs.
+// against a real instance. See DesiredBillingProfile's field docs. The
+// invoice day instead reaches OpenMeter as each new subscription's billing
+// anchor (see subscriptionBillingAnchor).
 //
 // spec.taxIds is NOT synced: it has no per-customer home on OpenMeter (tax
 // identity lives only on a BillingProfile's Supplier, and as a read-only

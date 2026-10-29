@@ -37,4 +37,4 @@ if retry 30 check; then
   exit 0
 fi
 fail "${description} (filter: ${filter})" \
-  "$(echo "${subs:-[]}" | jq -c '[.[] | {id, status, plan: "\(.plan.key)@\(.plan.version)", activeFrom, activeTo, metadata}]')"
+  "$(echo "${subs:-[]}" | jq -c '[.[] | {id, status, plan: "\(.plan.key)@\(.plan.version)", activeFrom, activeTo, billingAnchor, metadata}]')"

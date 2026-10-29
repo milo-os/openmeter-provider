@@ -213,6 +213,10 @@ func TestBillingEntitlement_SubscribesAccountToOfferPlan(t *testing.T) {
 		}
 	}
 
+	if want := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC); got.BillingAnchor == nil || !got.BillingAnchor.Equal(want) {
+		t.Errorf("BillingAnchor = %v, want the 1st of a month (%s)", got.BillingAnchor, want)
+	}
+
 	c := assertCondition(t, r, metav1.ConditionTrue, conditionReasonSynced)
 	if !strings.Contains(c.Message, "sub-1") || c.ObservedGeneration != 1 {
 		t.Errorf("condition = %+v", c)
@@ -228,6 +232,27 @@ func TestBillingEntitlement_SubscribesAccountToOfferPlan(t *testing.T) {
 	reconcileEntitlement(t, r, testBEName)
 	if events := drainRecorder(rec); len(events) != 0 {
 		t.Errorf("steady state emitted events: %v", events)
+	}
+}
+
+func TestSubscriptionBillingAnchor(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		terms   *billingv1alpha1.PaymentTerms
+		wantDay int
+	}{
+		{"no terms bill on the 1st", nil, 1},
+		{"terms without a day bill on the 1st", &billingv1alpha1.PaymentTerms{}, 1},
+		{"the account's invoice day", &billingv1alpha1.PaymentTerms{InvoiceDayOfMonth: 15}, 15},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account := testAccount()
+			account.Spec.PaymentTerms = tc.terms
+			got := subscriptionBillingAnchor(account)
+			if want := time.Date(2025, time.January, tc.wantDay, 0, 0, 0, 0, time.UTC); !got.Equal(want) {
+				t.Errorf("anchor = %s, want %s", got, want)
+			}
+		})
 	}
 }
 
