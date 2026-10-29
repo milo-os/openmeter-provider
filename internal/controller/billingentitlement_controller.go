@@ -110,7 +110,12 @@ type BillingEntitlementReconciler struct {
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=offers,verbs=get;list;watch
 
 // Reconcile syncs a single BillingEntitlement.
-func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
+func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconcile.Request) (res ctrl.Result, err error) {
+	start := time.Now()
+	defer func() {
+		observeReconcile(billingEntitlementControllerName, start, res, err)
+	}()
+
 	logger := log.FromContext(ctx).WithValues("billingEntitlement", req.Name, "namespace", req.Namespace)
 
 	var be billingv1alpha1.BillingEntitlement

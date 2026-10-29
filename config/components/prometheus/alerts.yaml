@@ -1,0 +1,232 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: openmeter-provider-alerts
+  labels:
+    alert-group: openmeter-provider
+    app.kubernetes.io/name: openmeter-provider
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  groups:
+    - name: openmeter-provider.pods
+      rules:
+        - alert: OpenMeterProviderPodCrashLooping
+          expr: |
+            kube_pod_container_status_waiting_reason{
+              job="kube-state-metrics",
+              namespace="openmeter-system",
+              pod=~"openmeter-provider-.*|submission-consumer-.*",
+              reason="CrashLoopBackOff"
+            } > 0
+          for: 5m
+          labels:
+            expected_no_match: "true"
+            severity: critical
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Pod {{ $labels.pod }} is crash-looping"
+            description: |
+              Container {{ $labels.container }} in pod
+              {{ $labels.namespace }}/{{ $labels.pod }} has been in
+              CrashLoopBackOff for 5 minutes. Check logs:
+              kubectl logs -n {{ $labels.namespace }} {{ $labels.pod }} -c {{ $labels.container }} --previous
+
+        - alert: OpenMeterProviderDeploymentUnavailable
+          expr: |
+            kube_deployment_status_replicas_unavailable{
+              job="kube-state-metrics",
+              namespace="openmeter-system",
+              deployment=~"openmeter-provider|submission-consumer"
+            } > 0
+          for: 5m
+          labels:
+            severity: critical
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Deployment {{ $labels.deployment }} has unavailable replicas"
+            description: |
+              {{ $value }} replica(s) in deployment
+              {{ $labels.namespace }}/{{ $labels.deployment }} have been
+              unavailable for 5 minutes.
+
+    - name: openmeter-provider.submission
+      rules:
+        - alert: SubmissionConsumerPipelineStalled
+          expr: |
+            billing_pipeline_oldest_unsubmitted_seconds{
+              namespace="openmeter-system"
+            } > 0
+          for: 5m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Submission consumer pipeline has stalled"
+            description: |
+              The submission consumer has had unacknowledged events in flight
+              for over 5 minutes (current age: {{ $value }}s). This indicates
+              the consumer is unable to successfully submit to OpenMeter. Check
+              for transient API errors or NATS connectivity issues:
+              kubectl logs -n openmeter-system deployment/submission-consumer
+
+        - alert: SubmissionConsumerHighErrorRate
+          expr: |
+            sum by (namespace) (
+              rate(billing_submission_requests_total{
+                namespace="openmeter-system",
+                status=~"transient|permanent|config_error"
+              }[5m])
+            )
+            /
+            sum by (namespace) (
+              rate(billing_submission_requests_total{
+                namespace="openmeter-system"
+              }[5m])
+            ) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Submission consumer error rate above 10%"
+            description: |
+              More than 10% of OpenMeter ingest submissions have been failing
+              (transient, permanent, or config_error) over the last 5 minutes.
+              Check OpenMeter API health, credentials, and event payloads.
+
+        - alert: SubmissionConsumerPermanentFailures
+          expr: |
+            sum by (namespace) (
+              rate(billing_submission_requests_total{
+                namespace="openmeter-system",
+                status="permanent"
+              }[5m])
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Submission consumer dropping invalid events"
+            description: |
+              OpenMeter ingest is permanently rejecting usage events
+              (rate: {{ $value }}/s). Permanent failures mean billing events
+              are malformed or rejected by OpenMeter schema and are being dropped.
+
+        - alert: SubmissionConsumerConfigError
+          expr: |
+            sum by (namespace) (
+              rate(billing_submission_requests_total{
+                namespace="openmeter-system",
+                status="config_error"
+              }[5m])
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Submission consumer OpenMeter configuration error"
+            description: |
+              The submission consumer is receiving 401/403/404 responses from
+              OpenMeter. Check the OpenMeter API URL and secret token configuration.
+
+    - name: openmeter-provider.controllers
+      rules:
+        - alert: OpenMeterProviderReconcileHighErrorRate
+          expr: |
+            sum by (controller, namespace) (
+              rate(openmeter_provider_reconcile_duration_seconds_count{
+                namespace="openmeter-system",
+                result="error"
+              }[5m])
+            )
+            /
+            sum by (controller, namespace) (
+              rate(openmeter_provider_reconcile_duration_seconds_count{
+                namespace="openmeter-system"
+              }[5m])
+            ) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Controller {{ $labels.controller }} reconcile error rate above 10%"
+            description: |
+              Controller {{ $labels.controller }} in {{ $labels.namespace }} has had more
+              than 10% reconcile errors over the last 10 minutes. Check controller logs
+              for details:
+              kubectl logs -n {{ $labels.namespace }} -l control-plane=openmeter-provider
+
+    - name: openmeter.cronjobs
+      rules:
+        - alert: OpenMeterCronJobStale
+          expr: |
+            time() - max by (namespace, cronjob) (
+              kube_cronjob_status_last_successful_time{
+                namespace="openmeter-system",
+                cronjob=~"openmeter-(subscription-sync|billing-collect-invoices|billing-advance-invoices)"
+              }
+            ) > 7200
+          for: 15m
+          labels:
+            severity: critical
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "OpenMeter CronJob {{ $labels.cronjob }} has not succeeded recently"
+            description: |
+              CronJob {{ $labels.cronjob }} in {{ $labels.namespace }} has not completed
+              successfully in over 2 hours. Invoicing or subscription state may be drifting.
+              Check recent job pods and CronJob status:
+              kubectl get pods -n {{ $labels.namespace }} -l job-name
+
+        - alert: OpenMeterCronJobFailed
+          expr: |
+            max by (namespace, job_name) (
+              kube_job_status_failed{
+                namespace="openmeter-system",
+                job_name=~"openmeter-(subscription-sync|billing-collect-invoices|billing-advance-invoices)-.*"
+              }
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "OpenMeter Job {{ $labels.job_name }} failed"
+            description: |
+              Job {{ $labels.job_name }} in {{ $labels.namespace }} has failed.
+              Check pod logs:
+              kubectl logs -n {{ $labels.namespace }} -l job-name={{ $labels.job_name }}
+
+    - name: openmeter.database
+      rules:
+        - alert: OpenMeterPostgresWALArchiveFailing
+          expr: |
+            (
+              cnpg_pg_stat_archiver_last_failed_time{namespace="openmeter-system"}
+              -
+              cnpg_pg_stat_archiver_last_archived_time{namespace="openmeter-system"}
+            ) > 60
+          for: 15m
+          labels:
+            severity: critical
+            namespace: openmeter-system
+            service: billing
+            component: openmeter-database
+          annotations:
+            summary: "OpenMeter CNPG Postgres WAL archiving is failing"
+            description: |
+              Postgres cluster in {{ $labels.namespace }} has a more recent failed WAL
+              archive than success for over 15 minutes. Point-in-time recovery and disk
+              space are at risk; check barman / backup logs.

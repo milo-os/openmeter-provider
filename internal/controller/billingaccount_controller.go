@@ -308,7 +308,12 @@ type BillingAccountReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile runs a single sync iteration for a BillingAccount.
-func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
+func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.Request) (res ctrl.Result, err error) {
+	start := time.Now()
+	defer func() {
+		observeReconcile("billingaccount", start, res, err)
+	}()
+
 	logger := log.FromContext(ctx).WithValues("account", req.Name, "namespace", req.Namespace)
 
 	var account billingv1alpha1.BillingAccount

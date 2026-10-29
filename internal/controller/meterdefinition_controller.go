@@ -94,7 +94,12 @@ type MeterDefinitionReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile runs a single sync iteration for a MeterDefinition.
-func (r *MeterDefinitionReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
+func (r *MeterDefinitionReconciler) Reconcile(ctx context.Context, req reconcile.Request) (res ctrl.Result, err error) {
+	start := time.Now()
+	defer func() {
+		observeReconcile("meterdefinition", start, res, err)
+	}()
+
 	logger := log.FromContext(ctx).WithValues("meter", req.Name)
 
 	var md billingv1alpha1.MeterDefinition

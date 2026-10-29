@@ -3,17 +3,17 @@
 package submission
 
 import (
-	"sync"
-
 	"github.com/prometheus/client_golang/prometheus"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"go.miloapis.com/instrumentation/metrics"
 )
 
 // Prometheus instruments for the submission consumer.
 //
 // Registered against controller-runtime's default registry (the same one
-// /metrics is served from) so operators see billing_* series alongside
-// controller_runtime_* without extra wiring.
+// /metrics is served from) via go.miloapis.com/instrumentation/metrics,
+// so operators see billing_* series alongside controller_runtime_* without
+// extra wiring.
 //
 // Metric names match amberflo-provider's submission consumer exactly
 // (not openmeter_provider_*): these represent the same conceptual pipeline
@@ -21,12 +21,8 @@ import (
 // of which provider is doing the ingesting, so existing dashboards/alerts
 // built against these names keep working if a deployment ever swaps
 // providers.
-//
-// The sync.Once guard keeps re-running the manager in tests safe.
 
 var (
-	submissionOnce sync.Once
-
 	// submissionRequestsTotal counts OpenMeter ingest API submission
 	// attempts by outcome (see the outcome* constants in submission.go).
 	// Labels:
@@ -42,7 +38,7 @@ var (
 	//   status="max_deliveries_exceeded" — JetStream stopped redelivering a
 	//                           message after maxDeliver attempts; its usage
 	//                           was NOT submitted and must be replayed.
-	submissionRequestsTotal = prometheus.NewCounterVec(
+	submissionRequestsTotal = metrics.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "billing_submission_requests_total",
 			Help: "Total OpenMeter ingest API submission attempts, by outcome.",
@@ -54,22 +50,13 @@ var (
 	// fetched-but-unacked event in the current submission batch.
 	// Resets to 0 when no messages are in-flight (after each batch).
 	// A sustained non-zero value indicates the consumer is stalled.
-	pipelineOldestUnsubmittedSeconds = prometheus.NewGauge(
+	pipelineOldestUnsubmittedSeconds = metrics.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "billing_pipeline_oldest_unsubmitted_seconds",
 			Help: "Age in seconds of the oldest fetched-but-unacked event in the current submission batch. Resets to 0 when no messages are in flight.",
 		},
 	)
 )
-
-func init() {
-	submissionOnce.Do(func() {
-		ctrlmetrics.Registry.MustRegister(
-			submissionRequestsTotal,
-			pipelineOldestUnsubmittedSeconds,
-		)
-	})
-}
 
 // recordSubmission increments the submission counter with the given status
 // label (one of the outcome* constants).

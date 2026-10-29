@@ -77,7 +77,12 @@ type OfferReconciler struct {
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=meterdefinitions,verbs=get;list;watch
 
 // Reconcile syncs a single Offer.
-func (r *OfferReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
+func (r *OfferReconciler) Reconcile(ctx context.Context, req reconcile.Request) (res ctrl.Result, err error) {
+	start := time.Now()
+	defer func() {
+		observeReconcile("offer", start, res, err)
+	}()
+
 	logger := log.FromContext(ctx).WithValues("offer", req.Name)
 
 	var offer billingv1alpha1.Offer
