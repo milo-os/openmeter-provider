@@ -29,6 +29,9 @@ import (
 //     schedules its successor then; immediate ends it now;
 //   - v1 change and migrate refuse a target plan that converts usage, which
 //     only the v3 change route (immediate) accepts. It keeps no metadata.
+//   - a subscription bills from the anchor it was created with, else from
+//     its start; v1 change and migrate keep the previous anchor, while a v3
+//     change without one bills from the change. Anchors are not normalized.
 //
 // Statuses are stored, not computed from time.
 func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) bool {
@@ -85,6 +88,9 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 		f.v3Changes++
 		f.endSubscription(&sub, false)
 		next := f.newSubscription(sub.CustomerId, plan, om.SubscriptionStatusActive, time.Now(), nil)
+		if body.BillingAnchor != nil {
+			f.setAnchor(next.Id, *body.BillingAnchor)
+		}
 		writeJSON(http.StatusOK, map[string]any{"current": map[string]string{"id": sub.Id}, "next": map[string]string{"id": next.Id}})
 		return true
 	}
@@ -119,6 +125,9 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 			return true
 		}
 		sub := f.newSubscription(cust.Id, plan, om.SubscriptionStatusActive, time.Now(), body.Metadata)
+		if body.BillingAnchor != nil {
+			sub = f.setAnchor(sub.Id, *body.BillingAnchor)
+		}
 		writeJSON(http.StatusCreated, sub)
 		return true
 	}
@@ -177,6 +186,7 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 		}
 		f.endSubscription(&sub, false)
 		next := f.newSubscription(sub.CustomerId, plan, om.SubscriptionStatusActive, time.Now(), body.Metadata)
+		f.setAnchor(next.Id, sub.BillingAnchor)
 		writeJSON(http.StatusOK, om.SubscriptionChangeResponseBody{Current: sub, Next: om.SubscriptionExpanded{Id: next.Id}})
 
 	case action == "migrate":
@@ -211,6 +221,7 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 			status, from = om.SubscriptionStatusScheduled, *sub.ActiveTo
 		}
 		next := f.newSubscription(sub.CustomerId, plan, status, from, sub.Metadata)
+		f.setAnchor(next.Id, sub.BillingAnchor)
 		writeJSON(http.StatusOK, om.SubscriptionChangeResponseBody{Current: sub, Next: om.SubscriptionExpanded{Id: next.Id}})
 
 	case action == "restore":
@@ -268,7 +279,15 @@ func (f *fakeServer) newSubscription(customerID string, plan omv3.BillingPlan, s
 		ActiveFrom: from.Add(time.Duration(f.subscriptionSeq) * time.Millisecond),
 		Metadata:   metadata,
 	}
+	sub.BillingAnchor = sub.ActiveFrom
 	f.subscriptions[sub.Id] = sub
+	return sub
+}
+
+func (f *fakeServer) setAnchor(id string, anchor time.Time) om.Subscription {
+	sub := f.subscriptions[id]
+	sub.BillingAnchor = anchor
+	f.subscriptions[id] = sub
 	return sub
 }
 
@@ -571,6 +590,69 @@ func TestEnsureSubscription_CreatesThenConverges(t *testing.T) {
 	if f.subscriptionWrites != writes {
 		t.Errorf("converged subscription issued %d more writes", f.subscriptionWrites-writes)
 	}
+}
+
+func TestEnsureSubscription_BillingAnchor(t *testing.T) {
+	anchor := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
+	anchored := func(planKey string) DesiredSubscription {
+		d := desiredSub(planKey)
+		d.BillingAnchor = &anchor
+		return d
+	}
+
+	t.Run("a new subscription bills from the anchor, and plan changes keep it", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.seedCustomer("cust")
+		f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+		f.seedPlanVersion("q", 1, omv3.BillingPlanStatusActive)
+		f.seedPlanVersion("r", 1, omv3.BillingPlanStatusActive)
+		f.convertUsage("r")
+
+		for _, step := range []struct{ planKey, via string }{
+			{"p", "create"}, {"q", "v1 change"}, {"r", "v3 change"},
+		} {
+			state, err := c.EnsureSubscription(context.Background(), anchored(step.planKey))
+			if err != nil {
+				t.Fatalf("%s onto %s: %v", step.via, step.planKey, err)
+			}
+			if state.Current.Plan.Key != step.planKey || !state.Current.BillingAnchor.Equal(anchor) {
+				t.Errorf("after %s: plan %s, anchor %s; want %s anchored at %s",
+					step.via, state.Current.Plan.Key, state.Current.BillingAnchor, step.planKey, anchor)
+			}
+		}
+		if f.v3Changes != 1 {
+			t.Errorf("v3 changes = %d, want 1", f.v3Changes)
+		}
+	})
+
+	t.Run("an existing subscription keeps the day it started", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.seedCustomer("cust")
+		f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+		f.seedPlanVersion("q", 1, omv3.BillingPlanStatusActive)
+		before, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		started := before.Current.BillingAnchor
+
+		writes := f.subscriptionWrites
+		state, err := c.EnsureSubscription(context.Background(), anchored("p"))
+		if err != nil {
+			t.Fatalf("EnsureSubscription: %v", err)
+		}
+		if f.subscriptionWrites != writes || !state.Current.BillingAnchor.Equal(started) {
+			t.Errorf("writes = %d, anchor = %s; want none and %s", f.subscriptionWrites-writes, state.Current.BillingAnchor, started)
+		}
+
+		state, err = c.EnsureSubscription(context.Background(), anchored("q"))
+		if err != nil {
+			t.Fatalf("switch to q: %v", err)
+		}
+		if !state.Current.BillingAnchor.Equal(started) {
+			t.Errorf("after a plan change anchor = %s, want %s", state.Current.BillingAnchor, started)
+		}
+	})
 }
 
 func TestEnsureSubscription_ChangesPlanImmediately(t *testing.T) {

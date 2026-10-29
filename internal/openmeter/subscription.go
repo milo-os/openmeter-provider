@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
 	omv3 "github.com/openmeterio/openmeter/api/v3"
@@ -45,6 +46,12 @@ type DesiredSubscription struct {
 	// Metadata is attached to subscriptions this client creates or changes.
 	// Migrations keep the previous subscription's metadata.
 	Metadata map[string]string
+	// BillingAnchor, when set, is the date a new subscription's billing
+	// cycles count from. OpenMeter moves it back to the nearest cycle
+	// boundary before the subscription starts, so any 1st of a month bills
+	// on the 1st. Unset, a subscription bills from the day it starts.
+	// Changes and migrations keep the existing subscription's anchor.
+	BillingAnchor *time.Time
 }
 
 // SubscriptionState is a customer's subscription after EnsureSubscription.
@@ -225,7 +232,7 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubscription, step subscriptionStep, active omv3.BillingPlan) error {
 	metadata := om.Metadata(desired.Metadata)
 	if (step.kind == stepChange || step.kind == stepMigrate) && planHasUnitConfig(active) {
-		return c.changeSubscriptionV3(ctx, desired, step.target.Id, active.Version)
+		return c.changeSubscriptionV3(ctx, desired, step.target, active.Version)
 	}
 	switch step.kind {
 	case stepCreate:
@@ -235,8 +242,9 @@ func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubsc
 			CustomerKey: &key,
 			// Version omitted: OpenMeter subscribes to the version active
 			// now, which avoids racing a concurrent publish.
-			Plan:     om.PlanReferenceInput{Key: desired.PlanKey},
-			Metadata: &metadata,
+			Plan:          om.PlanReferenceInput{Key: desired.PlanKey},
+			Metadata:      &metadata,
+			BillingAnchor: desired.BillingAnchor,
 		}); err != nil {
 			return &PermanentError{Err: err}
 		}
@@ -304,18 +312,24 @@ func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubsc
 // changeSubscriptionV3 moves the subscription onto planKey@version
 // immediately, the change and the migration in one. The v1 API refuses both
 // when the plan converts usage, so they go through v3, which cannot carry the
-// subscription's metadata: v3 labels allow no "/" in keys or values.
-func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscription, subscriptionID string, version int) error {
+// subscription's metadata: v3 labels allow no "/" in keys or values. Unlike
+// v1, a v3 change without an anchor bills from the moment of the change, so
+// it carries the existing subscription's anchor over.
+func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscription, target om.Subscription, version int) error {
 	var timing omv3.BillingSubscriptionEditTiming
 	if err := timing.FromBillingSubscriptionEditTimingEnum(omv3.BillingSubscriptionEditTimingEnumImmediate); err != nil {
 		return &PermanentError{Err: err}
 	}
 	body := omv3.BillingSubscriptionChange{Timing: timing}
+	if !target.BillingAnchor.IsZero() {
+		anchor := target.BillingAnchor
+		body.BillingAnchor = &anchor
+	}
 	key := string(desired.CustomerKey)
 	body.Customer.Key = &key
 	body.Plan.Key = &desired.PlanKey
 	body.Plan.Version = &version
-	_, err := c.v3.do(ctx, http.MethodPost, "/subscriptions/"+url.PathEscape(subscriptionID)+"/change", nil, body, nil)
+	_, err := c.v3.do(ctx, http.MethodPost, "/subscriptions/"+url.PathEscape(target.Id)+"/change", nil, body, nil)
 	return reclassifySubscription(err)
 }
 

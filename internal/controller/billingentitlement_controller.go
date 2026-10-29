@@ -173,9 +173,11 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 	planKey := planKeyForOffer(&offer)
 	logger = logger.WithValues("planKey", planKey)
 
+	anchor := subscriptionBillingAnchor(&account)
 	state, err := r.OpenMeterClient.EnsureSubscription(ctx, openmeter.DesiredSubscription{
-		CustomerKey: customerKey,
-		PlanKey:     planKey,
+		CustomerKey:   customerKey,
+		PlanKey:       planKey,
+		BillingAnchor: &anchor,
 		Metadata: map[string]string{
 			subscriptionMetadataEntitlement:    be.Namespace + "/" + be.Name,
 			subscriptionMetadataBillingAccount: account.Name,
@@ -469,4 +471,18 @@ func (r *BillingEntitlementReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Watches(&billingv1alpha1.Offer{}, handler.EnqueueRequestsFromMapFunc(r.entitlementsForOffer)).
 		Watches(&billingv1alpha1.BillingAccount{}, handler.EnqueueRequestsFromMapFunc(r.entitlementsForAccount)).
 		Complete(r)
+}
+
+// subscriptionBillingAnchor is the date the account's subscriptions bill
+// from: its invoice day of the month, the 1st under the standard terms, in
+// January 2025. OpenMeter moves an anchor back to the nearest cycle boundary
+// before a subscription starts, so only the day counts, and every plan bills
+// monthly (usageBillingPeriod). The billing profile's anchored alignment
+// says the same, but OpenMeter ignores it (see DesiredBillingProfile).
+func subscriptionBillingAnchor(account *billingv1alpha1.BillingAccount) time.Time {
+	day := billingv1alpha1.StandardPaymentTermsInvoiceDayOfMonth
+	if terms := account.Spec.PaymentTerms; terms != nil && terms.InvoiceDayOfMonth > 0 {
+		day = terms.InvoiceDayOfMonth
+	}
+	return time.Date(2025, time.January, int(day), 0, 0, 0, 0, time.UTC)
 }
