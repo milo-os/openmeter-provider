@@ -12,7 +12,8 @@
 set -euo pipefail
 . ./lib.sh
 
-want_total=$INVOICE_TOTAL
+want_total=$NET_TOTAL
+want_credit=$CREDIT_AMOUNT
 
 step() {
   invoice=$(the_invoice) || return 1
@@ -43,12 +44,14 @@ step() {
 retry 60 step || fail "invoice was not issued" "$(account_invoices | jq -c '[.[] | {id, status, statusDetails, validationIssues}]')"
 
 total=$(echo "$invoice" | jq -r .totals.total)
+credits_total=$(echo "$invoice" | jq -r '.totals.creditsTotal // 0')
 currency=$(echo "$invoice" | jq -r .currency)
 stripe_invoice_id=$(echo "$invoice" | jq -r '.externalIds.invoicing // empty')
+num_eq "$credits_total" "$want_credit" || fail "invoice creditsTotal is ${credits_total}, want ${want_credit}" "$(echo "$invoice" | jq -c .totals)"
 num_eq "$total" "$want_total" || fail "invoice total is ${total}, want ${want_total}" "$(echo "$invoice" | jq -c '{totals, lines: [.lines[]? | {name, totals}]}')"
 [ "$currency" = "USD" ] || fail "invoice currency is ${currency}, want USD"
 [ -n "$stripe_invoice_id" ] || fail "invoice ${id} has no Stripe invoice id" "$invoice"
-echo "OK: invoice ${id} ${status}, total ${total} ${currency}, Stripe invoice ${stripe_invoice_id}"
+echo "OK: invoice ${id} ${status}, total ${total} ${currency} (credits ${credits_total}), Stripe invoice ${stripe_invoice_id}"
 
 # One line per ServicePricing, titled with its displayName, billing the usage
 # in the ServicePricing's pricingUnit at its rates: the quantity is the

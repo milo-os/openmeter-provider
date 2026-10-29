@@ -251,6 +251,38 @@ func TestProjectInvoiceStatus_CurrencyMismatch(t *testing.T) {
 	}
 }
 
+func TestProjectInvoiceStatus_CreditsApplied(t *testing.T) {
+	t.Run("credits applied reduces amountDue and keeps total as usage before credits", func(t *testing.T) {
+		inv := omInvoice("inv", om.InvoiceStatusIssued, "400.00")
+		inv.Totals.CreditsTotal = "100.00"
+		got := projectedStatus(t, inv)
+		if got.Total != "500.00" {
+			t.Errorf("Total = %s, want 500.00", got.Total)
+		}
+		if got.CreditsApplied != "100.00" {
+			t.Errorf("CreditsApplied = %s, want 100.00", got.CreditsApplied)
+		}
+		if got.AmountDue != "400.00" {
+			t.Errorf("AmountDue = %s, want 400.00", got.AmountDue)
+		}
+	})
+
+	t.Run("invoice fully covered by credits has amountDue 0", func(t *testing.T) {
+		inv := omInvoice("inv", om.InvoiceStatusIssued, "0.00")
+		inv.Totals.CreditsTotal = "50.00"
+		got := projectedStatus(t, inv)
+		if got.Total != "50.00" {
+			t.Errorf("Total = %s, want 50.00", got.Total)
+		}
+		if got.CreditsApplied != "50.00" {
+			t.Errorf("CreditsApplied = %s, want 50.00", got.CreditsApplied)
+		}
+		if got.AmountDue != "0" && got.AmountDue != "0.00" {
+			t.Errorf("AmountDue = %s, want 0", got.AmountDue)
+		}
+	})
+}
+
 // invoiceListOpenMeterClient serves ListInvoicesIncludingDeleted from a
 // fixed list.
 type invoiceListOpenMeterClient struct {

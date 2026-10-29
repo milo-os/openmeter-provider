@@ -18,6 +18,8 @@ import (
 	"github.com/openmeterio/openmeter/pkg/datetime"
 	"github.com/openmeterio/openmeter/pkg/timeutil"
 	"golang.org/x/sync/errgroup"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	usagev1alpha1 "go.miloapis.com/billing/api/usage/v1alpha1"
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
@@ -395,3 +397,112 @@ func totalSpend(meters []usagev1alpha1.MeterUsage) (*usagev1alpha1.UsageSpend, s
 	}
 	return &usagev1alpha1.UsageSpend{Amount: total.String(), Currency: slices.Collect(maps.Keys(currencies))[0]}, ""
 }
+
+// CalculateAccountSpend prices the account's metered usage between start and end.
+func CalculateAccountSpend(
+	ctx context.Context,
+	milo client.Reader,
+	openMeter openmeter.Client,
+	account *billingv1alpha1.BillingAccount,
+	customerID openmeter.CustomerID,
+	start, end time.Time,
+) (alpacadecimal.Decimal, error) {
+	if !start.Before(end) {
+		return alpacadecimal.Zero, nil
+	}
+
+	spec := &usagev1alpha1.UsageQuerySpec{
+		StartTime: metav1.NewTime(start),
+		EndTime:   metav1.NewTime(end),
+	}
+	plans, err := planMeters(ctx, milo, spec)
+	if err != nil {
+		return alpacadecimal.Zero, err
+	}
+	if len(plans) == 0 {
+		return alpacadecimal.Zero, nil
+	}
+
+	customer := accountCustomer{
+		key: openmeter.CustomerKey(account.UID),
+		id:  customerID,
+	}
+	calc := &spendCalculator{
+		openMeter: openMeter,
+		spec:      spec,
+		customers: []accountCustomer{customer},
+	}
+	spend := calc.run(ctx, plans)
+	total := alpacadecimal.Zero
+	for _, s := range spend {
+		if s.err != "" {
+			return alpacadecimal.Zero, errors.New(s.err)
+		}
+		if s.spend != nil {
+			dec, err := alpacadecimal.NewFromString(s.spend.Amount)
+			if err != nil {
+				return alpacadecimal.Zero, err
+			}
+			total = total.Add(dec)
+		}
+	}
+	return total, nil
+}
+
+// AccountBillingPeriod returns the billing period covering now for the customer,
+// using their active subscription or falling back to the current calendar month.
+func AccountBillingPeriod(
+	ctx context.Context,
+	openMeter openmeter.Client,
+	customerKey openmeter.CustomerKey,
+	now time.Time,
+) (time.Time, time.Time, error) {
+	subs, err := openMeter.ListSubscriptions(ctx, customerKey)
+	if errors.Is(err, openmeter.ErrCustomerNotFound) || len(subs) == 0 {
+		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, 0), nil
+	}
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+
+	var activeSub *om.Subscription
+	for i := range subs {
+		sub := &subs[i]
+		if sub.DeletedAt == nil && overlaps(sub.ActiveFrom, sub.ActiveTo, now, now) {
+			activeSub = sub
+			break
+		}
+	}
+	if activeSub == nil {
+		for i := range subs {
+			if subs[i].DeletedAt == nil {
+				activeSub = &subs[i]
+				break
+			}
+		}
+	}
+	if activeSub == nil {
+		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, 0), nil
+	}
+
+	cadence := activeSub.BillingCadence
+	interval, err := datetime.ISODurationString(cadence).Parse()
+	if err != nil {
+		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, 0), nil
+	}
+	periods, err := timeutil.NewRecurrenceFromISODuration(interval, activeSub.BillingAnchor)
+	if err != nil {
+		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, 0), nil
+	}
+	period, err := periods.GetPeriodAt(now)
+	if err != nil {
+		start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+		return start, start.AddDate(0, 1, 0), nil
+	}
+	return period.From.Truncate(time.Second), period.To.Truncate(time.Second), nil
+}
+

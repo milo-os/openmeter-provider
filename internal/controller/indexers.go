@@ -17,6 +17,7 @@ import (
 const (
 	EntitlementBillingAccountRefField = ".spec.billingAccountRef.name"
 	EntitlementOfferRefField          = ".spec.offerRef.name"
+	CreditGrantBillingAccountRefField = ".spec.billingAccountRef.name"
 )
 
 // AddIndexers installs the field indexers used by the openmeter-provider
@@ -30,6 +31,7 @@ func AddIndexers(ctx context.Context, fi client.FieldIndexer) error {
 	}{
 		{&billingv1alpha1.BillingEntitlement{}, EntitlementBillingAccountRefField, entitlementBillingAccountRef},
 		{&billingv1alpha1.BillingEntitlement{}, EntitlementOfferRefField, entitlementOfferRef},
+		{&billingv1alpha1.CreditGrant{}, CreditGrantBillingAccountRefField, creditGrantBillingAccountRef},
 	}
 	for _, idx := range indexes {
 		if err := fi.IndexField(ctx, idx.obj, idx.field, idx.extract); err != nil {
@@ -37,6 +39,14 @@ func AddIndexers(ctx context.Context, fi client.FieldIndexer) error {
 		}
 	}
 	return nil
+}
+
+func creditGrantBillingAccountRef(obj client.Object) []string {
+	cg, ok := obj.(*billingv1alpha1.CreditGrant)
+	if !ok {
+		return nil
+	}
+	return []string{cg.Spec.BillingAccountRef.Name}
 }
 
 func entitlementBillingAccountRef(obj client.Object) []string {

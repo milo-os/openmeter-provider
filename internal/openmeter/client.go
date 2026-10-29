@@ -242,6 +242,27 @@ type Client interface {
 	// ListInvoicesIncludingDeleted is ListInvoices plus the customer's
 	// deleted invoices, so a caller can tell "deleted" from "gone".
 	ListInvoicesIncludingDeleted(ctx context.Context, customerID CustomerID) ([]om.Invoice, error)
+
+	// Credit grants (see credit.go).
+
+	// EnsureCreditGrant creates a credit grant in OpenMeter if absent, or
+	// returns the existing one matching desired.Key (the CreditGrant UID).
+	// Idempotent: safe to retry.
+	EnsureCreditGrant(ctx context.Context, customerID CustomerID, desired DesiredCreditGrant) (omv3.BillingCreditGrant, error)
+	// GetCreditGrant fetches a credit grant by customerID and grantID.
+	GetCreditGrant(ctx context.Context, customerID CustomerID, grantID string) (omv3.BillingCreditGrant, error)
+	// ListCreditGrants returns every credit grant for customerID.
+	ListCreditGrants(ctx context.Context, customerID CustomerID) ([]omv3.BillingCreditGrant, error)
+	// VoidCreditGrant voids an active credit grant in OpenMeter, forfeiting
+	// the remaining balance. Idempotent: voiding an already-voided grant succeeds.
+	VoidCreditGrant(ctx context.Context, customerID CustomerID, grantID string) error
+	// VoidAllCustomerGrants voids every active credit grant for customerID.
+	// Used during customer cascade deletion.
+	VoidAllCustomerGrants(ctx context.Context, customerID CustomerID) error
+	// GetCreditBalance returns the customer's posted credit remaining balance.
+	GetCreditBalance(ctx context.Context, customerID CustomerID) (string, error)
+	// GetCustomerCreditBalances returns the full credit balance breakdown for customerID.
+	GetCustomerCreditBalances(ctx context.Context, customerID CustomerID) (omv3.BillingCreditBalances, error)
 }
 
 // client is the concrete implementation of Client. Its methods are spread

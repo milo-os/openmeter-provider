@@ -19,7 +19,7 @@ vars:
   # Billing repo release to pull the MeterDefinition CRD from. The
   # openmeter-provider reconciles billing's MeterDefinition kind, so its CRD
   # must be present in the cluster for the controller to start its watch.
-  BILLING_REPO_REF: "v0.5.6"
+  BILLING_REPO_REF: "v0.6.0"
   # stripe-provider release to pull the StripePaymentMethod and
   # StripeCustomer CRDs from. BillingAccountReconciler watches both kinds
   # (see stripe_customer.go); without them in the cluster, the controller

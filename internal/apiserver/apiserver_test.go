@@ -14,6 +14,7 @@ import (
 	"time"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
+	omv3 "github.com/openmeterio/openmeter/api/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -51,6 +52,22 @@ type fakeOpenMeter struct {
 
 func (fakeOpenMeter) GetCustomer(context.Context, openmeter.CustomerKey) (om.Customer, error) {
 	return om.Customer{Id: "01ACME"}, nil
+}
+
+func (fakeOpenMeter) GetCreditBalance(context.Context, openmeter.CustomerID) (string, error) {
+	return "100.00", nil
+}
+
+func (fakeOpenMeter) ListInvoices(context.Context, openmeter.CustomerID) ([]om.Invoice, error) {
+	return nil, nil
+}
+
+func (fakeOpenMeter) ListCreditGrants(context.Context, openmeter.CustomerID) ([]omv3.BillingCreditGrant, error) {
+	return nil, nil
+}
+
+func (fakeOpenMeter) ListSubscriptions(context.Context, openmeter.CustomerKey) ([]om.Subscription, error) {
+	return nil, nil
 }
 
 func (fakeOpenMeter) QueryMeter(_ context.Context, q openmeter.MeterQuery) ([]openmeter.MeterQueryRow, error) {
@@ -196,12 +213,20 @@ func TestServer_Discovery(t *testing.T) {
 	if err := json.Unmarshal(out, &list); err != nil {
 		t.Fatal(err)
 	}
-	if len(list.APIResources) != 1 {
+	if len(list.APIResources) != 2 {
 		t.Fatalf("resources = %+v", list.APIResources)
 	}
-	r := list.APIResources[0]
-	if r.Name != "usagequeries" || r.Kind != "UsageQuery" || r.Namespaced || strings.Join(r.Verbs, ",") != "create" {
-		t.Errorf("resource = %+v, want cluster-scoped usagequeries with only create", r)
+	resources := map[string]metav1.APIResource{}
+	for _, res := range list.APIResources {
+		resources[res.Name] = res
+	}
+	uq, ok := resources["usagequeries"]
+	if !ok || uq.Kind != "UsageQuery" || uq.Namespaced || strings.Join(uq.Verbs, ",") != "create" {
+		t.Errorf("usagequeries = %+v, want cluster-scoped usagequeries with only create", uq)
+	}
+	bab, ok := resources["billingaccountbalances"]
+	if !ok || bab.Kind != "BillingAccountBalance" || !bab.Namespaced || strings.Join(bab.Verbs, ",") != "get,list" {
+		t.Errorf("billingaccountbalances = %+v, want namespaced billingaccountbalances with get,list", bab)
 	}
 }
 
@@ -215,3 +240,22 @@ func TestServer_OpenAPI(t *testing.T) {
 		t.Errorf("OpenAPI v3 does not describe UsageQuerySpec")
 	}
 }
+
+func TestServer_GetBillingAccountBalance(t *testing.T) {
+	h := newHandler(t)
+	code, out := do(t, h, http.MethodGet, "/apis/usage.billing.miloapis.com/v1alpha1/namespaces/organization-acme/billingaccountbalances/acme-main", nil)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d: %s", code, out)
+	}
+	var bal usagev1alpha1.BillingAccountBalance
+	if err := json.Unmarshal(out, &bal); err != nil {
+		t.Fatal(err)
+	}
+	if bal.Name != "acme-main" || bal.Namespace != "organization-acme" {
+		t.Errorf("name/namespace = %s/%s, want acme-main/organization-acme", bal.Name, bal.Namespace)
+	}
+	if bal.Status.Balance.CreditRemaining != "100.00" {
+		t.Errorf("creditRemaining = %s, want 100.00", bal.Status.Balance.CreditRemaining)
+	}
+}
+

@@ -66,6 +66,11 @@ type fakeServer struct {
 	// for a customer without Stripe app data.
 	billingNotReady bool
 
+	// creditGrants is keyed by customer id.
+	creditGrants   map[string][]omv3.BillingCreditGrant
+	creditBalances map[string]omv3.BillingCreditBalances
+	creditGrantSeq int
+
 	// statusOverride, when non-zero, short-circuits every request with that
 	// status code. Tests use it to inject wire-level failures (429s, 5xxs)
 	// that aren't specific to any one resource's routing.
@@ -149,6 +154,8 @@ func newTestClient(t *testing.T) (Client, *fakeServer) {
 		plans:                   map[string]omv3.BillingPlan{},
 		subscriptions:           map[string]om.Subscription{},
 		pendingLines:            map[string]fakePendingLines{},
+		creditGrants:            map[string][]omv3.BillingCreditGrant{},
+		creditBalances:          map[string]omv3.BillingCreditBalances{},
 	}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
@@ -197,6 +204,9 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if f.servePlans(w, r) {
+		return
+	}
+	if f.serveCredits(w, r) {
 		return
 	}
 	if f.serveIngest(w, r) {

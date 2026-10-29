@@ -28,5 +28,7 @@ LINES=(
   "inv-api-requests|inv_api_requests|API: requests|100|100|0.01|0.70|30"
 )
 INVOICE_TOTAL=4.55
+CREDIT_AMOUNT=1.00
+NET_TOTAL=3.55
 
 . ../invoice/common.sh
