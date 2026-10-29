@@ -30,6 +30,7 @@ import (
 	"go.miloapis.com/billing/api/usage/openapi"
 	usagev1alpha1 "go.miloapis.com/billing/api/usage/v1alpha1"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
+	"go.miloapis.com/openmeter-provider/internal/registry/billingaccountbalance"
 	"go.miloapis.com/openmeter-provider/internal/registry/usagequery"
 )
 
@@ -48,6 +49,8 @@ func init() {
 	Scheme.AddKnownTypes(schema.GroupVersion{Group: usagev1alpha1.GroupName, Version: runtime.APIVersionInternal},
 		&usagev1alpha1.UsageQuery{},
 		&usagev1alpha1.UsageQueryList{},
+		&usagev1alpha1.BillingAccountBalance{},
+		&usagev1alpha1.BillingAccountBalanceList{},
 	)
 
 	metav1.AddToGroupVersion(Scheme, schema.GroupVersion{Version: "v1"})
@@ -112,7 +115,8 @@ func (c completedConfig) New() (*UsageServer, error) {
 
 	apiGroupInfo := genericapiserver.NewDefaultAPIGroupInfo(usagev1alpha1.GroupName, Scheme, metav1.ParameterCodec, Codecs)
 	apiGroupInfo.VersionedResourcesStorageMap[usagev1alpha1.SchemeGroupVersion.Version] = map[string]rest.Storage{
-		"usagequeries": usagequery.NewREST(c.ExtraConfig.MiloCache, c.ExtraConfig.OpenMeter),
+		"usagequeries":           usagequery.NewREST(c.ExtraConfig.MiloCache, c.ExtraConfig.OpenMeter),
+		"billingaccountbalances": billingaccountbalance.NewREST(c.ExtraConfig.MiloCache, c.ExtraConfig.OpenMeter),
 	}
 	if err := s.GenericAPIServer.InstallAPIGroup(&apiGroupInfo); err != nil {
 		return nil, err
