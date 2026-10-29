@@ -166,6 +166,28 @@ spec:
               for details:
               kubectl logs -n {{ $labels.namespace }} -l control-plane=openmeter-provider
 
+        - alert: OpenMeterInvoiceSyncFailing
+          expr: |
+            sum by (namespace) (
+              rate(openmeter_provider_reconcile_duration_seconds_count{
+                namespace="openmeter-system",
+                controller="billingaccount",
+                result="error"
+              }[5m])
+            ) > 0
+          for: 15m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "OpenMeter BillingAccount reconciliation and invoice sync failing"
+            description: |
+              BillingAccount controller in {{ $labels.namespace }} is failing reconciliations,
+              preventing customer invoice synchronization between OpenMeter and Stripe.
+              Check operator logs:
+              kubectl logs -n {{ $labels.namespace }} -l control-plane=openmeter-provider
+
     - name: openmeter.cronjobs
       rules:
         - alert: OpenMeterCronJobStale
@@ -230,3 +252,22 @@ spec:
               Postgres cluster in {{ $labels.namespace }} has a more recent failed WAL
               archive than success for over 15 minutes. Point-in-time recovery and disk
               space are at risk; check barman / backup logs.
+
+        - alert: OpenMeterPostgresBackupStale
+          expr: |
+            (
+              time() - max by (namespace) (
+                cnpg_collector_last_available_backup_timestamp{namespace="openmeter-system"} > 0
+              )
+            ) > 26 * 3600
+          for: 15m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+            component: openmeter-database
+          annotations:
+            summary: "OpenMeter CNPG Postgres base backup is stale"
+            description: |
+              The newest completed base backup of Postgres in {{ $labels.namespace }} is
+              over 26 hours old. Check CNPG ScheduledBackup resources and backup jobs.
