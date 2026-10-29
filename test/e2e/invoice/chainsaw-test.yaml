@@ -140,6 +140,22 @@ spec:
                 name: e2e-inv-account
                 (finalizers[?@ == 'openmeter.miloapis.com/customer-link']): ['openmeter.miloapis.com/customer-link']
 
+    - name: grant promotional credit to the account
+      try:
+        - apply:
+            file: creditgrant.yaml
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: CreditGrant
+              metadata:
+                name: e2e-inv-credit
+              status:
+                phase: Active
+                (conditions[?type == 'Ready']):
+                  - status: "True"
+
     - name: entitle the account to the Offer
       description: |
         The subscription is what makes usage billable: OpenMeter only
@@ -232,6 +248,11 @@ spec:
               apiVersion: billing.miloapis.com/v1alpha1
               kind: BillingEntitlement
               name: e2e-inv-entitlement
+        - delete:
+            ref:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: CreditGrant
+              name: e2e-inv-credit
         - script:
             timeout: 10s
             content: kubectl delete billingaccount e2e-inv-account -n "$NAMESPACE" --wait=false

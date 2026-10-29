@@ -1,0 +1,11 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: CreditGrant
+metadata:
+  name: e2e-inv-credit
+spec:
+  billingAccountRef:
+    name: e2e-inv-account
+  amount: "1.00"
+  currency: USD
+  reason: Promotional
+  description: "e2e promotional credit"

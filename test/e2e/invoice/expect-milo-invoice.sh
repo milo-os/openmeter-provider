@@ -41,7 +41,8 @@ expect "(.metadata.name | test(\"^${ACCOUNT}-[0-9]{4}-[0-9]{2}-[0-9a-f]{10}\$\")
 expect ".spec.billingAccountRef.name == \"${ACCOUNT}\"" "billingAccountRef is not ${ACCOUNT}"
 expect '.status.currencyCode == "USD"' "currency is not USD"
 expect '(.status.conditions // [] | map(select(.type == "Ready")) | .[0].status) == "True"' "Ready is not True"
-num_eq "$(echo "$st" | jq -r .total)" "$total" || fail "Invoice ${name}: total is not ${total}" "$st"
+num_eq "$(echo "$st" | jq -r .total)" "$INVOICE_TOTAL" || fail "Invoice ${name}: total is not ${INVOICE_TOTAL}" "$st"
+num_eq "$(echo "$st" | jq -r '.creditsApplied // 0')" "$CREDIT_AMOUNT" || fail "Invoice ${name}: creditsApplied is not ${CREDIT_AMOUNT}" "$st"
 
 # The link is the Stripe invoice's own hosted page (view, PDF, pay). Stripe
 # signs a new URL on every read, so compare the page each URL opens.
@@ -53,12 +54,12 @@ page=$(stripe_invoice_page "$(echo "$obj" | jq -r .status.documentUri)")
 
 case "$phase" in
   Open)
-    num_eq "$(echo "$st" | jq -r .amountDue)" "$total" || fail "Invoice ${name}: amountDue is not ${total}" "$st"
+    num_eq "$(echo "$st" | jq -r .amountDue)" "$NET_TOTAL" || fail "Invoice ${name}: amountDue is not ${NET_TOTAL}" "$st"
     num_eq "$(echo "$st" | jq -r .amountPaid)" 0 || fail "Invoice ${name}: amountPaid is not 0" "$st"
     expect '.status.paidAt == null' "paidAt is set on an Open invoice"
     ;;
   Paid)
-    num_eq "$(echo "$st" | jq -r .amountPaid)" "$total" || fail "Invoice ${name}: amountPaid is not ${total}" "$st"
+    num_eq "$(echo "$st" | jq -r .amountPaid)" "$NET_TOTAL" || fail "Invoice ${name}: amountPaid is not ${NET_TOTAL}" "$st"
     num_eq "$(echo "$st" | jq -r .amountDue)" 0 || fail "Invoice ${name}: amountDue is not 0" "$st"
     expect '.status.paidAt != null' "paidAt is not set"
     ;;
@@ -66,5 +67,5 @@ case "$phase" in
     fail "Invoice ${name}: unexpected phase ${phase}" "$st"
     ;;
 esac
-echo "OK: Invoice ${name} is ${phase} for ${total} USD (OpenMeter invoice ${id})"
+echo "OK: Invoice ${name} is ${phase} (total ${INVOICE_TOTAL}, creditsApplied ${CREDIT_AMOUNT}, net ${NET_TOTAL} USD, OpenMeter invoice ${id})"
 kubectl get invoices.billing.miloapis.com "$name" -n "$NS" -o yaml

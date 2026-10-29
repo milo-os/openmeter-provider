@@ -69,6 +69,9 @@ spec:
       # to bill those lines rather than billing raw units.
       unitConfig:
         enabled: true
+      credits:
+        enabled: true
+        enableCreditThenInvoice: true
       sink:
         # Cross-flush event deduplication. OpenMeter's default
         # (sink.dedupe.enabled: false, app/config/sink.go) only drops
