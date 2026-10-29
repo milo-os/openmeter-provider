@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alpacahq/alpacadecimal"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -472,7 +473,19 @@ func projectInvoiceStatus(obj *billingv1alpha1.Invoice, account *billingv1alpha1
 
 	obj.Status.Phase = phase
 	obj.Status.CurrencyCode = string(inv.Currency)
-	obj.Status.Total = inv.Totals.Total
+
+	totalStr := inv.Totals.Total
+	creditsApplied := ""
+	if inv.Totals.CreditsTotal != "" {
+		if creditsDec, err := alpacadecimal.NewFromString(inv.Totals.CreditsTotal); err == nil && creditsDec.IsPositive() {
+			creditsApplied = creditsDec.StringFixed(2)
+			if totalDec, err := alpacadecimal.NewFromString(inv.Totals.Total); err == nil {
+				totalStr = totalDec.Add(creditsDec).StringFixed(2)
+			}
+		}
+	}
+	obj.Status.Total = totalStr
+	obj.Status.CreditsApplied = creditsApplied
 	obj.Status.AmountPaid, obj.Status.AmountDue = invoiceAmounts(inv, phase)
 	obj.Status.ObservedGeneration = obj.Generation
 
