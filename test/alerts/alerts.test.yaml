@@ -1,0 +1,216 @@
+rule_files:
+  - alerts.rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------------
+  # Group 1: Workload health (CrashLoopBackOff & Unavailable Replicas)
+  # ---------------------------------------------------------------------------
+  - name: Pod crashlooping alert fires after 5m and stays quiet for healthy pods
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{job="kube-state-metrics",namespace="openmeter-system",pod="openmeter-provider-manager-abcd-1234",container="manager",reason="CrashLoopBackOff"}'
+        values: '1+0x10'
+      - series: 'kube_pod_container_status_waiting_reason{job="kube-state-metrics",namespace="openmeter-system",pod="other-pod-1234",container="app",reason="CrashLoopBackOff"}'
+        values: '1+0x10'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterProviderPodCrashLooping",alertstate="firing"}
+        eval_time: 4m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterProviderPodCrashLooping",alertstate="firing"}
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterProviderPodCrashLooping",alertstate="firing",container="manager",expected_no_match="true",job="kube-state-metrics",namespace="openmeter-system",pod="openmeter-provider-manager-abcd-1234",reason="CrashLoopBackOff",service="billing",severity="critical"}'
+            value: 1
+
+  - name: Deployment unavailable replicas alert fires after 5m
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-provider"}'
+        values: '1+0x10'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing"}
+        eval_time: 4m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing"}
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="openmeter-provider",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+
+  # ---------------------------------------------------------------------------
+  # Group 2: Submission consumer pipeline & error rates
+  # ---------------------------------------------------------------------------
+  - name: Submission pipeline stalled alert fires after 5m of unacknowledged events
+    interval: 1m
+    input_series:
+      - series: 'billing_pipeline_oldest_unsubmitted_seconds{namespace="openmeter-system"}'
+        values: '10+10x10'
+    promql_expr_test:
+      - expr: ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing"}
+        eval_time: 4m
+        exp_samples: []
+      - expr: ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing"}
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: Submission pipeline returns to healthy when age is 0
+    interval: 1m
+    input_series:
+      - series: 'billing_pipeline_oldest_unsubmitted_seconds{namespace="openmeter-system"}'
+        values: '0+0x10'
+    promql_expr_test:
+      - expr: ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing"}
+        eval_time: 10m
+        exp_samples: []
+
+  - name: Submission consumer error rate alert fires when errors exceed 10% for 10m
+    interval: 1m
+    input_series:
+      # 80 successful submissions/min = ~1.33/s
+      - series: 'billing_submission_requests_total{namespace="openmeter-system",status="success"}'
+        values: '0+80x25'
+      # 20 transient submissions/min = ~0.33/s (20% error rate > 10%)
+      - series: 'billing_submission_requests_total{namespace="openmeter-system",status="transient"}'
+        values: '0+20x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing"}
+        eval_time: 9m
+        exp_samples: []
+      - expr: ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: Submission consumer error rate stays quiet when errors are below 10%
+    interval: 1m
+    input_series:
+      # 95 successful submissions/min
+      - series: 'billing_submission_requests_total{namespace="openmeter-system",status="success"}'
+        values: '0+95x25'
+      # 5 transient submissions/min (5% error rate <= 10%)
+      - series: 'billing_submission_requests_total{namespace="openmeter-system",status="transient"}'
+        values: '0+5x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing"}
+        eval_time: 20m
+        exp_samples: []
+
+  - name: Permanent failures trigger alert after 5m of dropped events
+    interval: 1m
+    input_series:
+      - series: 'billing_submission_requests_total{namespace="openmeter-system",status="permanent"}'
+        values: '0+10x15'
+    promql_expr_test:
+      - expr: ALERTS{alertname="SubmissionConsumerPermanentFailures",alertstate="firing"}
+        eval_time: 4m
+        exp_samples: []
+      - expr: ALERTS{alertname="SubmissionConsumerPermanentFailures",alertstate="firing"}
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="SubmissionConsumerPermanentFailures",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+
+  - name: Config error 401/403/404 triggers alert after 5m
+    interval: 1m
+    input_series:
+      - series: 'billing_submission_requests_total{namespace="openmeter-system",status="config_error"}'
+        values: '0+5x15'
+    promql_expr_test:
+      - expr: ALERTS{alertname="SubmissionConsumerConfigError",alertstate="firing"}
+        eval_time: 4m
+        exp_samples: []
+      - expr: ALERTS{alertname="SubmissionConsumerConfigError",alertstate="firing"}
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="SubmissionConsumerConfigError",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+
+  # ---------------------------------------------------------------------------
+  # Group 3: Controller reconcile & invoice sync
+  # ---------------------------------------------------------------------------
+  - name: Controller reconcile error rate above 10% fires after 10m
+    interval: 1m
+    input_series:
+      - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="success"}'
+        values: '0+80x25'
+      - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="error"}'
+        values: '0+20x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterProviderReconcileHighErrorRate",alertstate="firing"}
+        eval_time: 9m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterProviderReconcileHighErrorRate",alertstate="firing"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterProviderReconcileHighErrorRate",alertstate="firing",controller="billingaccount",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: Invoice sync failing alert fires when billingaccount controller has errors for 15m
+    interval: 1m
+    input_series:
+      - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="error"}'
+        values: '0+10x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing"}
+        eval_time: 14m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing"}
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  # ---------------------------------------------------------------------------
+  # Group 4: CronJobs and Jobs
+  # ---------------------------------------------------------------------------
+  - name: OpenMeter CronJob failed alert fires after 5m of failed job status
+    interval: 1m
+    input_series:
+      - series: 'kube_job_status_failed{namespace="openmeter-system",job_name="openmeter-billing-advance-invoices-2893847"}'
+        values: '1+0x15'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing"}
+        eval_time: 4m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing"}
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing",job_name="openmeter-billing-advance-invoices-2893847",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  # ---------------------------------------------------------------------------
+  # Group 5: CNPG Postgres WAL archiver and backups
+  # ---------------------------------------------------------------------------
+  - name: CNPG WAL archiving failing fires after 15m
+    interval: 1m
+    input_series:
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="openmeter-system"}'
+        values: '1000+0x25'
+      - series: 'cnpg_pg_stat_archiver_last_archived_time{namespace="openmeter-system"}'
+        values: '900+0x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterPostgresWALArchiveFailing",alertstate="firing"}
+        eval_time: 14m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterPostgresWALArchiveFailing",alertstate="firing"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterPostgresWALArchiveFailing",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+
+  - name: CNPG WAL archiving stays quiet when archive time is newer than failed time
+    interval: 1m
+    input_series:
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="openmeter-system"}'
+        values: '900+0x25'
+      - series: 'cnpg_pg_stat_archiver_last_archived_time{namespace="openmeter-system"}'
+        values: '1000+0x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterPostgresWALArchiveFailing",alertstate="firing"}
+        eval_time: 20m
+        exp_samples: []
