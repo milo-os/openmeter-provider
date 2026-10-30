@@ -37,7 +37,7 @@ spec:
             kube_deployment_status_replicas_unavailable{
               job="kube-state-metrics",
               namespace="openmeter-system",
-              deployment=~"openmeter-provider|submission-consumer"
+              deployment=~"openmeter-provider-manager|submission-consumer"
             } > 0
           for: 5m
           labels:
@@ -51,14 +51,52 @@ spec:
               {{ $labels.namespace }}/{{ $labels.deployment }} have been
               unavailable for 5 minutes.
 
+        - alert: OpenMeterProviderMetricsScrapeFailing
+          expr: |
+            up{
+              namespace="openmeter-system",
+              job=~"openmeter-provider-metrics|submission-consumer-metrics"
+            } == 0
+          for: 10m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Prometheus cannot scrape {{ $labels.job }}"
+            description: |
+              Scrapes of {{ $labels.job }} ({{ $labels.instance }}) have been
+              failing for 10 minutes, so every alert built on its metrics is
+              blind. Check that metricsServer.bindAddress is ":8443" in the
+              openmeter-provider-config ConfigMap and that the service account
+              can create TokenReviews and SubjectAccessReviews.
+
+        - alert: OpenMeterProviderMetricsAbsent
+          expr: |
+            absent(up{namespace="openmeter-system", job="openmeter-provider-metrics"})
+            or
+            absent(up{namespace="openmeter-system", job="submission-consumer-metrics"})
+          for: 15m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "No scrape target for {{ $labels.job }}"
+            description: |
+              Prometheus has no scrape target for {{ $labels.job }}, so every
+              alert built on its metrics is blind. Check that the
+              openmeter-provider-metrics / submission-consumer-metrics
+              ServiceMonitors and Services exist and select running pods.
+
     - name: openmeter-provider.submission
       rules:
         - alert: SubmissionConsumerPipelineStalled
           expr: |
             billing_pipeline_oldest_unsubmitted_seconds{
               namespace="openmeter-system"
-            } > 0
-          for: 5m
+            } > 300
+          for: 2m
           labels:
             severity: warning
             namespace: openmeter-system
@@ -66,11 +104,34 @@ spec:
           annotations:
             summary: "Submission consumer pipeline has stalled"
             description: |
-              The submission consumer has had unacknowledged events in flight
-              for over 5 minutes (current age: {{ $value }}s). This indicates
-              the consumer is unable to successfully submit to OpenMeter. Check
-              for transient API errors or NATS connectivity issues:
+              The oldest event in the submission consumer's current batch has
+              been waiting more than 5 minutes (current age: {{ $value }}s).
+              This indicates the consumer is unable to successfully submit to
+              OpenMeter. Check for transient API errors or NATS connectivity
+              issues:
               kubectl logs -n openmeter-system deployment/submission-consumer
+
+        - alert: SubmissionConsumerEventsDropped
+          expr: |
+            sum by (namespace) (
+              increase(billing_submission_requests_total{
+                namespace="openmeter-system",
+                status="max_deliveries_exceeded"
+              }[5m])
+            ) > 0
+          for: 0m
+          labels:
+            severity: critical
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Submission consumer gave up on usage events"
+            description: |
+              JetStream stopped redelivering at least one usage event in the
+              last 5 minutes after it hit its max delivery count. These events
+              never reached OpenMeter and will not be billed. Check the
+              consumer logs for the failing events:
+              kubectl logs -n openmeter-system deployment/submission-consumer | grep max_deliveries
 
         - alert: SubmissionConsumerHighErrorRate
           expr: |
@@ -83,7 +144,8 @@ spec:
             /
             sum by (namespace) (
               rate(billing_submission_requests_total{
-                namespace="openmeter-system"
+                namespace="openmeter-system",
+                status=~"success|transient|permanent|config_error"
               }[5m])
             ) > 0.1
           for: 10m
@@ -169,23 +231,32 @@ spec:
         - alert: OpenMeterInvoiceSyncFailing
           expr: |
             sum by (namespace) (
-              rate(openmeter_provider_reconcile_duration_seconds_count{
+              increase(openmeter_provider_reconcile_duration_seconds_count{
                 namespace="openmeter-system",
                 controller="billingaccount",
                 result="error"
-              }[5m])
+              }[15m])
+            ) > 0
+            unless on (namespace)
+            sum by (namespace) (
+              increase(openmeter_provider_reconcile_duration_seconds_count{
+                namespace="openmeter-system",
+                controller="billingaccount",
+                result=~"success|requeue"
+              }[15m])
             ) > 0
           for: 15m
           labels:
-            severity: warning
+            severity: critical
             namespace: openmeter-system
             service: billing
           annotations:
             summary: "OpenMeter BillingAccount reconciliation and invoice sync failing"
             description: |
-              BillingAccount controller in {{ $labels.namespace }} is failing reconciliations,
-              preventing customer invoice synchronization between OpenMeter and Stripe.
-              Check operator logs:
+              Every BillingAccount reconcile in {{ $labels.namespace }} has failed for at
+              least 15 minutes, with no successful ones, so customer invoices are not
+              being synchronized between OpenMeter and Stripe. Partial failures are
+              covered by OpenMeterProviderReconcileHighErrorRate. Check operator logs:
               kubectl logs -n {{ $labels.namespace }} -l control-plane=openmeter-provider
 
     - name: openmeter.cronjobs
@@ -211,25 +282,38 @@ spec:
               Check recent job pods and CronJob status:
               kubectl get pods -n {{ $labels.namespace }} -l job-name
 
+        # Compares the CronJob's last schedule with its last success rather
+        # than kube_job_status_failed, which stays 1 for as long as a failed
+        # Job is kept in history, even after later runs succeed. The `for`
+        # covers the time a healthy run takes between being scheduled and
+        # succeeding.
         - alert: OpenMeterCronJobFailed
           expr: |
-            max by (namespace, job_name) (
-              kube_job_status_failed{
+            max by (namespace, cronjob) (
+              kube_cronjob_status_last_schedule_time{
                 namespace="openmeter-system",
-                job_name=~"openmeter-(subscription-sync|billing-collect-invoices|billing-advance-invoices)-.*"
+                cronjob=~"openmeter-(subscription-sync|billing-collect-invoices|billing-advance-invoices)"
               }
-            ) > 0
-          for: 5m
+            )
+            >
+            max by (namespace, cronjob) (
+              kube_cronjob_status_last_successful_time{
+                namespace="openmeter-system",
+                cronjob=~"openmeter-(subscription-sync|billing-collect-invoices|billing-advance-invoices)"
+              }
+            )
+          for: 30m
           labels:
             severity: warning
             namespace: openmeter-system
             service: billing
           annotations:
-            summary: "OpenMeter Job {{ $labels.job_name }} failed"
+            summary: "Latest run of OpenMeter CronJob {{ $labels.cronjob }} has not succeeded"
             description: |
-              Job {{ $labels.job_name }} in {{ $labels.namespace }} has failed.
-              Check pod logs:
-              kubectl logs -n {{ $labels.namespace }} -l job-name={{ $labels.job_name }}
+              The most recent scheduled run of CronJob {{ $labels.cronjob }} in
+              {{ $labels.namespace }} has not succeeded for 30 minutes. Check its Jobs
+              and their pod logs:
+              kubectl get jobs -n {{ $labels.namespace }} --sort-by=.metadata.creationTimestamp | grep {{ $labels.cronjob }}
 
     - name: openmeter.database
       rules:

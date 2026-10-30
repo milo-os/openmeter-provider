@@ -309,10 +309,7 @@ type BillingAccountReconciler struct {
 
 // Reconcile runs a single sync iteration for a BillingAccount.
 func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.Request) (res ctrl.Result, err error) {
-	start := time.Now()
-	defer func() {
-		observeReconcile("billingaccount", start, res, err)
-	}()
+	defer observeReconcile("billingaccount", time.Now(), &res, &err)
 
 	logger := log.FromContext(ctx).WithValues("account", req.Name, "namespace", req.Namespace)
 

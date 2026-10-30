@@ -78,10 +78,7 @@ type OfferReconciler struct {
 
 // Reconcile syncs a single Offer.
 func (r *OfferReconciler) Reconcile(ctx context.Context, req reconcile.Request) (res ctrl.Result, err error) {
-	start := time.Now()
-	defer func() {
-		observeReconcile("offer", start, res, err)
-	}()
+	defer observeReconcile("offer", time.Now(), &res, &err)
 
 	logger := log.FromContext(ctx).WithValues("offer", req.Name)
 

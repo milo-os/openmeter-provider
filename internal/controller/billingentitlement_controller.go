@@ -111,10 +111,7 @@ type BillingEntitlementReconciler struct {
 
 // Reconcile syncs a single BillingEntitlement.
 func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconcile.Request) (res ctrl.Result, err error) {
-	start := time.Now()
-	defer func() {
-		observeReconcile(billingEntitlementControllerName, start, res, err)
-	}()
+	defer observeReconcile(billingEntitlementControllerName, time.Now(), &res, &err)
 
 	logger := log.FromContext(ctx).WithValues("billingEntitlement", req.Name, "namespace", req.Namespace)
 

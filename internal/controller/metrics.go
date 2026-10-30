@@ -26,12 +26,22 @@ var (
 )
 
 // observeReconcile records a single reconcile outcome against a named
-// controller. result is one of: success, error, requeue.
-func observeReconcile(controller string, start time.Time, res ctrl.Result, err error) {
-	result := reconcileResult(res, err)
+// controller. result is one of: success, error, requeue. It must be deferred
+// directly (defer observeReconcile(..., &res, &err)) so that recover() sees a
+// panicking reconcile: the panic is recorded as an error and re-raised for
+// controller-runtime to handle.
+func observeReconcile(controller string, start time.Time, res *ctrl.Result, err *error) {
+	result := reconcileResult(*res, *err)
+	r := recover()
+	if r != nil {
+		result = "error"
+	}
 	reconcileDuration.
 		WithLabelValues(controller, result).
 		Observe(time.Since(start).Seconds())
+	if r != nil {
+		panic(r)
+	}
 }
 
 // reconcileResult derives the metric label from a Reconcile return pair.

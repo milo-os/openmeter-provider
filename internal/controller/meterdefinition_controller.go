@@ -95,10 +95,7 @@ type MeterDefinitionReconciler struct {
 
 // Reconcile runs a single sync iteration for a MeterDefinition.
 func (r *MeterDefinitionReconciler) Reconcile(ctx context.Context, req reconcile.Request) (res ctrl.Result, err error) {
-	start := time.Now()
-	defer func() {
-		observeReconcile("meterdefinition", start, res, err)
-	}()
+	defer observeReconcile("meterdefinition", time.Now(), &res, &err)
 
 	logger := log.FromContext(ctx).WithValues("meter", req.Name)
 

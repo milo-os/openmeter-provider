@@ -24,10 +24,14 @@ tests:
           - labels: 'ALERTS{alertname="OpenMeterProviderPodCrashLooping",alertstate="firing",container="manager",expected_no_match="true",job="kube-state-metrics",namespace="openmeter-system",pod="openmeter-provider-manager-abcd-1234",reason="CrashLoopBackOff",service="billing",severity="critical"}'
             value: 1
 
-  - name: Deployment unavailable replicas alert fires after 5m
+  - name: Deployment unavailable replicas alert fires after 5m for both deployments
     interval: 1m
     input_series:
-      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-provider"}'
+      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-provider-manager"}'
+        values: '1+0x10'
+      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="submission-consumer"}'
+        values: '1+0x10'
+      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-api"}'
         values: '1+0x10'
     promql_expr_test:
       - expr: ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing"}
@@ -36,25 +40,104 @@ tests:
       - expr: ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing"}
         eval_time: 5m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="openmeter-provider",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="openmeter-provider-manager",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="submission-consumer",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+
+  - name: Metrics scrape failing alert fires after 10m of failed scrapes
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="openmeter-system",job="openmeter-provider-metrics",instance="10.0.0.1:8443"}'
+        values: '0+0x15'
+      - series: 'up{namespace="openmeter-system",job="submission-consumer-metrics",instance="10.0.0.2:8443"}'
+        values: '1+0x15'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterProviderMetricsScrapeFailing",alertstate="firing"}
+        eval_time: 9m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterProviderMetricsScrapeFailing",alertstate="firing"}
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterProviderMetricsScrapeFailing",alertstate="firing",instance="10.0.0.1:8443",job="openmeter-provider-metrics",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: Metrics absent alert fires when a scrape target disappears
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="openmeter-system",job="openmeter-provider-metrics",instance="10.0.0.1:8443"}'
+        values: '1+0x20'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterProviderMetricsAbsent",alertstate="firing"}
+        eval_time: 14m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterProviderMetricsAbsent",alertstate="firing"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterProviderMetricsAbsent",alertstate="firing",job="submission-consumer-metrics",namespace="openmeter-system",service="billing",severity="warning"}'
             value: 1
 
   # ---------------------------------------------------------------------------
   # Group 2: Submission consumer pipeline & error rates
   # ---------------------------------------------------------------------------
-  - name: Submission pipeline stalled alert fires after 5m of unacknowledged events
+  - name: Submission pipeline stalled alert fires once the oldest event is over 5m old for 2m
     interval: 1m
     input_series:
       - series: 'billing_pipeline_oldest_unsubmitted_seconds{namespace="openmeter-system"}'
-        values: '10+10x10'
+        values: '0+60x15'
     promql_expr_test:
       - expr: ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing"}
-        eval_time: 4m
+        eval_time: 7m
         exp_samples: []
       - expr: ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing"}
-        eval_time: 5m
+        eval_time: 8m
         exp_samples:
           - labels: 'ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: Submission pipeline stays quiet under steady traffic with short-lived batches
+    interval: 1m
+    input_series:
+      - series: 'billing_pipeline_oldest_unsubmitted_seconds{namespace="openmeter-system"}'
+        values: '5 12 3 0 8 15 2 9 0 4 11 6 3 7 10 1 5 0 8 2'
+    promql_expr_test:
+      - expr: ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing"}
+        eval_time: 19m
+        exp_samples: []
+
+  - name: Events dropped alert fires immediately on max deliveries exceeded
+    interval: 1m
+    input_series:
+      - series: 'billing_submission_requests_total{namespace="openmeter-system",status="max_deliveries_exceeded"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1'
+    promql_expr_test:
+      - expr: ALERTS{alertname="SubmissionConsumerEventsDropped",alertstate="firing"}
+        eval_time: 2m
+        exp_samples: []
+      - expr: ALERTS{alertname="SubmissionConsumerEventsDropped",alertstate="firing"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="SubmissionConsumerEventsDropped",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+      - expr: ALERTS{alertname="SubmissionConsumerEventsDropped",alertstate="firing"}
+        eval_time: 11m
+        exp_samples: []
+
+  - name: Unattributed NAKs do not dilute the submission error rate
+    interval: 1m
+    input_series:
+      - series: 'billing_submission_requests_total{namespace="openmeter-system",status="success"}'
+        values: '0+80x25'
+      - series: 'billing_submission_requests_total{namespace="openmeter-system",status="transient"}'
+        values: '0+20x25'
+      # Would push the error ratio under 10% if counted in the denominator.
+      - series: 'billing_submission_requests_total{namespace="openmeter-system",status="unattributed"}'
+        values: '0+200x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
             value: 1
 
   - name: Submission pipeline returns to healthy when age is 0
@@ -150,7 +233,7 @@ tests:
           - labels: 'ALERTS{alertname="OpenMeterProviderReconcileHighErrorRate",alertstate="firing",controller="billingaccount",namespace="openmeter-system",service="billing",severity="warning"}'
             value: 1
 
-  - name: Invoice sync failing alert fires when billingaccount controller has errors for 15m
+  - name: Invoice sync failing alert fires when every billingaccount reconcile fails for 15m
     interval: 1m
     input_series:
       - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="error"}'
@@ -162,25 +245,70 @@ tests:
       - expr: ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing"}
         eval_time: 20m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical"}'
             value: 1
+
+  - name: Invoice sync failing alert stays quiet while some billingaccount reconciles succeed
+    interval: 1m
+    input_series:
+      - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="error"}'
+        values: '0+10x25'
+      - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="requeue"}'
+        values: '0+1x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing"}
+        eval_time: 25m
+        exp_samples: []
 
   # ---------------------------------------------------------------------------
   # Group 4: CronJobs and Jobs
   # ---------------------------------------------------------------------------
-  - name: OpenMeter CronJob failed alert fires after 5m of failed job status
+  - name: OpenMeter CronJob failed alert fires when the latest run has not succeeded for 30m
     interval: 1m
     input_series:
-      - series: 'kube_job_status_failed{namespace="openmeter-system",job_name="openmeter-billing-advance-invoices-2893847"}'
-        values: '1+0x15'
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="openmeter-system",cronjob="openmeter-billing-advance-invoices"}'
+        values: '1000+0x40'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="openmeter-system",cronjob="openmeter-billing-advance-invoices"}'
+        values: '900+0x40'
     promql_expr_test:
       - expr: ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing"}
-        eval_time: 4m
+        eval_time: 29m
         exp_samples: []
       - expr: ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing"}
-        eval_time: 5m
+        eval_time: 30m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing",job_name="openmeter-billing-advance-invoices-2893847",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing",cronjob="openmeter-billing-advance-invoices",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: OpenMeter CronJob failed alert clears once a later run succeeds
+    interval: 1m
+    input_series:
+      # An earlier run failed (its Job is still in history) but the latest
+      # scheduled run succeeded.
+      - series: 'kube_job_status_failed{namespace="openmeter-system",job_name="openmeter-billing-advance-invoices-2893847"}'
+        values: '1+0x40'
+      - series: 'kube_cronjob_status_last_schedule_time{namespace="openmeter-system",cronjob="openmeter-billing-advance-invoices"}'
+        values: '1000+0x40'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="openmeter-system",cronjob="openmeter-billing-advance-invoices"}'
+        values: '1010+0x40'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing"}
+        eval_time: 40m
+        exp_samples: []
+
+  - name: OpenMeter CronJob stale alert fires when the last success is over 2h old for 15m
+    interval: 1m
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="openmeter-system",cronjob="openmeter-subscription-sync"}'
+        values: '0+0x180'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterCronJobStale",alertstate="firing"}
+        eval_time: 2h15m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterCronJobStale",alertstate="firing"}
+        eval_time: 2h20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterCronJobStale",alertstate="firing",cronjob="openmeter-subscription-sync",namespace="openmeter-system",service="billing",severity="critical"}'
             value: 1
 
   # ---------------------------------------------------------------------------
@@ -213,4 +341,32 @@ tests:
     promql_expr_test:
       - expr: ALERTS{alertname="OpenMeterPostgresWALArchiveFailing",alertstate="firing"}
         eval_time: 20m
+        exp_samples: []
+
+  - name: CNPG backup stale alert fires when the newest backup is over 26h old
+    interval: 1m
+    input_series:
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-1"}'
+        values: '1+0x1700'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
+        eval_time: 26h
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
+        eval_time: 27h
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: CNPG backup stale alert stays quiet while a fresh backup exists
+    interval: 1m
+    input_series:
+      # A replica that has never taken a backup reports 0 and must be ignored.
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-2"}'
+        values: '0+0x1900'
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-1"}'
+        values: '1+60x1900'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
+        eval_time: 30h
         exp_samples: []
