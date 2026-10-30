@@ -726,3 +726,43 @@ func TestReconcile_OpenMeterFailuresAreReturned(t *testing.T) {
 		})
 	}
 }
+
+// TestReconcile_SyncFailedOnlyWhenTheFailureChanges: each retry of a
+// persistent failure is logged and counted by controller-runtime, so the
+// Warning event is emitted once, again when the failure changes, and again
+// when it comes back after a successful sync, which reports Synced again.
+func TestReconcile_SyncFailedOnlyWhenTheFailureChanges(t *testing.T) {
+	h := newSyncHarness(t, baseBillingAccount())
+	down := &openmeter.TransientError{Err: errors.New("unavailable"), StatusCode: 503}
+	rejected := &openmeter.PermanentError{Err: errors.New("rejected"), StatusCode: 400}
+
+	steps := []struct {
+		name       string
+		ensureErr  error
+		invoiceErr error
+		wantFailed int
+		wantSynced int
+	}{
+		{name: "first sync", wantSynced: 1},
+		{name: "invoice sync fails", invoiceErr: down, wantFailed: 1},
+		{name: "same failure retried", invoiceErr: down},
+		{name: "same failure retried again", invoiceErr: down},
+		{name: "customer fails instead", ensureErr: rejected, wantFailed: 1},
+		{name: "recovered", wantSynced: 1},
+		{name: "invoice sync fails again", invoiceErr: down, wantFailed: 1},
+	}
+	for _, step := range steps {
+		h.omc.ensureErr, h.omc.listInvoicesErr = step.ensureErr, step.invoiceErr
+		_, err := h.r.Reconcile(context.Background(), h.req)
+		if wantErr := step.ensureErr != nil || step.invoiceErr != nil; (err != nil) != wantErr {
+			t.Fatalf("%s: Reconcile error = %v", step.name, err)
+		}
+		events := h.events()
+		if n := countEvents(events, EventReasonSyncFailed); n != step.wantFailed {
+			t.Errorf("%s: %d SyncFailed events, want %d: %v", step.name, n, step.wantFailed, events)
+		}
+		if n := countEvents(events, EventReasonSynced); n != step.wantSynced {
+			t.Errorf("%s: %d Synced events, want %d: %v", step.name, n, step.wantSynced, events)
+		}
+	}
+}
