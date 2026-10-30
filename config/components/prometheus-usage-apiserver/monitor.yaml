@@ -1,0 +1,22 @@
+# The server authenticates bearer tokens with Milo (TokenReview), which
+# rejects the scraper's local service account token, so no token is sent:
+# anonymous requests are allowed and /metrics is in
+# --authorization-always-allow-paths.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: openmeter-usage-apiserver
+    app.kubernetes.io/part-of: openmeter-provider
+    app.kubernetes.io/managed-by: kustomize
+  name: openmeter-usage-apiserver
+spec:
+  endpoints:
+    - path: /metrics
+      port: https
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openmeter-usage-apiserver

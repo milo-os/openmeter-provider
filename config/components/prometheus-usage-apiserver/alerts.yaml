@@ -1,0 +1,133 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: openmeter-usage-apiserver-alerts
+  labels:
+    alert-group: openmeter-provider
+    app.kubernetes.io/name: openmeter-usage-apiserver
+    app.kubernetes.io/part-of: openmeter-provider
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  groups:
+    - name: openmeter-usage-apiserver.requests
+      rules:
+        # 5xx only: a 503 is OpenMeter failing a usage or customer lookup, a
+        # 500 a failed read from Milo. 4xx are the caller's (bad request,
+        # forbidden scope) and are not alerted on.
+        - alert: OpenMeterUsageAPIErrors
+          expr: |
+            sum by (namespace) (
+              rate(apiserver_request_total{
+                namespace="openmeter-system",
+                job="openmeter-usage-apiserver",
+                group="usage.billing.miloapis.com",
+                resource="usagequeries",
+                code=~"5.."
+              }[5m])
+            )
+            /
+            sum by (namespace) (
+              rate(apiserver_request_total{
+                namespace="openmeter-system",
+                job="openmeter-usage-apiserver",
+                group="usage.billing.miloapis.com",
+                resource="usagequeries"
+              }[5m])
+            ) > 0.05
+          for: 10m
+          labels:
+            severity: critical
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "UsageQuery requests are failing"
+            description: |
+              More than 5% of UsageQuery requests in {{ $labels.namespace }} have
+              returned 5xx for 10 minutes (current: {{ $value | humanizePercentage }}),
+              so customers cannot read their usage. A 503 means OpenMeter failed a
+              usage or customer lookup; a 500 a failed read from Milo. Check the
+              server logs and OpenMeter's API health:
+              kubectl logs -n {{ $labels.namespace }} deployment/openmeter-usage-apiserver
+
+        - alert: OpenMeterUsageAPILatencyHigh
+          expr: |
+            histogram_quantile(0.99,
+              sum by (namespace, le) (
+                rate(apiserver_request_duration_seconds_bucket{
+                  namespace="openmeter-system",
+                  job="openmeter-usage-apiserver",
+                  group="usage.billing.miloapis.com",
+                  resource="usagequeries"
+                }[5m])
+              )
+            ) > 10
+          for: 15m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "UsageQuery p99 latency is above 10s"
+            description: |
+              The 99th percentile UsageQuery latency in {{ $labels.namespace }} has
+              been {{ $value | humanizeDuration }} for 15 minutes. Queries are answered
+              by OpenMeter from ClickHouse; check OpenMeter API and ClickHouse load.
+
+    - name: openmeter-usage-apiserver.availability
+      rules:
+        # Reported by Milo's aggregator: when it marks the APIService
+        # unavailable, every UsageQuery fails before reaching this server, so
+        # the request alerts above stay quiet.
+        - alert: OpenMeterUsageAPIServiceUnavailable
+          expr: |
+            max by (name) (
+              aggregator_unavailable_apiservice{
+                name="v1alpha1.usage.billing.miloapis.com"
+              }
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Milo reports the usage APIService unavailable"
+            description: |
+              Milo has marked APIService {{ $labels.name }} unavailable for 5 minutes,
+              so every UsageQuery fails. Check that the openmeter-usage-apiserver pods
+              are ready and that Milo can reach the Service on 443:
+              kubectl get apiservice {{ $labels.name }} -o yaml
+
+        - alert: OpenMeterUsageAPIScrapeFailing
+          expr: |
+            up{
+              namespace="openmeter-system",
+              job="openmeter-usage-apiserver"
+            } == 0
+          for: 10m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Prometheus cannot scrape the usage API server"
+            description: |
+              Scrapes of {{ $labels.job }} ({{ $labels.instance }}) have been failing
+              for 10 minutes, so the UsageQuery alerts are blind. Check that the
+              NetworkPolicy lets telemetry-system reach port 8443 and that the scrape
+              sends no bearer token (Milo would reject it).
+
+        - alert: OpenMeterUsageAPIMetricsAbsent
+          expr: |
+            absent(up{namespace="openmeter-system", job="openmeter-usage-apiserver"})
+          for: 15m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "No scrape target for the usage API server"
+            description: |
+              Prometheus has no scrape target for openmeter-usage-apiserver, so the
+              UsageQuery alerts are blind. Check that the openmeter-usage-apiserver
+              ServiceMonitor and Service exist and select running pods.

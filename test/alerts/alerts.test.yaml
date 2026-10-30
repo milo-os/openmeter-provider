@@ -1,5 +1,6 @@
 rule_files:
   - alerts.rules.yaml
+  - usage-apiserver-alerts.rules.yaml
 
 evaluation_interval: 1m
 
@@ -31,6 +32,8 @@ tests:
         values: '1+0x10'
       - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="submission-consumer"}'
         values: '1+0x10'
+      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-usage-apiserver"}'
+        values: '1+0x10'
       - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-api"}'
         values: '1+0x10'
     promql_expr_test:
@@ -43,6 +46,8 @@ tests:
           - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="openmeter-provider-manager",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
             value: 1
           - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="submission-consumer",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="openmeter-usage-apiserver",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
             value: 1
 
   - name: Metrics scrape failing alert fires after 10m of failed scrapes
@@ -399,3 +404,119 @@ tests:
       - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
         eval_time: 30h
         exp_samples: []
+
+  # ---------------------------------------------------------------------------
+  # Group 6: Usage API server (UsageQuery)
+  # ---------------------------------------------------------------------------
+  - name: UsageQuery 5xx above 5% fires after 10m
+    interval: 1m
+    input_series:
+      - series: 'apiserver_request_total{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",code="201"}'
+        values: '0+90x25'
+      - series: 'apiserver_request_total{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",code="503"}'
+        values: '0+10x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterUsageAPIErrors",alertstate="firing"}
+        eval_time: 9m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterUsageAPIErrors",alertstate="firing"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPIErrors",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+
+  - name: UsageQuery caller errors (4xx) do not fire the error alert
+    interval: 1m
+    input_series:
+      - series: 'apiserver_request_total{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",code="201"}'
+        values: '0+50x25'
+      - series: 'apiserver_request_total{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",code="403"}'
+        values: '0+30x25'
+      - series: 'apiserver_request_total{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",code="400"}'
+        values: '0+20x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterUsageAPIErrors"}
+        eval_time: 25m
+        exp_samples: []
+
+  - name: UsageQuery p99 latency above 10s fires after 15m
+    interval: 1m
+    input_series:
+      - series: 'apiserver_request_duration_seconds_bucket{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",le="1"}'
+        values: '0+0x25'
+      - series: 'apiserver_request_duration_seconds_bucket{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",le="10"}'
+        values: '0+0x25'
+      - series: 'apiserver_request_duration_seconds_bucket{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",le="30"}'
+        values: '0+10x25'
+      - series: 'apiserver_request_duration_seconds_bucket{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",le="+Inf"}'
+        values: '0+10x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterUsageAPILatencyHigh",alertstate="firing"}
+        eval_time: 14m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterUsageAPILatencyHigh",alertstate="firing"}
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPILatencyHigh",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: UsageQuery latency alert stays quiet for fast queries
+    interval: 1m
+    input_series:
+      - series: 'apiserver_request_duration_seconds_bucket{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",le="1"}'
+        values: '0+10x25'
+      - series: 'apiserver_request_duration_seconds_bucket{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",le="10"}'
+        values: '0+10x25'
+      - series: 'apiserver_request_duration_seconds_bucket{namespace="openmeter-system",job="openmeter-usage-apiserver",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",le="+Inf"}'
+        values: '0+10x25'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterUsageAPILatencyHigh"}
+        eval_time: 25m
+        exp_samples: []
+
+  - name: Usage APIService unavailable in Milo fires after 5m
+    interval: 1m
+    input_series:
+      - series: 'aggregator_unavailable_apiservice{name="v1alpha1.usage.billing.miloapis.com"}'
+        values: '1+0x10'
+      - series: 'aggregator_unavailable_apiservice{name="v1alpha1.other.miloapis.com"}'
+        values: '1+0x10'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterUsageAPIServiceUnavailable",alertstate="firing"}
+        eval_time: 4m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterUsageAPIServiceUnavailable",alertstate="firing"}
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPIServiceUnavailable",alertstate="firing",name="v1alpha1.usage.billing.miloapis.com",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+
+  - name: Usage API scrape failing fires after 10m
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="openmeter-system",job="openmeter-usage-apiserver",instance="10.0.0.3:8443"}'
+        values: '0+0x15'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterUsageAPIScrapeFailing",alertstate="firing"}
+        eval_time: 9m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterUsageAPIScrapeFailing",alertstate="firing"}
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPIScrapeFailing",alertstate="firing",instance="10.0.0.3:8443",job="openmeter-usage-apiserver",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: Usage API metrics absent fires after 15m without a scrape target
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="openmeter-system",job="openmeter-provider-metrics",instance="10.0.0.1:8443"}'
+        values: '1+0x20'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterUsageAPIMetricsAbsent",alertstate="firing"}
+        eval_time: 14m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterUsageAPIMetricsAbsent",alertstate="firing"}
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPIMetricsAbsent",alertstate="firing",job="openmeter-usage-apiserver",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1

@@ -23,12 +23,13 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 yq '.spec' "$root/config/components/prometheus/alerts.yaml" > "$work/alerts.rules.yaml"
+yq '.spec' "$root/config/components/prometheus-usage-apiserver/alerts.yaml" > "$work/usage-apiserver-alerts.rules.yaml"
 cp "$root/test/alerts/alerts.test.yaml" "$work/alerts.test.yaml"
 
 cd "$work"
 
 echo "Checking Prometheus alert rules syntax..."
-"$PROMTOOL" check rules alerts.rules.yaml
+"$PROMTOOL" check rules alerts.rules.yaml usage-apiserver-alerts.rules.yaml
 
 echo "Running alert rule unit tests..."
 "$PROMTOOL" test rules alerts.test.yaml

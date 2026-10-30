@@ -15,7 +15,7 @@ spec:
             kube_pod_container_status_waiting_reason{
               job="kube-state-metrics",
               namespace="openmeter-system",
-              pod=~"openmeter-provider-.*|submission-consumer-.*",
+              pod=~"openmeter-provider-.*|submission-consumer-.*|openmeter-usage-apiserver-.*",
               reason="CrashLoopBackOff"
             } > 0
           for: 5m
@@ -37,7 +37,7 @@ spec:
             kube_deployment_status_replicas_unavailable{
               job="kube-state-metrics",
               namespace="openmeter-system",
-              deployment=~"openmeter-provider-manager|submission-consumer"
+              deployment=~"openmeter-provider-manager|submission-consumer|openmeter-usage-apiserver"
             } > 0
           for: 5m
           labels:
