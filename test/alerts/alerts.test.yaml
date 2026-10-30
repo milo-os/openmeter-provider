@@ -214,50 +214,79 @@ tests:
             value: 1
 
   # ---------------------------------------------------------------------------
-  # Group 3: Controller reconcile & invoice sync
+  # Group 3: Controller reconcile failures (controller-runtime metrics)
   # ---------------------------------------------------------------------------
-  - name: Controller reconcile error rate above 10% fires after 10m
+  # A failing object is retried with a backoff capped at 1000s, so the error
+  # counter of an object that keeps failing ticks about every 17 minutes.
+  - name: Reconcile failing alert fires when an object keeps failing at the backoff cap
     interval: 1m
     input_series:
-      - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="success"}'
-        values: '0+80x25'
-      - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="error"}'
-        values: '0+20x25'
+      - series: 'controller_runtime_reconcile_errors_total{namespace="openmeter-system",controller="offer"}'
+        values: '0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 6 6 6 6 6'
+      - series: 'controller_runtime_reconcile_errors_total{namespace="openmeter-system",controller="meterdefinition"}'
+        values: '0+0x90'
     promql_expr_test:
-      - expr: ALERTS{alertname="OpenMeterProviderReconcileHighErrorRate",alertstate="firing"}
-        eval_time: 9m
-        exp_samples: []
-      - expr: ALERTS{alertname="OpenMeterProviderReconcileHighErrorRate",alertstate="firing"}
-        eval_time: 15m
-        exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterProviderReconcileHighErrorRate",alertstate="firing",controller="billingaccount",namespace="openmeter-system",service="billing",severity="warning"}'
-            value: 1
-
-  - name: Invoice sync failing alert fires when every billingaccount reconcile fails for 15m
-    interval: 1m
-    input_series:
-      - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="error"}'
-        values: '0+10x25'
-    promql_expr_test:
-      - expr: ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing"}
-        eval_time: 14m
-        exp_samples: []
-      - expr: ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing"}
-        eval_time: 20m
-        exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical"}'
-            value: 1
-
-  - name: Invoice sync failing alert stays quiet while some billingaccount reconciles succeed
-    interval: 1m
-    input_series:
-      - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="error"}'
-        values: '0+10x25'
-      - series: 'openmeter_provider_reconcile_duration_seconds_count{namespace="openmeter-system",controller="billingaccount",result="requeue"}'
-        values: '0+1x25'
-    promql_expr_test:
-      - expr: ALERTS{alertname="OpenMeterInvoiceSyncFailing",alertstate="firing"}
+      - expr: ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing"}
         eval_time: 25m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing"}
+        eval_time: 40m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing",controller="offer",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing"}
+        eval_time: 85m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing",controller="offer",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: Reconcile failing alert stays quiet for a one-off failure that recovers on retry
+    interval: 1m
+    input_series:
+      - series: 'controller_runtime_reconcile_errors_total{namespace="openmeter-system",controller="billingentitlement"}'
+        values: '0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterProviderReconcileFailing"}
+        eval_time: 30m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterProviderReconcileFailing"}
+        eval_time: 60m
+        exp_samples: []
+
+  - name: BillingAccount sync failing alert is critical and separate from the other controllers
+    interval: 1m
+    input_series:
+      - series: 'controller_runtime_reconcile_errors_total{namespace="openmeter-system",controller="billingaccount"}'
+        values: '0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 4 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 6 6 6 6 6'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterBillingAccountSyncFailing",alertstate="firing"}
+        eval_time: 25m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterBillingAccountSyncFailing",alertstate="firing"}
+        eval_time: 40m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterBillingAccountSyncFailing",alertstate="firing",controller="billingaccount",namespace="openmeter-system",service="billing",severity="critical"}'
+            value: 1
+      - expr: ALERTS{alertname="OpenMeterProviderReconcileFailing"}
+        eval_time: 40m
+        exp_samples: []
+
+  - name: Reconcile panic alert fires at once and clears after 10m
+    interval: 1m
+    input_series:
+      - series: 'controller_runtime_reconcile_panics_total{namespace="openmeter-system",controller="meterdefinition"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterProviderReconcilePanic",alertstate="firing"}
+        eval_time: 2m
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterProviderReconcilePanic",alertstate="firing"}
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterProviderReconcilePanic",alertstate="firing",controller="meterdefinition",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+      - expr: ALERTS{alertname="OpenMeterProviderReconcilePanic",alertstate="firing"}
+        eval_time: 20m
         exp_samples: []
 
   # ---------------------------------------------------------------------------

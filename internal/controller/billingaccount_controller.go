@@ -308,9 +308,7 @@ type BillingAccountReconciler struct {
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile runs a single sync iteration for a BillingAccount.
-func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.Request) (res ctrl.Result, err error) {
-	defer observeReconcile("billingaccount", time.Now(), &res, &err)
-
+func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("account", req.Name, "namespace", req.Namespace)
 
 	var account billingv1alpha1.BillingAccount
@@ -374,7 +372,7 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 
 	customer, err := r.OpenMeterClient.EnsureCustomer(ctx, desired)
 	if err != nil {
-		return r.handleOpenMeterCustomerError(logger, &account, "EnsureCustomer", err)
+		return r.handleOpenMeterCustomerError(&account, "EnsureCustomer", err)
 	}
 	// Resolved once and reused below: every call past this point needs
 	// OpenMeter's internal id, not customerKey — several endpoints
@@ -412,13 +410,12 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	if len(syncErrs) > 0 {
 		// errors.Join keeps every failure inspectable: IsPermanent/
 		// IsTransient use errors.As, which walks a joined tree, so the
-		// aggregate classifies as permanent if ANY member is (5m backoff,
-		// checked first) and transient when they all are (15s) — rather
-		// than collapsing to an unclassified error and hot-looping.
+		// event classifies the aggregate as permanent if ANY member is and
+		// transient when they all are.
 		// Forgetting the last synced state makes the next successful pass
 		// report Synced again, so recovering from a failure is visible.
 		r.notices.forget(noticePrefix(req.NamespacedName) + EventReasonSynced)
-		return r.handleOpenMeterCustomerError(logger, &account, "sync", errors.Join(syncErrs...))
+		return r.handleOpenMeterCustomerError(&account, "sync", errors.Join(syncErrs...))
 	}
 
 	// Synced is reported on the first successful sync this process sees for
@@ -487,45 +484,24 @@ func (r *BillingAccountReconciler) syncFingerprint(
 	return strings.Join(parts, "|")
 }
 
-// handleOpenMeterCustomerError classifies the error, emits an event, and
-// decides whether to requeue. Mirrors handleOpenMeterError in
-// meterdefinition_controller.go (and reuses its event-reason constants),
-// specialized to BillingAccount. Shared across every OpenMeter write in
-// Reconcile (EnsureCustomer, EnsureCustomerStripeAppData, ...) — operation
-// names the specific call that failed so the log line doesn't misattribute
-// e.g. a Stripe app-data failure to EnsureCustomer.
+// handleOpenMeterCustomerError emits a SyncFailed event and returns the
+// error for controller-runtime to log, count and retry with backoff.
+// Mirrors handleOpenMeterError in meterdefinition_controller.go (and reuses
+// its event-reason constants), specialized to BillingAccount. Shared across
+// every OpenMeter write in Reconcile (EnsureCustomer, the billing profile,
+// Stripe app data, invoices) — operation names the specific call that
+// failed so the error doesn't misattribute e.g. a Stripe app-data failure
+// to EnsureCustomer.
 func (r *BillingAccountReconciler) handleOpenMeterCustomerError(
-	logger logr.Logger,
 	account *billingv1alpha1.BillingAccount,
 	operation string,
 	err error,
 ) (ctrl.Result, error) {
-	switch {
-	case openmeter.IsPermanent(err):
-		logger.Error(err, fmt.Sprintf("OpenMeter %s permanent failure; requeueing", operation),
-			"requeueAfter", permanentRequeueAfter.String())
-		if r.Recorder != nil {
-			r.Recorder.Eventf(account, "Warning", EventReasonSyncFailed,
-				"%s: %v", syncReasonPermanent, err)
-		}
-		return ctrl.Result{RequeueAfter: permanentRequeueAfter}, nil
-	case openmeter.IsTransient(err):
-		logger.Info(fmt.Sprintf("OpenMeter %s transient failure; requeueing", operation),
-			"err", err.Error(),
-			"requeueAfter", transientRequeueAfter.String())
-		if r.Recorder != nil {
-			r.Recorder.Eventf(account, "Warning", EventReasonSyncFailed,
-				"%s: %v", syncReasonTransient, err)
-		}
-		return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
-	default:
-		logger.Error(err, fmt.Sprintf("OpenMeter %s unclassified failure; treating as transient", operation))
-		if r.Recorder != nil {
-			r.Recorder.Eventf(account, "Warning", EventReasonSyncFailed,
-				"%s: %v", syncReasonInvalid, err)
-		}
-		return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
+	if r.Recorder != nil {
+		r.Recorder.Eventf(account, "Warning", EventReasonSyncFailed,
+			"%s: %v", syncReason(err), err)
 	}
+	return ctrl.Result{}, fmt.Errorf("OpenMeter %s: %w", operation, err)
 }
 
 // desiredCustomerFromAccount translates a BillingAccount into the

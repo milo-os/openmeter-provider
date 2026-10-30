@@ -124,13 +124,19 @@ func newEntitlementReconciler(t *testing.T, objs ...client.Object) (*BillingEnti
 
 func reconcileEntitlement(t *testing.T, r *BillingEntitlementReconciler, name string) reconcile.Result {
 	t.Helper()
-	res, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: name},
-	})
+	res, err := reconcileEntitlementErr(r, name)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	return res
+}
+
+// reconcileEntitlementErr runs one reconcile and returns its error, for
+// failures that are expected to surface as one.
+func reconcileEntitlementErr(r *BillingEntitlementReconciler, name string) (reconcile.Result, error) {
+	return r.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: name},
+	})
 }
 
 func getEntitlement(t *testing.T, r *BillingEntitlementReconciler, name string) (*billingv1alpha1.BillingEntitlement, bool) {
@@ -290,6 +296,7 @@ func TestBillingEntitlement_EnsureFailures(t *testing.T) {
 		err         error
 		wantReason  string
 		wantRequeue time.Duration
+		wantErr     bool
 		wantMessage string
 	}{
 		{
@@ -324,13 +331,15 @@ func TestBillingEntitlement_EnsureFailures(t *testing.T) {
 			name:        "permanent OpenMeter error",
 			err:         &openmeter.PermanentError{Err: errors.New("bad request"), StatusCode: 400},
 			wantReason:  conditionReasonOpenMeterError,
-			wantRequeue: permanentRequeueAfter,
+			wantErr:     true,
+			wantMessage: syncReasonPermanent + ":",
 		},
 		{
 			name:        "transient OpenMeter error",
 			err:         &openmeter.TransientError{Err: errors.New("unavailable"), StatusCode: 503},
 			wantReason:  conditionReasonOpenMeterError,
-			wantRequeue: transientRequeueAfter,
+			wantErr:     true,
+			wantMessage: syncReasonTransient + ":",
 		},
 	}
 	for _, tt := range tests {
@@ -344,7 +353,16 @@ func TestBillingEntitlement_EnsureFailures(t *testing.T) {
 				return openmeter.SubscriptionState{}, tt.err
 			}
 
-			res := reconcileEntitlement(t, r, testBEName)
+			// Waiting on another object requeues without an error; an
+			// OpenMeter failure is returned for controller-runtime to count
+			// and retry with backoff.
+			res, err := reconcileEntitlementErr(r, testBEName)
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("Reconcile error = %v, want error: %v", err, tt.wantErr)
+			}
+			if tt.wantErr && !errors.Is(err, tt.err) {
+				t.Errorf("Reconcile error = %v, want it to wrap %v", err, tt.err)
+			}
 
 			c := assertCondition(t, r, metav1.ConditionFalse, tt.wantReason)
 			if !strings.Contains(c.Message, tt.wantMessage) {
@@ -356,7 +374,7 @@ func TestBillingEntitlement_EnsureFailures(t *testing.T) {
 			if events := drainRecorder(rec); !containsEvent(events, EventReasonSyncFailed) {
 				t.Errorf("events = %v, want SyncFailed", events)
 			}
-			reconcileEntitlement(t, r, testBEName)
+			_, _ = reconcileEntitlementErr(r, testBEName)
 			if events := drainRecorder(rec); len(events) != 0 {
 				t.Errorf("unchanged failure re-emitted events: %v", events)
 			}
@@ -412,8 +430,8 @@ func TestBillingEntitlement_DeletingAccountCancelFailureRetries(t *testing.T) {
 		return &openmeter.TransientError{Err: errors.New("unavailable")}
 	}
 
-	if res := reconcileEntitlement(t, r, testBEName); res.RequeueAfter != transientRequeueAfter {
-		t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, transientRequeueAfter)
+	if _, err := reconcileEntitlementErr(r, testBEName); !openmeter.IsTransient(err) {
+		t.Errorf("Reconcile error = %v, want the transient error returned for retry", err)
 	}
 	assertCondition(t, r, metav1.ConditionFalse, conditionReasonOpenMeterError)
 }
@@ -477,22 +495,19 @@ func TestBillingEntitlement_DeleteWithoutAccountReleases(t *testing.T) {
 
 func TestBillingEntitlement_DeleteCancelFailureKeepsFinalizer(t *testing.T) {
 	tests := []struct {
-		name        string
-		err         error
-		wantRequeue time.Duration
+		name string
+		err  error
 	}{
-		{"transient", &openmeter.TransientError{Err: errors.New("unavailable")}, transientRequeueAfter},
-		{"permanent", &openmeter.PermanentError{Err: errors.New("refused"), StatusCode: 400}, permanentRequeueAfter},
+		{"transient", &openmeter.TransientError{Err: errors.New("unavailable")}},
+		{"permanent", &openmeter.PermanentError{Err: errors.New("refused"), StatusCode: 400}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r, omc, rec := newEntitlementReconciler(t, deletingEntitlement(testBEName), testAccount())
 			omc.cancelFn = func(openmeter.CustomerKey) error { return tt.err }
 
-			res := reconcileEntitlement(t, r, testBEName)
-
-			if res.RequeueAfter != tt.wantRequeue {
-				t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, tt.wantRequeue)
+			if _, err := reconcileEntitlementErr(r, testBEName); !errors.Is(err, tt.err) {
+				t.Errorf("Reconcile error = %v, want it to wrap %v", err, tt.err)
 			}
 			be, ok := getEntitlement(t, r, testBEName)
 			if !ok || !slices.Contains(be.Finalizers, SubscriptionFinalizer) {

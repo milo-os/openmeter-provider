@@ -85,6 +85,20 @@ func reconcileOnce(t *testing.T, r *OfferReconciler) reconcile.Result {
 	return res
 }
 
+// reconcileFails runs one reconcile that must fail, returning its error so
+// controller-runtime counts it and retries with backoff.
+func reconcileFails(t *testing.T, r *OfferReconciler) error {
+	t.Helper()
+	res, err := r.Reconcile(context.Background(), requestFor("test-offer"))
+	if err == nil {
+		t.Fatalf("Reconcile succeeded (%+v), want an error", res)
+	}
+	if !res.IsZero() {
+		t.Errorf("Result = %+v, want zero alongside an error", res)
+	}
+	return err
+}
+
 func getOffer(t *testing.T, r *OfferReconciler) *billingv1alpha1.Offer {
 	t.Helper()
 	var stored billingv1alpha1.Offer
@@ -321,8 +335,8 @@ func TestReconcile_InvalidPricing(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r, omc, _ := newOfferReconciler(t, cpuMeter(), tt.offer)
 
-			if res := reconcileOnce(t, r); res.RequeueAfter != permanentRequeueAfter {
-				t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, permanentRequeueAfter)
+			if err := reconcileFails(t, r); !strings.Contains(err.Error(), "cannot be represented in OpenMeter") {
+				t.Errorf("Reconcile error = %v, want an unrepresentable-offer error", err)
 			}
 			if len(omc.calls) != 0 {
 				t.Errorf("OpenMeter called for an invalid offer: %v", omc.calls)
@@ -366,18 +380,18 @@ func TestReconcile_OpenMeterFailures(t *testing.T) {
 	transient := &openmeter.TransientError{Err: errors.New("down")}
 	permanent := &openmeter.PermanentError{Err: errors.New("rejected")}
 	tests := []struct {
-		name        string
-		setup       func(*fakeOpenMeterClient)
-		wantRequeue time.Duration
-		wantNoPlan  bool
+		name       string
+		setup      func(*fakeOpenMeterClient)
+		wantReason string
+		wantNoPlan bool
 	}{
 		{
 			name: "feature permanent stops before the plan",
 			setup: func(f *fakeOpenMeterClient) {
 				f.ensureFeatureFn = func(context.Context, openmeter.DesiredFeature) (om.Feature, error) { return om.Feature{}, permanent }
 			},
-			wantRequeue: permanentRequeueAfter,
-			wantNoPlan:  true,
+			wantReason: syncReasonPermanent,
+			wantNoPlan: true,
 		},
 		{
 			name: "plan transient",
@@ -386,7 +400,7 @@ func TestReconcile_OpenMeterFailures(t *testing.T) {
 					return omv3.BillingPlan{}, transient
 				}
 			},
-			wantRequeue: transientRequeueAfter,
+			wantReason: syncReasonTransient,
 		},
 		{
 			name: "plan permanent",
@@ -395,24 +409,24 @@ func TestReconcile_OpenMeterFailures(t *testing.T) {
 					return omv3.BillingPlan{}, permanent
 				}
 			},
-			wantRequeue: permanentRequeueAfter,
+			wantReason: syncReasonPermanent,
 		},
 		{
-			name: "plan unclassified is treated as transient",
+			name: "plan unclassified",
 			setup: func(f *fakeOpenMeterClient) {
 				f.ensurePlanFn = func(context.Context, openmeter.DesiredPlan) (omv3.BillingPlan, error) {
 					return omv3.BillingPlan{}, errors.New("??")
 				}
 			},
-			wantRequeue: transientRequeueAfter,
+			wantReason: syncReasonInvalid,
 		},
 		{
 			name: "meter lookup transient",
 			setup: func(f *fakeOpenMeterClient) {
 				f.getMeterFn = func(context.Context, string) (om.Meter, error) { return om.Meter{}, transient }
 			},
-			wantRequeue: transientRequeueAfter,
-			wantNoPlan:  true,
+			wantReason: syncReasonTransient,
+			wantNoPlan: true,
 		},
 	}
 	for _, tt := range tests {
@@ -420,8 +434,8 @@ func TestReconcile_OpenMeterFailures(t *testing.T) {
 			r, omc, rec := newOfferReconciler(t, cpuMeter(), withFinalizer(cpuOffer()))
 			tt.setup(omc)
 
-			if res := reconcileOnce(t, r); res.RequeueAfter != tt.wantRequeue {
-				t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, tt.wantRequeue)
+			if err := reconcileFails(t, r); !strings.HasPrefix(err.Error(), tt.wantReason+":") {
+				t.Errorf("Reconcile error = %v, want it tagged %s", err, tt.wantReason)
 			}
 			if tt.wantNoPlan && len(omc.ensurePlanCalls) != 0 {
 				t.Errorf("EnsurePlan called after an earlier failure")
@@ -444,7 +458,7 @@ func TestReconcile_RecoversAfterFailure(t *testing.T) {
 	omc.ensurePlanFn = func(context.Context, openmeter.DesiredPlan) (omv3.BillingPlan, error) {
 		return omv3.BillingPlan{}, &openmeter.TransientError{Err: errors.New("down")}
 	}
-	reconcileOnce(t, r)
+	_ = reconcileFails(t, r)
 	omc.ensurePlanFn = nil
 	reconcileOnce(t, r)
 	if cond := syncedCondition(t, r); cond == nil || cond.Status != metav1.ConditionTrue {
@@ -523,7 +537,7 @@ func TestReconcileDelete_Failures(t *testing.T) {
 	tests := []struct {
 		name            string
 		setup           func(*fakeOpenMeterClient)
-		wantRequeue     time.Duration
+		wantErr         bool
 		wantReleased    bool
 		wantArchiveCall bool
 	}{
@@ -532,14 +546,14 @@ func TestReconcileDelete_Failures(t *testing.T) {
 			setup: func(f *fakeOpenMeterClient) {
 				f.listPlanVersionsFn = func(context.Context, string) ([]omv3.BillingPlan, error) { return nil, transient }
 			},
-			wantRequeue: transientRequeueAfter,
+			wantErr: true,
 		},
 		{
 			name: "list permanent keeps finalizer (published plan state unknown)",
 			setup: func(f *fakeOpenMeterClient) {
 				f.listPlanVersionsFn = func(context.Context, string) ([]omv3.BillingPlan, error) { return nil, permanent }
 			},
-			wantRequeue: permanentRequeueAfter,
+			wantErr: true,
 		},
 		{
 			name: "delete transient keeps finalizer and skips feature GC",
@@ -547,7 +561,7 @@ func TestReconcileDelete_Failures(t *testing.T) {
 				f.listPlanVersionsFn = oneVersion
 				f.deletePlanFn = func(context.Context, omv3.BillingPlan) error { return transient }
 			},
-			wantRequeue: transientRequeueAfter,
+			wantErr: true,
 		},
 		{
 			name: "delete permanent releases finalizer",
@@ -564,7 +578,7 @@ func TestReconcileDelete_Failures(t *testing.T) {
 				f.listPlanVersionsFn = oneVersion
 				f.archiveFeaturesFn = func(context.Context, []string) error { return transient }
 			},
-			wantRequeue:     transientRequeueAfter,
+			wantErr:         true,
 			wantArchiveCall: true,
 		},
 		{
@@ -582,8 +596,10 @@ func TestReconcileDelete_Failures(t *testing.T) {
 			r, omc, rec := newOfferReconciler(t, cpuMeter(), deletedOffer())
 			tt.setup(omc)
 
-			if res := reconcileOnce(t, r); res.RequeueAfter != tt.wantRequeue {
-				t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, tt.wantRequeue)
+			if tt.wantErr {
+				_ = reconcileFails(t, r)
+			} else {
+				reconcileOnce(t, r)
 			}
 			if tt.wantReleased {
 				assertOfferGone(t, r)

@@ -201,63 +201,80 @@ spec:
 
     - name: openmeter-provider.controllers
       rules:
-        - alert: OpenMeterProviderReconcileHighErrorRate
+        # Failed reconciles are returned as errors, so controller-runtime
+        # counts them in controller_runtime_reconcile_errors_total, and
+        # retries each failing object with a backoff capped at 1000s. The 20m
+        # window is longer than that cap, so a single object that keeps
+        # failing keeps the expression true; a one-off failure that recovers
+        # on retry holds it for at most 20m, short of the 30m `for`.
+        - alert: OpenMeterProviderReconcileFailing
           expr: |
-            sum by (controller, namespace) (
-              rate(openmeter_provider_reconcile_duration_seconds_count{
+            sum by (namespace, controller) (
+              increase(controller_runtime_reconcile_errors_total{
                 namespace="openmeter-system",
-                result="error"
-              }[5m])
-            )
-            /
-            sum by (controller, namespace) (
-              rate(openmeter_provider_reconcile_duration_seconds_count{
-                namespace="openmeter-system"
-              }[5m])
-            ) > 0.1
-          for: 10m
+                controller=~"meterdefinition|offer|billingentitlement"
+              }[20m])
+            ) > 0
+          for: 30m
           labels:
             severity: warning
             namespace: openmeter-system
             service: billing
           annotations:
-            summary: "Controller {{ $labels.controller }} reconcile error rate above 10%"
+            summary: "Controller {{ $labels.controller }} has been failing reconciles for 30 minutes"
             description: |
-              Controller {{ $labels.controller }} in {{ $labels.namespace }} has had more
-              than 10% reconcile errors over the last 10 minutes. Check controller logs
-              for details:
-              kubectl logs -n {{ $labels.namespace }} -l control-plane=openmeter-provider
+              The {{ $labels.controller }} controller in {{ $labels.namespace }} has kept
+              failing to reconcile for 30 minutes, so OpenMeter meters, plans or
+              subscriptions are not being synced. Find the failing objects in the
+              SyncFailed / DeleteFailed events and the controller's "Reconciler error"
+              logs:
+              kubectl get events -A --field-selector reason=SyncFailed
+              kubectl logs -n {{ $labels.namespace }} -l control-plane=openmeter-provider | grep 'Reconciler error' | grep {{ $labels.controller }}
 
-        - alert: OpenMeterInvoiceSyncFailing
+        - alert: OpenMeterBillingAccountSyncFailing
           expr: |
-            sum by (namespace) (
-              increase(openmeter_provider_reconcile_duration_seconds_count{
+            sum by (namespace, controller) (
+              increase(controller_runtime_reconcile_errors_total{
                 namespace="openmeter-system",
-                controller="billingaccount",
-                result="error"
-              }[15m])
+                controller="billingaccount"
+              }[20m])
             ) > 0
-            unless on (namespace)
-            sum by (namespace) (
-              increase(openmeter_provider_reconcile_duration_seconds_count{
-                namespace="openmeter-system",
-                controller="billingaccount",
-                result=~"success|requeue"
-              }[15m])
-            ) > 0
-          for: 15m
+          for: 30m
           labels:
             severity: critical
             namespace: openmeter-system
             service: billing
           annotations:
-            summary: "OpenMeter BillingAccount reconciliation and invoice sync failing"
+            summary: "BillingAccount sync to OpenMeter has been failing for 30 minutes"
             description: |
-              Every BillingAccount reconcile in {{ $labels.namespace }} has failed for at
-              least 15 minutes, with no successful ones, so customer invoices are not
-              being synchronized between OpenMeter and Stripe. Partial failures are
-              covered by OpenMeterProviderReconcileHighErrorRate. Check operator logs:
-              kubectl logs -n {{ $labels.namespace }} -l control-plane=openmeter-provider
+              BillingAccount reconciles in {{ $labels.namespace }} have kept failing for
+              30 minutes. Each one syncs the account's OpenMeter customer, billing
+              profile, Stripe app data and invoices, so customers may not be invoiced
+              and Milo Invoices may be stale. Find the failing accounts in the
+              SyncFailed events and the "Reconciler error" logs:
+              kubectl get events -A --field-selector reason=SyncFailed
+              kubectl logs -n {{ $labels.namespace }} -l control-plane=openmeter-provider | grep 'Reconciler error' | grep billingaccount
+
+        - alert: OpenMeterProviderReconcilePanic
+          expr: |
+            sum by (namespace, controller) (
+              increase(controller_runtime_reconcile_panics_total{
+                namespace="openmeter-system",
+                controller=~"billingaccount|meterdefinition|offer|billingentitlement"
+              }[10m])
+            ) > 0
+          for: 0m
+          labels:
+            severity: warning
+            namespace: openmeter-system
+            service: billing
+          annotations:
+            summary: "Controller {{ $labels.controller }} panicked during a reconcile"
+            description: |
+              The {{ $labels.controller }} controller in {{ $labels.namespace }} panicked
+              while reconciling in the last 10 minutes. controller-runtime recovered and
+              will retry, but a panic is a bug. Find the stack trace in the logs:
+              kubectl logs -n {{ $labels.namespace }} -l control-plane=openmeter-provider | grep -A30 'Observed a panic'
 
     - name: openmeter.cronjobs
       rules:

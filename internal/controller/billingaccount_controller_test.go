@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -213,6 +214,11 @@ type syncOpenMeterClient struct {
 	ensureCalls []openmeter.DesiredCustomer
 	writes      int
 
+	// ensureErr and listInvoicesErr, when set, fail EnsureCustomer and
+	// ListInvoicesIncludingDeleted.
+	ensureErr       error
+	listInvoicesErr error
+
 	stripeAppData          map[openmeter.CustomerID]om.StripeCustomerAppData
 	stripeAppNotConfigured bool
 	stripeEnsureCalls      []string
@@ -228,6 +234,9 @@ func newSyncOpenMeterClient() *syncOpenMeterClient {
 
 func (f *syncOpenMeterClient) EnsureCustomer(_ context.Context, desired openmeter.DesiredCustomer) (om.Customer, error) {
 	f.ensureCalls = append(f.ensureCalls, desired)
+	if f.ensureErr != nil {
+		return om.Customer{}, f.ensureErr
+	}
 	existing, ok := f.customers[desired.Key]
 	email := desired.Email
 	// Like the real client: subject keys are never set or changed.
@@ -279,7 +288,7 @@ func (f *syncOpenMeterClient) ListInvoices(_ context.Context, _ openmeter.Custom
 }
 
 func (f *syncOpenMeterClient) ListInvoicesIncludingDeleted(_ context.Context, _ openmeter.CustomerID) ([]om.Invoice, error) {
-	return nil, nil
+	return nil, f.listInvoicesErr
 }
 
 func (f *syncOpenMeterClient) EnsureCustomerStripeAppData(_ context.Context, id openmeter.CustomerID, cus openmeter.StripeCustomerID, pm string) error {
@@ -655,5 +664,65 @@ func TestReconcile_StripeAppNotConfiguredDoesNotFailTheSync(t *testing.T) {
 	}
 	if n := countEvents(events, EventReasonSyncFailed); n != 0 {
 		t.Errorf("%d SyncFailed events, want 0: %v", n, events)
+	}
+}
+
+// TestReconcile_OpenMeterFailuresAreReturned: every OpenMeter failure,
+// permanent ones included, is returned so controller-runtime logs it, counts
+// it in controller_runtime_reconcile_errors_total and retries with backoff.
+func TestReconcile_OpenMeterFailuresAreReturned(t *testing.T) {
+	transient := &openmeter.TransientError{Err: errors.New("unavailable"), StatusCode: 503}
+	permanent := &openmeter.PermanentError{Err: errors.New("rejected"), StatusCode: 400}
+	tests := []struct {
+		name       string
+		setup      func(*syncOpenMeterClient)
+		wantErr    error
+		wantReason string
+	}{
+		{
+			name:       "customer transient",
+			setup:      func(f *syncOpenMeterClient) { f.ensureErr = transient },
+			wantErr:    transient,
+			wantReason: syncReasonTransient,
+		},
+		{
+			name:       "customer permanent",
+			setup:      func(f *syncOpenMeterClient) { f.ensureErr = permanent },
+			wantErr:    permanent,
+			wantReason: syncReasonPermanent,
+		},
+		{
+			name:       "invoice sync transient",
+			setup:      func(f *syncOpenMeterClient) { f.listInvoicesErr = transient },
+			wantErr:    transient,
+			wantReason: syncReasonTransient,
+		},
+		{
+			name:       "invoice sync permanent",
+			setup:      func(f *syncOpenMeterClient) { f.listInvoicesErr = permanent },
+			wantErr:    permanent,
+			wantReason: syncReasonPermanent,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newSyncHarness(t, baseBillingAccount())
+			tt.setup(h.omc)
+
+			res, err := h.r.Reconcile(context.Background(), h.req)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Reconcile error = %v, want it to wrap %v", err, tt.wantErr)
+			}
+			if !res.IsZero() {
+				t.Errorf("Result = %+v, want zero alongside an error", res)
+			}
+			events := h.events()
+			if n := countEvents(events, EventReasonSyncFailed); n != 1 {
+				t.Fatalf("%d SyncFailed events, want 1: %v", n, events)
+			}
+			if !strings.Contains(strings.Join(events, "\n"), tt.wantReason+":") {
+				t.Errorf("events = %v, want the SyncFailed tagged %s", events, tt.wantReason)
+			}
+		})
 	}
 }
