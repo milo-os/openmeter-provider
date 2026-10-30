@@ -474,22 +474,35 @@ tests:
         eval_time: 25m
         exp_samples: []
 
-  - name: Usage APIService unavailable in Milo fires after 5m
+  - name: Usage API unreachable from Milo fires when Milo keeps failing to route UsageQuery
     interval: 1m
     input_series:
-      - series: 'aggregator_unavailable_apiservice{name="v1alpha1.usage.billing.miloapis.com"}'
-        values: '1+0x10'
-      - series: 'aggregator_unavailable_apiservice{name="v1alpha1.other.miloapis.com"}'
-        values: '1+0x10'
+      - series: 'apiserver_request_terminations_total{job="milo-apiserver",component="aggregator",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",scope="namespace",code="503"}'
+        values: '0+2x20'
+      # Another group's proxy failures and Milo's own 429s do not count.
+      - series: 'apiserver_request_terminations_total{job="milo-apiserver",component="aggregator",group="search.miloapis.com",code="503"}'
+        values: '0+2x20'
+      - series: 'apiserver_request_terminations_total{job="milo-apiserver",component="apiserver",group="usage.billing.miloapis.com",code="429"}'
+        values: '0+2x20'
     promql_expr_test:
-      - expr: ALERTS{alertname="OpenMeterUsageAPIServiceUnavailable",alertstate="firing"}
+      - expr: ALERTS{alertname="OpenMeterUsageAPIUnreachableFromMilo",alertstate="firing"}
         eval_time: 4m
         exp_samples: []
-      - expr: ALERTS{alertname="OpenMeterUsageAPIServiceUnavailable",alertstate="firing"}
-        eval_time: 5m
+      - expr: ALERTS{alertname="OpenMeterUsageAPIUnreachableFromMilo",alertstate="firing"}
+        eval_time: 7m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterUsageAPIServiceUnavailable",alertstate="firing",name="v1alpha1.usage.billing.miloapis.com",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPIUnreachableFromMilo",alertstate="firing",group="usage.billing.miloapis.com",namespace="openmeter-system",service="billing",severity="critical"}'
             value: 1
+
+  - name: Usage API unreachable from Milo stays quiet without routing failures
+    interval: 1m
+    input_series:
+      - series: 'apiserver_request_terminations_total{job="milo-apiserver",component="aggregator",group="usage.billing.miloapis.com",version="v1alpha1",resource="usagequeries",verb="POST",scope="namespace",code="503"}'
+        values: '5+0x20'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterUsageAPIUnreachableFromMilo"}
+        eval_time: 20m
+        exp_samples: []
 
   - name: Usage API scrape failing fires after 10m
     interval: 1m
