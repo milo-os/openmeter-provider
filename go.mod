@@ -14,6 +14,7 @@ require (
 	go.miloapis.com/billing v0.5.6
 	go.miloapis.com/instrumentation v0.6.0
 	go.miloapis.com/stripe-provider v0.0.0-00010101000000-000000000000
+	go.uber.org/zap v1.27.1
 	golang.org/x/sync v0.24.0
 	k8s.io/api v0.37.1
 	k8s.io/apimachinery v0.37.1
@@ -132,7 +133,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.45.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.27.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect

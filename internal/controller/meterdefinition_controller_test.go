@@ -602,3 +602,36 @@ func TestMeterFinalizer_FailuresKeepFinalizer(t *testing.T) {
 		})
 	}
 }
+
+// TestReconcileMeter_SyncFailedOnlyWhenTheFailureChanges: each retry of a
+// persistent failure is logged and counted by controller-runtime, so the
+// Warning event is emitted once, again when the failure changes, and again
+// when it comes back after a successful sync.
+func TestReconcileMeter_SyncFailedOnlyWhenTheFailureChanges(t *testing.T) {
+	env := newMeterTestEnv(t, testMeterDefinition())
+	down := &openmeter.TransientError{Err: errors.New("503")}
+	rejected := &openmeter.PermanentError{Err: errors.New("400")}
+
+	steps := []struct {
+		name       string
+		err        error
+		wantEvents int
+	}{
+		{"first failure", down, 1},
+		{"same failure retried", down, 0},
+		{"same failure retried again", down, 0},
+		{"different failure", rejected, 1},
+		{"recovered", nil, 0},
+		{"first failure again", down, 1},
+	}
+	for _, step := range steps {
+		env.omc.ensureErr = step.err
+		_, err := env.reconcile(t)
+		if (err != nil) != (step.err != nil) {
+			t.Fatalf("%s: Reconcile error = %v", step.name, err)
+		}
+		if n := countEvents(env.events(), EventReasonSyncFailed); n != step.wantEvents {
+			t.Errorf("%s: %d SyncFailed events, want %d", step.name, n, step.wantEvents)
+		}
+	}
+}

@@ -18,6 +18,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/spf13/cobra"
+	"go.uber.org/zap/zapcore"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -33,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 	"go.miloapis.com/instrumentation/buildinfo"
@@ -106,7 +108,7 @@ func (o *Options) Run(cmd *cobra.Command) error {
 	}
 	defer logs.FlushLogs()
 	buildinfo.SetVersion(o.Version)
-	ctrl.SetLogger(logging.New(nil))
+	ctrl.SetLogger(logging.New(&zap.Options{Level: zapLevel(o.Logs.Verbosity)}))
 
 	serverConfig, err := o.serverConfig()
 	if err != nil {
@@ -190,4 +192,15 @@ func (o *Options) Config(serverConfig *config.OpenMeterProviderOperator) (*usage
 			OpenMeter: openMeterClient,
 		},
 	}, nil
+}
+
+// zapLevel maps the server's -v to the level of controller-runtime's logger,
+// so one flag sets the verbosity of both klog and ctrl.Log output: logr's
+// V(n) logs at zap level -n, so -v=2 lets V(2) through.
+func zapLevel(v logsapi.VerbosityLevel) zapcore.Level {
+	// zapcore.Level is an int8.
+	if v > 127 {
+		v = 127
+	}
+	return zapcore.Level(-int8(v))
 }

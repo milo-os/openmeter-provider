@@ -86,6 +86,9 @@ type MeterDefinitionReconciler struct {
 	// Log is the reconciler-scoped logger. Each Reconcile call derives a
 	// per-reconcile logger with meter/slug values.
 	Log logr.Logger
+
+	// notices de-duplicates SyncFailed events, keyed by MeterDefinition.
+	notices notices
 }
 
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=meterdefinitions,verbs=get;list;watch;update;patch
@@ -101,6 +104,7 @@ func (r *MeterDefinitionReconciler) Reconcile(ctx context.Context, req reconcile
 	var md billingv1alpha1.MeterDefinition
 	if err := r.Get(ctx, req.NamespacedName, &md); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.notices.forget(req.String())
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "failed to get MeterDefinition")
@@ -174,6 +178,8 @@ func (r *MeterDefinitionReconciler) Reconcile(ctx context.Context, req reconcile
 	if err != nil {
 		return r.handleOpenMeterError(&md, "EnsureMeter", err)
 	}
+	// A later failure is reported again, even with the same message.
+	r.notices.forget(req.String())
 
 	if !changed {
 		// Billing rewrites the MeterDefinition's status on its own schedule,
@@ -201,14 +207,19 @@ func (r *MeterDefinitionReconciler) Reconcile(ctx context.Context, req reconcile
 // without any Kubernetes event.
 // operation names the specific call that failed, so a spec-translation
 // error isn't reported as an EnsureMeter failure.
+//
+// The event is emitted only when the failure changes, not on every retry:
+// controller-runtime already logs each attempt, and a persistent failure
+// would otherwise add a Warning event per backoff step.
 func (r *MeterDefinitionReconciler) handleOpenMeterError(
 	md *billingv1alpha1.MeterDefinition,
 	operation string,
 	err error,
 ) (ctrl.Result, error) {
-	if r.Recorder != nil {
-		r.Recorder.Eventf(md, "Warning", EventReasonSyncFailed,
-			"%s: %v", syncReason(err), err)
+	msg := fmt.Sprintf("%s: %v", syncReason(err), err)
+	key := client.ObjectKeyFromObject(md).String()
+	if r.notices.changed(key, msg) && r.Recorder != nil {
+		r.Recorder.Event(md, "Warning", EventReasonSyncFailed, msg)
 	}
 	return ctrl.Result{}, fmt.Errorf("OpenMeter %s: %w", operation, err)
 }

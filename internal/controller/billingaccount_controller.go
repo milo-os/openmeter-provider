@@ -412,11 +412,10 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 		// IsTransient use errors.As, which walks a joined tree, so the
 		// event classifies the aggregate as permanent if ANY member is and
 		// transient when they all are.
-		// Forgetting the last synced state makes the next successful pass
-		// report Synced again, so recovering from a failure is visible.
-		r.notices.forget(noticePrefix(req.NamespacedName) + EventReasonSynced)
 		return r.handleOpenMeterCustomerError(&account, "sync", errors.Join(syncErrs...))
 	}
+	// A later failure is reported again, even with the same message.
+	r.notices.forget(noticePrefix(req.NamespacedName) + EventReasonSyncFailed)
 
 	// Synced is reported on the first successful sync this process sees for
 	// the account, and afterwards only when the synced state actually
@@ -492,14 +491,22 @@ func (r *BillingAccountReconciler) syncFingerprint(
 // Stripe app data, invoices) — operation names the specific call that
 // failed so the error doesn't misattribute e.g. a Stripe app-data failure
 // to EnsureCustomer.
+//
+// The event is emitted only when the failure changes, not on every retry:
+// controller-runtime already logs each attempt, and a persistent failure
+// would otherwise add a Warning event per backoff step.
 func (r *BillingAccountReconciler) handleOpenMeterCustomerError(
 	account *billingv1alpha1.BillingAccount,
 	operation string,
 	err error,
 ) (ctrl.Result, error) {
-	if r.Recorder != nil {
-		r.Recorder.Eventf(account, "Warning", EventReasonSyncFailed,
-			"%s: %v", syncReason(err), err)
+	prefix := noticePrefix(types.NamespacedName{Namespace: account.Namespace, Name: account.Name})
+	// Forgetting the last synced state makes the next successful pass
+	// report Synced again, so recovering from a failure is visible.
+	r.notices.forget(prefix + EventReasonSynced)
+	msg := fmt.Sprintf("%s: %v", syncReason(err), err)
+	if r.notices.changed(prefix+EventReasonSyncFailed, msg) && r.Recorder != nil {
+		r.Recorder.Event(account, "Warning", EventReasonSyncFailed, msg)
 	}
 	return ctrl.Result{}, fmt.Errorf("OpenMeter %s: %w", operation, err)
 }
