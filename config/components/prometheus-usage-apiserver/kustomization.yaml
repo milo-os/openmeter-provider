@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Scrapes and alerts on the usage.billing.miloapis.com aggregated API server
+# (components/usage-apiserver). Separate from components/prometheus because
+# the usage API server is optional: include this only alongside it.
+resources:
+  - monitor.yaml
+  - alerts.yaml

@@ -139,13 +139,11 @@ func (r *OfferReconciler) reconcileSync(
 			// The MeterDefinition watch requeues the Offer as soon as the
 			// meter appears; the timed requeue is a fallback.
 			logger.Info("waiting for MeterDefinition", "reason", err.Error())
-			return r.syncFailed(ctx, offer, conditionReasonMeterNotFound, err, transientRequeueAfter)
+			return r.syncWaiting(ctx, offer, conditionReasonMeterNotFound, err, transientRequeueAfter)
 		case errors.As(err, &invalid):
-			logger.Error(err, "offer cannot be represented in OpenMeter")
-			return r.syncFailed(ctx, offer, conditionReasonInvalidPricing, err, permanentRequeueAfter)
+			return r.syncFailed(ctx, offer, conditionReasonInvalidPricing, fmt.Errorf("offer cannot be represented in OpenMeter: %w", err))
 		default:
-			logger.Error(err, "build OpenMeter mapping")
-			return r.syncFailed(ctx, offer, conditionReasonInvalidPricing, err, transientRequeueAfter)
+			return r.syncFailed(ctx, offer, conditionReasonInvalidPricing, fmt.Errorf("build OpenMeter mapping: %w", err))
 		}
 	}
 
@@ -157,10 +155,10 @@ func (r *OfferReconciler) reconcileSync(
 		if _, err := r.OpenMeterClient.GetMeter(ctx, slug); err != nil {
 			if errors.Is(err, openmeter.ErrMeterNotFound) {
 				logger.Info("waiting for OpenMeter meter", "meterSlug", slug)
-				return r.syncFailed(ctx, offer, conditionReasonMeterNotSynced,
+				return r.syncWaiting(ctx, offer, conditionReasonMeterNotSynced,
 					fmt.Errorf("OpenMeter meter %q does not exist yet", slug), transientRequeueAfter)
 			}
-			return r.openMeterFailed(ctx, logger, offer, fmt.Errorf("get meter %q: %w", slug, err))
+			return r.openMeterFailed(ctx, offer, fmt.Errorf("get meter %q: %w", slug, err))
 		}
 	}
 
@@ -168,17 +166,17 @@ func (r *OfferReconciler) reconcileSync(
 	for _, feature := range mapping.Features {
 		f, err := r.OpenMeterClient.EnsureFeature(ctx, feature)
 		if err != nil {
-			return r.openMeterFailed(ctx, logger, offer, fmt.Errorf("ensure feature %q: %w", feature.Key, err))
+			return r.openMeterFailed(ctx, offer, fmt.Errorf("ensure feature %q: %w", feature.Key, err))
 		}
 		featureIDs[feature.Key] = f.Id
 	}
 	if err := mapping.setFeatureIDs(featureIDs); err != nil {
-		return r.openMeterFailed(ctx, logger, offer, err)
+		return r.openMeterFailed(ctx, offer, err)
 	}
 
 	plan, err := r.OpenMeterClient.EnsurePlan(ctx, mapping.Plan)
 	if err != nil {
-		return r.openMeterFailed(ctx, logger, offer, fmt.Errorf("ensure plan: %w", err))
+		return r.openMeterFailed(ctx, offer, fmt.Errorf("ensure plan: %w", err))
 	}
 
 	// The plan reference lives in the status condition, never in an
@@ -197,47 +195,66 @@ func (r *OfferReconciler) reconcileSync(
 	return ctrl.Result{}, nil
 }
 
-// openMeterFailed classifies an OpenMeter error into a requeue schedule.
+// openMeterFailed records an OpenMeter failure, tagged with its
+// classification, and returns it.
 func (r *OfferReconciler) openMeterFailed(
 	ctx context.Context,
-	logger logr.Logger,
 	offer *billingv1alpha1.Offer,
 	err error,
 ) (ctrl.Result, error) {
-	switch {
-	case openmeter.IsPermanent(err):
-		logger.Error(err, "OpenMeter permanent failure", "requeueAfter", permanentRequeueAfter.String())
-		return r.syncFailed(ctx, offer, conditionReasonOpenMeterError,
-			fmt.Errorf("%s: %w", syncReasonPermanent, err), permanentRequeueAfter)
-	case openmeter.IsTransient(err):
-		logger.Info("OpenMeter transient failure", "err", err.Error(), "requeueAfter", transientRequeueAfter.String())
-		return r.syncFailed(ctx, offer, conditionReasonOpenMeterError,
-			fmt.Errorf("%s: %w", syncReasonTransient, err), transientRequeueAfter)
-	default:
-		logger.Error(err, "OpenMeter unclassified failure; treating as transient")
-		return r.syncFailed(ctx, offer, conditionReasonOpenMeterError,
-			fmt.Errorf("%s: %w", syncReasonTransient, err), transientRequeueAfter)
-	}
+	return r.syncFailed(ctx, offer, conditionReasonOpenMeterError,
+		fmt.Errorf("%s: %w", syncReason(err), err))
 }
 
-// syncFailed records a failed sync on the Offer and schedules a retry. The
-// Warning event is only emitted when the condition changes, so a persistent
-// failure does not flood the event stream every requeue.
+// syncFailed records a failed sync on the Offer and returns cause, so
+// controller-runtime logs it, counts it in
+// controller_runtime_reconcile_errors_total and retries with backoff.
 func (r *OfferReconciler) syncFailed(
+	ctx context.Context,
+	offer *billingv1alpha1.Offer,
+	reason string,
+	cause error,
+) (ctrl.Result, error) {
+	if err := r.setSyncedFalse(ctx, offer, reason, cause); err != nil {
+		return ctrl.Result{}, errors.Join(cause, err)
+	}
+	return ctrl.Result{}, cause
+}
+
+// syncWaiting records that the Offer is waiting on something expected (a
+// MeterDefinition, an OpenMeter meter another controller is creating) and
+// checks again after requeueAfter. Waiting is not a failure, so no error is
+// returned.
+func (r *OfferReconciler) syncWaiting(
 	ctx context.Context,
 	offer *billingv1alpha1.Offer,
 	reason string,
 	cause error,
 	requeueAfter time.Duration,
 ) (ctrl.Result, error) {
+	if err := r.setSyncedFalse(ctx, offer, reason, cause); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// setSyncedFalse sets the condition to False. The Warning event is only
+// emitted when the condition changes, so a persistent failure does not
+// flood the event stream on every retry.
+func (r *OfferReconciler) setSyncedFalse(
+	ctx context.Context,
+	offer *billingv1alpha1.Offer,
+	reason string,
+	cause error,
+) error {
 	changed, err := r.setSyncedCondition(ctx, offer, metav1.ConditionFalse, reason, cause.Error())
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 	if changed {
 		r.event(offer, "Warning", EventReasonSyncFailed, fmt.Sprintf("%s: %v", reason, cause))
 	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	return nil
 }
 
 // setSyncedCondition patches the OpenMeterPlanSynced condition when it
@@ -288,13 +305,8 @@ func (r *OfferReconciler) reconcileDelete(
 	if err != nil {
 		// Never release the finalizer without knowing whether a published
 		// plan exists: it would stay assignable with no Offer behind it.
-		requeue := transientRequeueAfter
-		if openmeter.IsPermanent(err) {
-			requeue = permanentRequeueAfter
-		}
-		logger.Error(err, "list plan versions for deletion; keeping finalizer", "requeueAfter", requeue.String())
 		r.event(offer, "Warning", EventReasonDeleteFailed, fmt.Sprintf("list plan versions: %v", err))
-		return ctrl.Result{RequeueAfter: requeue}, nil
+		return ctrl.Result{}, fmt.Errorf("list plan versions for deletion; keeping finalizer: %w", err)
 	}
 
 	var featureIDs []string
@@ -315,9 +327,8 @@ func (r *OfferReconciler) reconcileDelete(
 		}
 		if err := r.OpenMeterClient.DeletePlan(ctx, v); err != nil {
 			if !openmeter.IsPermanent(err) {
-				logger.Info("DeletePlan failed; requeueing", "planID", v.Id, "err", err.Error())
 				r.event(offer, "Warning", EventReasonDeleteFailed, fmt.Sprintf("delete plan %s: %v", v.Id, err))
-				return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
+				return ctrl.Result{}, fmt.Errorf("delete plan %s: %w", v.Id, err)
 			}
 			// Permanent: OpenMeter refuses this version for good. Holding
 			// the finalizer would block the Offer forever, so the version is
@@ -332,9 +343,8 @@ func (r *OfferReconciler) reconcileDelete(
 
 	if err := r.OpenMeterClient.ArchiveFeaturesIfUnreferenced(ctx, featureIDs); err != nil {
 		if !openmeter.IsPermanent(err) {
-			logger.Info("archive features failed; requeueing", "err", err.Error())
 			r.event(offer, "Warning", EventReasonDeleteFailed, fmt.Sprintf("archive features: %v", err))
-			return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
+			return ctrl.Result{}, fmt.Errorf("archive features: %w", err)
 		}
 		// Leftover features are harmless to billing; the MeterDefinition
 		// finalizer archives them before deleting the meter.

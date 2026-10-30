@@ -35,6 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
+	"go.miloapis.com/instrumentation/buildinfo"
+	"go.miloapis.com/instrumentation/logging"
 	usageapiserver "go.miloapis.com/openmeter-provider/internal/apiserver"
 	"go.miloapis.com/openmeter-provider/internal/config"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
@@ -103,7 +105,8 @@ func (o *Options) Run(cmd *cobra.Command) error {
 		return fmt.Errorf("applying logging configuration: %w", err)
 	}
 	defer logs.FlushLogs()
-	ctrl.SetLogger(klog.NewKlogr())
+	buildinfo.SetVersion(o.Version)
+	ctrl.SetLogger(logging.New(nil))
 
 	serverConfig, err := o.serverConfig()
 	if err != nil {

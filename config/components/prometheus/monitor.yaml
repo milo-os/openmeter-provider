@@ -1,0 +1,41 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    control-plane: openmeter-provider
+    app.kubernetes.io/name: openmeter-provider
+    app.kubernetes.io/managed-by: kustomize
+  name: openmeter-provider-metrics
+spec:
+  endpoints:
+    - path: /metrics
+      port: https
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
+  selector:
+    matchLabels:
+      control-plane: openmeter-provider
+      app.kubernetes.io/name: openmeter-provider
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    control-plane: submission-consumer
+    app.kubernetes.io/name: submission-consumer
+    app.kubernetes.io/managed-by: kustomize
+  name: submission-consumer-metrics
+spec:
+  endpoints:
+    - path: /metrics
+      port: https
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
+  selector:
+    matchLabels:
+      control-plane: submission-consumer
+      app.kubernetes.io/name: submission-consumer

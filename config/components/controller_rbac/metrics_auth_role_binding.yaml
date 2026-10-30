@@ -1,0 +1,18 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: openmeter-provider
+    app.kubernetes.io/managed-by: kustomize
+  name: openmeter-provider-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openmeter-provider-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: openmeter-provider-manager
+  namespace: openmeter-system
+- kind: ServiceAccount
+  name: submission-consumer
+  namespace: openmeter-system

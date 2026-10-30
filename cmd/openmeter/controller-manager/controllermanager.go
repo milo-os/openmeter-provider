@@ -20,6 +20,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
+	"go.miloapis.com/instrumentation/buildinfo"
+	"go.miloapis.com/instrumentation/logging"
 	"go.miloapis.com/openmeter-provider/internal/config"
 	"go.miloapis.com/openmeter-provider/internal/controller"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
@@ -49,15 +51,14 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 		stripeAPIKeyFile        string
 	)
 
-	opts := zap.Options{
-		Development: true,
-	}
+	opts := zap.Options{}
 
 	cmd := &cobra.Command{
 		Use:   "controller-manager",
 		Short: "Run the openmeter-provider controller manager (controller-runtime manager)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+			buildinfo.SetVersion(info.Version)
+			ctrl.SetLogger(logging.New(&opts))
 
 			setupLog := ctrl.Log.WithName("setup")
 			setupLog.Info("starting openmeter-provider operator",

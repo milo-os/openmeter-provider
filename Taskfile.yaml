@@ -119,6 +119,12 @@ tasks:
       - go test -timeout 5m ./... -count=1
     silent: false
 
+  test:alerts:
+    desc: Run Prometheus alert rule unit tests
+    cmds:
+      - ./test/alerts/test-alerts.sh
+    silent: false
+
   lint:
     desc: Run golangci-lint
     cmds:

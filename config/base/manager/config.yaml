@@ -1,7 +1,7 @@
 apiVersion: apiserver.config.miloapis.com/v1alpha1
 kind: OpenMeterProviderOperator
 metricsServer:
-  bindAddress: "0"
+  bindAddress: ":8443"
 # openMeter configures the meter-definition controller. Point serverUrl at the
 # in-cluster OpenMeter API service. The dev install runs with authentication
 # disabled, so apiSecret is empty; in production, source the token from a

@@ -27,3 +27,6 @@ jobs:
       - name: Running Tests
         run: |
           KUBEBUILDER_ASSETS="$(setup-envtest use 1.31.0 -p path)" go test -timeout 5m ./...
+
+      - name: Alert rule tests
+        run: ./test/alerts/test-alerts.sh

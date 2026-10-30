@@ -45,10 +45,11 @@ const (
 	syncReasonTransient = "Transient"
 	syncReasonInvalid   = "Invalid"
 
-	// transientRequeueAfter is the delay before retrying transient
-	// failures (OpenMeter down, 5xx, 429). permanentRequeueAfter backs off
-	// permanent failures (e.g. an invalid spec OpenMeter keeps rejecting)
-	// so a leftover is retried without a pod restart.
+	// transientRequeueAfter and permanentRequeueAfter pace re-checks while
+	// a reconcile waits on something expected (an OpenMeter object another
+	// controller is creating, a finalizer waiting on invoices). Failures
+	// are returned as errors instead and retried with controller-runtime's
+	// backoff.
 	transientRequeueAfter = 15 * time.Second
 	permanentRequeueAfter = 5 * time.Minute
 
@@ -165,13 +166,13 @@ func (r *MeterDefinitionReconciler) Reconcile(ctx context.Context, req reconcile
 		// permanent-error handling as an EnsureMeter failure so it gets an
 		// event and a periodic requeue rather than wedging or silently
 		// miscategorizing usage.
-		return r.handleOpenMeterError(logger, &md, "desiredMeter", err)
+		return r.handleOpenMeterError(&md, "desiredMeter", err)
 	}
 	logger = logger.WithValues("aggregation", desired.Aggregation)
 
 	meter, changed, err := r.OpenMeterClient.EnsureMeter(ctx, desired)
 	if err != nil {
-		return r.handleOpenMeterError(logger, &md, "EnsureMeter", err)
+		return r.handleOpenMeterError(&md, "EnsureMeter", err)
 	}
 
 	if !changed {
@@ -192,44 +193,36 @@ func (r *MeterDefinitionReconciler) Reconcile(ctx context.Context, req reconcile
 	return ctrl.Result{RequeueAfter: meterResyncInterval}, nil
 }
 
-// handleOpenMeterError classifies the error, emits an event, and decides
-// whether to requeue. Permanent failures requeue after permanentRequeueAfter
-// so leftovers that later become adoptable are retried without a pod restart.
-// Unclassified errors are treated as transient so a misclassification never
-// wedges the reconcile loop.
+// handleOpenMeterError emits a SyncFailed event tagged with the error's
+// classification and returns the error, so controller-runtime logs it,
+// counts it in controller_runtime_reconcile_errors_total and retries with
+// its per-object backoff. Permanent failures are retried too: OpenMeter
+// state they depend on (e.g. a leftover that becomes adoptable) can change
+// without any Kubernetes event.
 // operation names the specific call that failed, so a spec-translation
 // error isn't reported as an EnsureMeter failure.
 func (r *MeterDefinitionReconciler) handleOpenMeterError(
-	logger logr.Logger,
 	md *billingv1alpha1.MeterDefinition,
 	operation string,
 	err error,
 ) (ctrl.Result, error) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(md, "Warning", EventReasonSyncFailed,
+			"%s: %v", syncReason(err), err)
+	}
+	return ctrl.Result{}, fmt.Errorf("OpenMeter %s: %w", operation, err)
+}
+
+// syncReason classifies an OpenMeter error for events and conditions.
+// Unclassified errors are reported as Invalid.
+func syncReason(err error) string {
 	switch {
 	case openmeter.IsPermanent(err):
-		logger.Error(err, fmt.Sprintf("OpenMeter %s permanent failure; requeueing", operation),
-			"requeueAfter", permanentRequeueAfter.String())
-		if r.Recorder != nil {
-			r.Recorder.Eventf(md, "Warning", EventReasonSyncFailed,
-				"%s: %v", syncReasonPermanent, err)
-		}
-		return ctrl.Result{RequeueAfter: permanentRequeueAfter}, nil
+		return syncReasonPermanent
 	case openmeter.IsTransient(err):
-		logger.Info(fmt.Sprintf("OpenMeter %s transient failure; requeueing", operation),
-			"err", err.Error(),
-			"requeueAfter", transientRequeueAfter.String())
-		if r.Recorder != nil {
-			r.Recorder.Eventf(md, "Warning", EventReasonSyncFailed,
-				"%s: %v", syncReasonTransient, err)
-		}
-		return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
+		return syncReasonTransient
 	default:
-		logger.Error(err, fmt.Sprintf("OpenMeter %s unclassified failure; treating as transient", operation))
-		if r.Recorder != nil {
-			r.Recorder.Eventf(md, "Warning", EventReasonSyncFailed,
-				"%s: %v", syncReasonInvalid, err)
-		}
-		return ctrl.Result{RequeueAfter: transientRequeueAfter}, nil
+		return syncReasonInvalid
 	}
 }
 

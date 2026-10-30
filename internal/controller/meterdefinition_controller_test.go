@@ -455,30 +455,27 @@ func TestReconcileMeter_RecreatesDeletedMeter(t *testing.T) {
 
 func TestReconcileMeter_OpenMeterErrors(t *testing.T) {
 	tests := []struct {
-		name        string
-		err         error
-		wantRequeue bool
-		want        string
+		name string
+		err  error
+		want string
 	}{
-		{"transient", &openmeter.TransientError{Err: errors.New("503")}, true, syncReasonTransient},
-		{"permanent", &openmeter.PermanentError{Err: errors.New("400")}, false, syncReasonPermanent},
-		{"unclassified", errors.New("boom"), true, syncReasonInvalid},
+		{"transient", &openmeter.TransientError{Err: errors.New("503")}, syncReasonTransient},
+		{"permanent", &openmeter.PermanentError{Err: errors.New("400")}, syncReasonPermanent},
+		{"unclassified", errors.New("boom"), syncReasonInvalid},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			env := newMeterTestEnv(t, testMeterDefinition())
 			env.omc.ensureErr = tt.err
 
+			// Every failure is returned, so controller-runtime counts it and
+			// retries with backoff, permanent ones included.
 			res, err := env.reconcile(t)
-			if err != nil {
-				t.Fatalf("Reconcile returned %v; errors are surfaced via events and RequeueAfter", err)
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("Reconcile error = %v, want it to wrap %v", err, tt.err)
 			}
-			want := permanentRequeueAfter
-			if tt.wantRequeue {
-				want = transientRequeueAfter
-			}
-			if res.RequeueAfter != want {
-				t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, want)
+			if !res.IsZero() {
+				t.Errorf("Result = %+v, want zero alongside an error", res)
 			}
 			evs := env.events()
 			if !hasEvent(evs, EventReasonSyncFailed) || !strings.Contains(strings.Join(evs, "\n"), tt.want+":") {
@@ -493,12 +490,9 @@ func TestReconcileMeter_UnrepresentableDimensionsArePermanent(t *testing.T) {
 		md.Spec.Measurement.Dimensions = []string{"a-b", "a.b"}
 	}))
 
-	res, err := env.reconcile(t)
-	if err != nil {
-		t.Fatalf("Reconcile: %v", err)
-	}
-	if res.RequeueAfter != permanentRequeueAfter {
-		t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, permanentRequeueAfter)
+	_, err := env.reconcile(t)
+	if !openmeter.IsPermanent(err) {
+		t.Fatalf("Reconcile error = %v, want a permanent error", err)
 	}
 	if len(env.omc.ensureCalls) != 0 {
 		t.Error("EnsureMeter called for an unrepresentable dimension set")

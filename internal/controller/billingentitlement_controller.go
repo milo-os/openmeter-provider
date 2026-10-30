@@ -142,14 +142,14 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		// The BillingAccount watch requeues as soon as it appears. A deleted
 		// account has no customer left (OpenMeter refuses to delete one with
 		// live subscriptions), so there is nothing to cancel.
-		return r.syncFailed(ctx, &be, conditionReasonBillingAccountNotFound,
+		return r.syncWaiting(ctx, &be, conditionReasonBillingAccountNotFound,
 			fmt.Errorf("BillingAccount %q not found", be.Spec.BillingAccountRef.Name), 0)
 	}
 	customerKey := openmeter.CustomerKey(account.UID)
 	logger = logger.WithValues("customerKey", customerKey)
 
 	if !account.DeletionTimestamp.IsZero() {
-		return r.cancelForDeletingAccount(ctx, logger, &be, customerKey)
+		return r.cancelForDeletingAccount(ctx, &be, customerKey)
 	}
 
 	var offer billingv1alpha1.Offer
@@ -160,13 +160,13 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		// The existing subscription (if any) is left running: the Offer may
 		// be recreated, and canceling on a missing reference would stop
 		// billing on what may be a transient cache miss.
-		return r.syncFailed(ctx, &be, conditionReasonOfferNotFound,
+		return r.syncWaiting(ctx, &be, conditionReasonOfferNotFound,
 			fmt.Errorf("offer %q not found", be.Spec.OfferRef.Name), 0)
 	}
 	if offer.Spec.LaunchStage != billingv1alpha1.OfferLaunchStageGA || len(offer.Spec.ServicePricings) == 0 {
 		// Billing's webhook only admits assignable Offers, and an assignable
 		// Offer never stops being one; this guards against a bypassed webhook.
-		return r.syncFailed(ctx, &be, conditionReasonOfferNotAssignable,
+		return r.syncWaiting(ctx, &be, conditionReasonOfferNotAssignable,
 			fmt.Errorf("offer %q is not GA with a servicePricings snapshot", offer.Name), 0)
 	}
 
@@ -188,18 +188,18 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		switch {
 		case errors.Is(err, openmeter.ErrCustomerNotFound):
 			logger.Info("waiting for the OpenMeter customer")
-			return r.syncFailed(ctx, &be, conditionReasonCustomerNotSynced,
+			return r.syncWaiting(ctx, &be, conditionReasonCustomerNotSynced,
 				fmt.Errorf("OpenMeter customer for BillingAccount %q does not exist yet", account.Name), transientRequeueAfter)
 		case errors.Is(err, openmeter.ErrPlanNotPublished):
 			logger.Info("waiting for the Offer's OpenMeter plan")
-			return r.syncFailed(ctx, &be, conditionReasonPlanNotPublished, planNotPublishedError(&offer), transientRequeueAfter)
+			return r.syncWaiting(ctx, &be, conditionReasonPlanNotPublished, planNotPublishedError(&offer), transientRequeueAfter)
 		case errors.Is(err, openmeter.ErrCustomerBillingNotReady):
 			logger.Info("customer cannot be invoiced yet", "err", err.Error())
-			return r.syncFailed(ctx, &be, conditionReasonCustomerBillingNotReady,
+			return r.syncWaiting(ctx, &be, conditionReasonCustomerBillingNotReady,
 				fmt.Errorf("OpenMeter cannot invoice BillingAccount %q yet (does it have a default payment method?): %w", account.Name, err),
 				customerBillingNotReadyRequeueAfter)
 		}
-		return r.openMeterFailed(ctx, logger, &be, fmt.Errorf("ensure subscription: %w", err))
+		return r.openMeterFailed(ctx, &be, fmt.Errorf("ensure subscription: %w", err))
 	}
 
 	reason, msg := conditionReasonSynced, subscriptionMessage(state)
@@ -247,14 +247,13 @@ func planNotPublishedError(offer *billingv1alpha1.Offer) error {
 // BillingAccount's finalizer can delete the OpenMeter customer.
 func (r *BillingEntitlementReconciler) cancelForDeletingAccount(
 	ctx context.Context,
-	logger logr.Logger,
 	be *billingv1alpha1.BillingEntitlement,
 	customerKey openmeter.CustomerKey,
 ) (ctrl.Result, error) {
 	if err := r.OpenMeterClient.CancelSubscriptions(ctx, customerKey); err != nil {
-		return r.openMeterFailed(ctx, logger, be, fmt.Errorf("cancel subscriptions of deleting BillingAccount: %w", err))
+		return r.openMeterFailed(ctx, be, fmt.Errorf("cancel subscriptions of deleting BillingAccount: %w", err))
 	}
-	return r.syncFailed(ctx, be, conditionReasonBillingAccountDeleting,
+	return r.syncWaiting(ctx, be, conditionReasonBillingAccountDeleting,
 		fmt.Errorf("BillingAccount %q is being deleted; OpenMeter subscriptions canceled", be.Spec.BillingAccountRef.Name), 0)
 }
 
@@ -294,13 +293,8 @@ func (r *BillingEntitlementReconciler) reconcileDelete(
 		if err := r.OpenMeterClient.CancelSubscriptions(ctx, customerKey); err != nil {
 			// Releasing the finalizer would keep billing the customer for an
 			// Offer it is no longer entitled to.
-			requeue := transientRequeueAfter
-			if openmeter.IsPermanent(err) {
-				requeue = permanentRequeueAfter
-			}
-			logger.Error(err, "cancel subscriptions; keeping finalizer", "requeueAfter", requeue.String())
 			r.event(be, "Warning", EventReasonDeleteFailed, fmt.Sprintf("cancel OpenMeter subscription: %v", err))
-			return ctrl.Result{RequeueAfter: requeue}, nil
+			return ctrl.Result{}, fmt.Errorf("cancel subscriptions; keeping finalizer: %w", err)
 		}
 		logger.Info("OpenMeter subscription canceled")
 		r.event(be, "Normal", EventReasonDeleted, fmt.Sprintf("OpenMeter subscription of customer %s canceled", customerKey))
@@ -332,41 +326,54 @@ func (r *BillingEntitlementReconciler) successorEntitlement(ctx context.Context,
 	return "", nil
 }
 
-// openMeterFailed classifies an OpenMeter error into a requeue schedule.
+// openMeterFailed records an OpenMeter failure, tagged with its
+// classification, and returns it so controller-runtime logs it, counts it
+// in controller_runtime_reconcile_errors_total and retries with backoff.
 func (r *BillingEntitlementReconciler) openMeterFailed(
 	ctx context.Context,
-	logger logr.Logger,
 	be *billingv1alpha1.BillingEntitlement,
 	err error,
 ) (ctrl.Result, error) {
-	if openmeter.IsPermanent(err) {
-		logger.Error(err, "OpenMeter permanent failure", "requeueAfter", permanentRequeueAfter.String())
-		return r.syncFailed(ctx, be, conditionReasonOpenMeterError,
-			fmt.Errorf("%s: %w", syncReasonPermanent, err), permanentRequeueAfter)
+	cause := fmt.Errorf("%s: %w", syncReason(err), err)
+	if condErr := r.setSyncedFalse(ctx, be, conditionReasonOpenMeterError, cause); condErr != nil {
+		return ctrl.Result{}, errors.Join(cause, condErr)
 	}
-	logger.Info("OpenMeter transient failure", "err", err.Error(), "requeueAfter", transientRequeueAfter.String())
-	return r.syncFailed(ctx, be, conditionReasonOpenMeterError,
-		fmt.Errorf("%s: %w", syncReasonTransient, err), transientRequeueAfter)
+	return ctrl.Result{}, cause
 }
 
-// syncFailed records a failed sync and schedules a retry (none when
-// requeueAfter is zero: a watch brings the entitlement back). The Warning
-// event is only emitted when the condition changes.
-func (r *BillingEntitlementReconciler) syncFailed(
+// syncWaiting records that the entitlement is waiting on something expected
+// (its BillingAccount, Offer, OpenMeter customer or plan) and checks again
+// after requeueAfter (not at all when it is zero: a watch brings the
+// entitlement back). Waiting is not a failure, so no error is returned.
+func (r *BillingEntitlementReconciler) syncWaiting(
 	ctx context.Context,
 	be *billingv1alpha1.BillingEntitlement,
 	reason string,
 	cause error,
 	requeueAfter time.Duration,
 ) (ctrl.Result, error) {
+	if err := r.setSyncedFalse(ctx, be, reason, cause); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// setSyncedFalse sets the condition to False. The Warning event is only
+// emitted when the condition changes.
+func (r *BillingEntitlementReconciler) setSyncedFalse(
+	ctx context.Context,
+	be *billingv1alpha1.BillingEntitlement,
+	reason string,
+	cause error,
+) error {
 	changed, err := r.setSyncedCondition(ctx, be, metav1.ConditionFalse, reason, cause.Error())
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 	if changed {
 		r.event(be, "Warning", EventReasonSyncFailed, fmt.Sprintf("%s: %v", reason, cause))
 	}
-	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	return nil
 }
 
 // setSyncedCondition patches the OpenMeterSubscriptionSynced condition when

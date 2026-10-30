@@ -1,7 +1,7 @@
 apiVersion: apiserver.config.miloapis.com/v1alpha1
 kind: OpenMeterProviderOperator
 metricsServer:
-  bindAddress: "0"
+  bindAddress: ":8443"
 # The dev OpenMeter install runs with authentication disabled, so apiSecret is
 # left empty. In production set a real token (sourced from a Secret) here.
 openMeter:

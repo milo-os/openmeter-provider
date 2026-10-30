@@ -38,7 +38,8 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
-
+	"go.miloapis.com/instrumentation/buildinfo"
+	"go.miloapis.com/instrumentation/logging"
 	"go.miloapis.com/openmeter-provider/internal/config"
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
 	"go.miloapis.com/openmeter-provider/internal/submission"
@@ -72,13 +73,12 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&serverConfigFile, "server-config", "", "Path to the server config file (YAML).")
 
-	opts := zap.Options{
-		Development: true,
-	}
+	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	buildinfo.SetVersion(version)
+	ctrl.SetLogger(logging.New(&opts))
 
 	setupLog.Info("starting submission-consumer",
 		"version", version,

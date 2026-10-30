@@ -1,0 +1,24 @@
+# The secure metrics endpoint authenticates and authorizes each scrape with
+# TokenReview and SubjectAccessReview against the local cluster (see
+# MetricsServerConfig.Options). Both the controller manager and the
+# submission consumer serve /metrics this way.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: openmeter-provider
+    app.kubernetes.io/managed-by: kustomize
+  name: openmeter-provider-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
