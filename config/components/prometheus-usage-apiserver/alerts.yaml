@@ -75,15 +75,24 @@ spec:
 
     - name: openmeter-usage-apiserver.availability
       rules:
-        # Reported by Milo's aggregator: when it marks the APIService
-        # unavailable, every UsageQuery fails before reaching this server, so
-        # the request alerts above stay quiet.
-        - alert: OpenMeterUsageAPIServiceUnavailable
+        # Failures in Milo before a request reaches this server, so the
+        # request alerts above stay quiet. Not aggregator_unavailable_apiservice:
+        # Milo disables the aggregator's remote availability controller
+        # (DisableRemoteAvailableConditionController), so it never reports
+        # APIServices served by an external Service, this one included. Milo
+        # counts a request it cannot route (no ready endpoint for the Service)
+        # in apiserver_request_terminations_total with component="aggregator".
+        # A connection that fails once routed is answered 503 without being
+        # counted, so that case is not covered here.
+        - alert: OpenMeterUsageAPIUnreachableFromMilo
           expr: |
-            max by (name) (
-              aggregator_unavailable_apiservice{
-                name="v1alpha1.usage.billing.miloapis.com"
-              }
+            sum by (group) (
+              increase(apiserver_request_terminations_total{
+                job="milo-apiserver",
+                component="aggregator",
+                group="usage.billing.miloapis.com",
+                code=~"5.."
+              }[10m])
             ) > 0
           for: 5m
           labels:
@@ -91,12 +100,14 @@ spec:
             namespace: openmeter-system
             service: billing
           annotations:
-            summary: "Milo reports the usage APIService unavailable"
+            summary: "Milo cannot route UsageQuery requests to the usage API server"
             description: |
-              Milo has marked APIService {{ $labels.name }} unavailable for 5 minutes,
-              so every UsageQuery fails. Check that the openmeter-usage-apiserver pods
-              are ready and that Milo can reach the Service on 443:
-              kubectl get apiservice {{ $labels.name }} -o yaml
+              Milo has been failing UsageQuery requests for 5 minutes before they reach
+              openmeter-usage-apiserver ({{ $value }} in the last 10 minutes), so
+              customers cannot read their usage. Milo finds no ready endpoint for the
+              openmeter-usage-apiserver Service: check that its pods are ready and the
+              Service selects them:
+              kubectl get endpointslices -n openmeter-system -l kubernetes.io/service-name=openmeter-usage-apiserver
 
         - alert: OpenMeterUsageAPIScrapeFailing
           expr: |
