@@ -1,3 +1,6 @@
+import type { ComponentProps } from "react";
+import type { Badge } from "@datum-cloud/datum-ui/badge";
+
 export function relativeAge(timestamp: string | undefined): string {
   if (!timestamp) return "—";
   const diffMs = Date.now() - new Date(timestamp).getTime();
@@ -11,7 +14,7 @@ export function relativeAge(timestamp: string | undefined): string {
   return `${diffDays}d`;
 }
 
-export function phaseBadgeProps(phase: string): { type: string; theme: string } {
+export function phaseBadgeProps(phase: string): Pick<ComponentProps<typeof Badge>, "type" | "theme"> {
   switch (phase) {
     case "Ready":
       return { type: "success", theme: "light" };
@@ -20,6 +23,6 @@ export function phaseBadgeProps(phase: string): { type: string; theme: string } 
     case "Failed":
       return { type: "danger", theme: "light" };
     default:
-      return { type: "default", theme: "light" };
+      return { type: "muted", theme: "light" };
   }
 }
