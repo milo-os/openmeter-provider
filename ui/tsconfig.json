@@ -17,7 +17,6 @@
     "verbatimModuleSyntax": true,
     "esModuleInterop": true,
     "types": ["@remix-run/node", "vite/client"],
-    "baseUrl": ".",
     "paths": {
       "~/*": ["./app/*"]
     }
