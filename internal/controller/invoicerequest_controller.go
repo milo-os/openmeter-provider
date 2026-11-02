@@ -48,9 +48,8 @@ const invoiceRequestControllerName = "invoicerequest"
 // Recurring pricings):
 //
 //   - before a contract starts: the first invoice, worked out from the
-//     Offer and the contract's start date with OpenMeter's invoice
-//     simulation, so staff can check it before anything reaches the
-//     customer;
+//     Offer and the contract's start date, so staff can check it before
+//     anything reaches the customer;
 //   - otherwise: the draft invoice waiting to be issued, if there is one,
 //     or else the charges waiting for later periods, priced by OpenMeter.
 //
@@ -108,6 +107,16 @@ func (r *InvoiceRequestReconciler) Reconcile(ctx context.Context, req reconcile.
 			fmt.Sprintf("BillingAccount %q not found", ir.Spec.BillingAccountRef.Name))
 	}
 
+	be, err := r.entitlementFor(ctx, &account)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if be != nil && be.Spec.Contract != nil {
+		if startsAt := be.Spec.Contract.StartsAt.UTC(); r.now().Before(startsAt) {
+			return r.previewFirstInvoice(ctx, &ir, &account, be, startsAt)
+		}
+	}
+
 	customer, err := r.OpenMeterClient.GetCustomer(ctx, openmeter.CustomerKey(account.UID))
 	if err != nil {
 		if errors.Is(err, openmeter.ErrCustomerNotFound) {
@@ -116,28 +125,17 @@ func (r *InvoiceRequestReconciler) Reconcile(ctx context.Context, req reconcile.
 		}
 		return r.openMeterFailed(ctx, &ir, fmt.Errorf("get customer: %w", err))
 	}
-	customerID := openmeter.CustomerID(customer.Id)
-
-	be, err := r.entitlementFor(ctx, &account)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if be != nil && be.Spec.Contract != nil {
-		if startsAt := be.Spec.Contract.StartsAt.UTC(); r.now().Before(startsAt) {
-			return r.previewFirstInvoice(ctx, &ir, &account, be, customerID, startsAt)
-		}
-	}
-	return r.previewNextInvoice(ctx, &ir, &account, customerID)
+	return r.previewNextInvoice(ctx, &ir, &account, openmeter.CustomerID(customer.Id))
 }
 
 // previewFirstInvoice works out a contract's first invoice before it
-// starts, from its Offer's flat pricings.
+// starts, from its Offer's flat pricings. Nothing is subscribed yet, so
+// OpenMeter has nothing to show; the charges are flat fees, priced here.
 func (r *InvoiceRequestReconciler) previewFirstInvoice(
 	ctx context.Context,
 	ir *billingv1alpha1.InvoiceRequest,
 	account *billingv1alpha1.BillingAccount,
 	be *billingv1alpha1.BillingEntitlement,
-	customerID openmeter.CustomerID,
 	startsAt time.Time,
 ) (ctrl.Result, error) {
 	var offer billingv1alpha1.Offer
@@ -150,20 +148,15 @@ func (r *InvoiceRequestReconciler) previewFirstInvoice(
 	}
 	starts := startsAt.Format(time.DateOnly)
 
-	charges := contractCharges(&offer, startsAt)
-	if len(charges) == 0 {
-		return ctrl.Result{}, r.succeed(ctx, ir, account.Spec.CurrencyCode, nil, "0",
-			fmt.Sprintf("Offer %q has no one-time or recurring charges to invoice when the contract starts on %s", offer.Name, starts))
-	}
-	inv, err := r.OpenMeterClient.PreviewInvoice(ctx, customerID, account.Spec.CurrencyCode, charges)
-	if err != nil {
-		return r.openMeterFailed(ctx, ir, fmt.Errorf("preview first invoice: %w", err))
-	}
-	lines, total, err := requestLines(openmeter.LineItems(inv))
+	lines, total, err := firstInvoiceLines(&offer, startsAt)
 	if err != nil {
 		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
 	}
-	return ctrl.Result{}, r.succeed(ctx, ir, inv.Currency, lines, total,
+	if len(lines) == 0 {
+		return ctrl.Result{}, r.succeed(ctx, ir, account.Spec.CurrencyCode, nil, "0",
+			fmt.Sprintf("Offer %q has no one-time or recurring charges to invoice when the contract starts on %s", offer.Name, starts))
+	}
+	return ctrl.Result{}, r.succeed(ctx, ir, account.Spec.CurrencyCode, lines, total,
 		fmt.Sprintf("The first invoice, sent when the contract starts on %s", starts))
 }
 
@@ -220,33 +213,45 @@ func (r *InvoiceRequestReconciler) entitlementFor(ctx context.Context, account *
 	return nil, nil
 }
 
-// contractCharges are the flat fees a contract starting at startsAt is
-// first invoiced for: each OneTime pricing, and the first month of each
-// Recurring one. Names and discounts match the Offer's plan (see
-// addFlatFee and resolveDiscount).
-func contractCharges(offer *billingv1alpha1.Offer, startsAt time.Time) []openmeter.PlannedCharge {
-	var charges []openmeter.PlannedCharge
+// firstInvoiceLines are the charges a contract starting at startsAt is
+// first invoiced for, with their total: each OneTime pricing, and the
+// first month of each Recurring one, after the Offer's discounts. Names
+// match the Offer's plan (see addFlatFee). Usage isn't included.
+func firstInvoiceLines(offer *billingv1alpha1.Offer, startsAt time.Time) ([]billingv1alpha1.InvoiceRequestLine, string, error) {
+	var lines []billingv1alpha1.InvoiceRequestLine
+	var amounts []string
 	for _, sp := range offer.Spec.ServicePricings {
-		var period om.Period
+		var period *billingv1alpha1.InvoicePeriod
 		switch sp.Spec.ChargeType {
 		case billingv1alpha1.ChargeTypeOneTime:
-			period = om.Period{From: startsAt, To: startsAt}
 		case billingv1alpha1.ChargeTypeRecurring:
-			period = openmeter.MonthlyPeriod(startsAt)
+			period = &billingv1alpha1.InvoicePeriod{
+				Start: metav1.NewTime(startsAt),
+				End:   metav1.NewTime(startsAt.AddDate(0, 1, 0).Add(-time.Second)),
+			}
 		default:
 			continue
+		}
+		var percentage int32
+		if sp.Discount != nil {
+			percentage = sp.Discount.Percentage
+		}
+		amount, err := openmeter.DiscountedAmount(sp.Spec.Amount, percentage)
+		if err != nil {
+			return nil, "", fmt.Errorf("service pricing %q: %w", sp.Name, err)
 		}
 		name := sp.Spec.DisplayName
 		if name == "" {
 			name = sp.Name
 		}
-		charge := openmeter.PlannedCharge{Name: name, Period: period, Amount: sp.Spec.Amount}
-		if sp.Discount != nil {
-			charge.DiscountPercentage = sp.Discount.Percentage
-		}
-		charges = append(charges, charge)
+		lines = append(lines, billingv1alpha1.InvoiceRequestLine{Description: name, Period: period, Amount: amount})
+		amounts = append(amounts, amount)
 	}
-	return charges
+	total, err := openmeter.AddDecimals(amounts...)
+	if err != nil {
+		return nil, "", fmt.Errorf("total: %w", err)
+	}
+	return lines, total, nil
 }
 
 // requestLines maps OpenMeter invoice lines to an InvoiceRequest's, with

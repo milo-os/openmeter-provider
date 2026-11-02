@@ -8,15 +8,12 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"time"
 
-	"github.com/oklog/ulid/v2"
 	om "github.com/openmeterio/openmeter/api/client/go"
-	"github.com/openmeterio/openmeter/pkg/models"
 )
 
 // Fixed charges are a customer's OneTime and Recurring ServicePricings:
-// flat fees. These calls back InvoiceRequest previews. OpenMeter invoices
+// flat fees. These helpers back InvoiceRequest previews. OpenMeter invoices
 // in-advance flat fees on its own as soon as they're due (its subscription
 // sync invoices any pending line billable now), so a contract's setup fee
 // and first month are invoiced the moment its subscription starts, and
@@ -123,79 +120,32 @@ func isFlatFee(line om.InvoiceLine) bool {
 	return err == nil && kind == string(om.FlatPriceWithPaymentTermTypeFlat)
 }
 
-// PlannedCharge is a flat fee a customer will be charged, priced from its
-// ServicePricing rather than from a subscription.
-type PlannedCharge struct {
-	// Name is the charge's name on the invoice.
-	Name string
-	// Period is the service period it covers; From equals To for a
-	// one-time charge.
-	Period om.Period
-	// Amount is the flat price before discounts, as a decimal string.
-	Amount string
-	// DiscountPercentage is the percentage discount, 0 for none.
-	DiscountPercentage int32
-}
-
-// PreviewInvoice works out the invoice charges would make for the
-// customer, creating nothing, with OpenMeter's invoice simulation: the
-// same pricing and discount calculation as a real invoice.
-func (c *client) PreviewInvoice(ctx context.Context, customerID CustomerID, currency string, charges []PlannedCharge) (om.Invoice, error) {
-	if len(charges) == 0 {
-		return om.Invoice{}, &PermanentError{Err: errors.New("no charges to preview")}
-	}
-	// OpenMeter rates a flat fee only once it's due: one invoiced later than
-	// the simulation runs prices at zero. When a line is invoiced doesn't
-	// change its amount, so every line is invoiced now (a minute back, at
-	// OpenMeter's one-minute resolution, so clock skew can't push it into
-	// the future), and the period still says what it covers.
-	invoiceAt := time.Now().Add(-time.Minute).Truncate(time.Minute)
-	lines := make([]om.InvoiceSimulationLine, 0, len(charges))
-	for _, ch := range charges {
-		var price om.RateCardUsageBasedPrice
-		if err := price.FromFlatPriceWithPaymentTerm(om.FlatPriceWithPaymentTerm{
-			Type:        om.FlatPriceWithPaymentTermTypeFlat,
-			Amount:      ch.Amount,
-			PaymentTerm: ptr(om.PricePaymentTermInAdvance),
-		}); err != nil {
-			return om.Invoice{}, &PermanentError{Err: fmt.Errorf("charge %q: encode price: %w", ch.Name, err)}
-		}
-		rateCard := &om.InvoiceUsageBasedRateCard{Price: &price}
-		if ch.DiscountPercentage > 0 {
-			rateCard.Discounts = &om.BillingDiscounts{
-				Percentage: &om.BillingDiscountPercentage{Percentage: models.NewPercentage(int(ch.DiscountPercentage))},
-			}
-		}
-		// A discount refers to its line by id, so every line has one.
-		id := ulid.Make().String()
-		lines = append(lines, om.InvoiceSimulationLine{
-			Id:        &id,
-			Name:      ch.Name,
-			InvoiceAt: invoiceAt,
-			Period:    ch.Period,
-			Quantity:  "1",
-			RateCard:  rateCard,
-		})
-	}
-	resp, err := c.api.SimulateInvoiceWithResponse(ctx, string(customerID), om.SimulateInvoiceJSONRequestBody{
-		Currency: currency,
-		Lines:    lines,
-	})
+// DiscountedAmount is a flat fee after a percentage discount, rounded to
+// the cent as OpenMeter rounds USD amounts (half away from zero). Flat fees
+// need no rating beyond that, so a contract's first invoice can be worked
+// out without OpenMeter: its invoice simulation, the natural tool, rejects
+// every line in this version ("invalid line engine type").
+func DiscountedAmount(amount string, percentage int32) (string, error) {
+	r, _, err := parseDecimal(amount)
 	if err != nil {
-		return om.Invoice{}, classify(nil, nil, err)
+		return "", err
 	}
-	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
-		return om.Invoice{}, err
+	if percentage < 0 || percentage > 100 {
+		return "", fmt.Errorf("discount percentage %d must be between 0 and 100", percentage)
 	}
-	if resp.JSON200 == nil {
-		return om.Invoice{}, &PermanentError{Err: fmt.Errorf("simulate invoice for %q: empty response body", customerID)}
+	r.Mul(r, big.NewRat(int64(100-percentage), 100))
+	// Round to cents, half away from zero.
+	cents := new(big.Rat).Mul(r, big.NewRat(100, 1))
+	n, d := cents.Num(), cents.Denom()
+	q, m := new(big.Int).QuoRem(n, d, new(big.Int))
+	if new(big.Int).Mul(new(big.Int).Abs(m), big.NewInt(2)).Cmp(d) >= 0 {
+		if n.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
 	}
-	return *resp.JSON200, nil
-}
-
-// MonthlyPeriod is the first monthly service period starting at start.
-func MonthlyPeriod(start time.Time) om.Period {
-	return om.Period{From: start, To: start.AddDate(0, 1, 0)}
+	return new(big.Rat).SetFrac(q, big.NewInt(100)).FloatString(2), nil
 }
 
 // AmountBeforeTax is what totals charge before any tax added on top: the

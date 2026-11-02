@@ -4,12 +4,10 @@ package openmeter
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"testing"
-	"time"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
 )
@@ -54,7 +52,6 @@ const draftInvoicesJSON = `{
 
 type fixedChargesServer struct {
 	listQueries []map[string][]string
-	simulated   om.InvoiceSimulationInput
 }
 
 func newFixedChargesClient(t *testing.T, f *fixedChargesServer) Client {
@@ -75,12 +72,6 @@ func newFixedChargesClient(t *testing.T, f *fixedChargesServer) Client {
 			t.Errorf("unexpected statuses %q", r.URL.Query().Get("statuses"))
 		}
 	})
-	mux.HandleFunc("POST /api/v1/billing/customers/{id}/invoices/simulate", func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&f.simulated); err != nil {
-			t.Errorf("decoding simulation: %v", err)
-		}
-		writeJSON(w, `{"id": "", "currency": "USD", "totals": {"total": "2400.00", "taxesExclusiveTotal": "0"}}`)
-	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	c, err := NewClient(srv.URL, "")
@@ -88,16 +79,6 @@ func newFixedChargesClient(t *testing.T, f *fixedChargesServer) Client {
 		t.Fatalf("NewClient: %v", err)
 	}
 	return c
-}
-
-// percentage renders an OpenMeter percentage as it's sent.
-func percentage(t *testing.T, p om.Percentage) string {
-	t.Helper()
-	b, err := json.Marshal(p)
-	if err != nil {
-		t.Fatalf("encoding percentage: %v", err)
-	}
-	return string(b)
 }
 
 func TestUpcomingFixedCharges(t *testing.T) {
@@ -131,48 +112,28 @@ func TestDraftInvoice(t *testing.T) {
 	}
 }
 
-func TestPreviewInvoice_SimulatesPlannedCharges(t *testing.T) {
-	f := &fixedChargesServer{}
-	c := newFixedChargesClient(t, f)
-	start := time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
-
-	inv, err := c.PreviewInvoice(context.Background(), fixedChargesCustomer, "USD", []PlannedCharge{
-		{Name: "Server installation", Period: om.Period{From: start, To: start}, Amount: "1500.00"},
-		{Name: "Dedicated server", Period: MonthlyPeriod(start), Amount: "1000.00", DiscountPercentage: 10},
-	})
-	if err != nil {
-		t.Fatalf("PreviewInvoice: %v", err)
-	}
-	if inv.Totals.Total != "2400.00" {
-		t.Errorf("total = %q, want the simulation's", inv.Totals.Total)
-	}
-
-	sim := f.simulated
-	if sim.Currency != "USD" || len(sim.Lines) != 2 {
-		t.Fatalf("simulation = %+v, want two USD lines", sim)
-	}
-	setup, monthly := sim.Lines[0], sim.Lines[1]
-	if setup.Id == nil || monthly.Id == nil || *setup.Id == *monthly.Id {
-		t.Errorf("line ids = %v, %v; want distinct ids for discounts to refer to", setup.Id, monthly.Id)
-	}
-	if !monthly.Period.From.Equal(start) || !monthly.Period.To.Equal(time.Date(2026, time.December, 18, 0, 0, 0, 0, time.UTC)) {
-		t.Errorf("monthly line period = %+v, want the month from the start", monthly.Period)
-	}
-	// Due now, or OpenMeter would price a future charge at zero.
-	for _, line := range sim.Lines {
-		if line.InvoiceAt.After(time.Now()) {
-			t.Errorf("line %q invoiced at %s, in the future", line.Name, line.InvoiceAt)
+func TestDiscountedAmount(t *testing.T) {
+	for _, tc := range []struct {
+		amount     string
+		percentage int32
+		want       string
+	}{
+		{"1500.00", 0, "1500.00"},
+		{"1000", 10, "900.00"},
+		{"99.99", 15, "84.99"}, // 84.9915
+		{"0.05", 50, "0.03"},   // 0.025 rounds away from zero
+		{"1000.00", 100, "0.00"},
+	} {
+		got, err := DiscountedAmount(tc.amount, tc.percentage)
+		if err != nil || got != tc.want {
+			t.Errorf("DiscountedAmount(%s, %d) = %q, %v; want %q", tc.amount, tc.percentage, got, err, tc.want)
 		}
 	}
-	price, err := monthly.RateCard.Price.AsFlatPriceWithPaymentTerm()
-	if err != nil || price.Amount != "1000.00" || price.PaymentTerm == nil || *price.PaymentTerm != om.PricePaymentTermInAdvance {
-		t.Errorf("monthly price = %+v (%v), want 1000.00 in advance", price, err)
+	if _, err := DiscountedAmount("1000", 101); err == nil {
+		t.Error("a discount over 100%: want an error")
 	}
-	if d := monthly.RateCard.Discounts; d == nil || d.Percentage == nil || percentage(t, d.Percentage.Percentage) != "10" {
-		t.Errorf("monthly discounts = %+v, want 10%%", d)
-	}
-	if setup.RateCard.Discounts != nil {
-		t.Errorf("setup discounts = %+v, want none", setup.RateCard.Discounts)
+	if _, err := DiscountedAmount("lots", 10); err == nil {
+		t.Error("an invalid amount: want an error")
 	}
 }
 

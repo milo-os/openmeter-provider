@@ -114,9 +114,6 @@ type Client interface {
 	// DraftInvoice returns the customer's newest draft invoice with its
 	// lines, or nil.
 	DraftInvoice(ctx context.Context, customerID CustomerID) (*om.Invoice, error)
-	// PreviewInvoice simulates the invoice charges would make, creating
-	// nothing.
-	PreviewInvoice(ctx context.Context, customerID CustomerID, currency string, charges []PlannedCharge) (om.Invoice, error)
 
 	// Stripe app data (see stripe.go).
 

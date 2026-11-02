@@ -53,11 +53,11 @@ type fakeInvoicingClient struct {
 	upcoming    []om.InvoiceLine
 	upcomingErr error
 
-	previewed []openmeter.PlannedCharge
-	currency  string
+	calls int
 }
 
 func (f *fakeInvoicingClient) GetCustomer(_ context.Context, key openmeter.CustomerKey) (om.Customer, error) {
+	f.calls++
 	if f.customerErr != nil {
 		return om.Customer{}, f.customerErr
 	}
@@ -70,22 +70,6 @@ func (f *fakeInvoicingClient) DraftInvoice(context.Context, openmeter.CustomerID
 
 func (f *fakeInvoicingClient) UpcomingFixedCharges(context.Context, openmeter.CustomerID) ([]om.InvoiceLine, error) {
 	return f.upcoming, f.upcomingErr
-}
-
-// PreviewInvoice prices the charges as OpenMeter would: discounts off,
-// no tax.
-func (f *fakeInvoicingClient) PreviewInvoice(_ context.Context, _ openmeter.CustomerID, currency string, charges []openmeter.PlannedCharge) (om.Invoice, error) {
-	f.previewed, f.currency = charges, currency
-	lines := make([]om.InvoiceLine, 0, len(charges))
-	for _, ch := range charges {
-		total := ch.Amount
-		if ch.DiscountPercentage == 10 && ch.Amount == "1000.00" {
-			total = "900.00"
-		}
-		lines = append(lines, om.InvoiceLine{Name: ch.Name, Period: ch.Period, Currency: currency,
-			Totals: om.InvoiceTotals{Total: total, TaxesExclusiveTotal: "0"}})
-	}
-	return om.Invoice{Currency: currency, Lines: &lines}, nil
 }
 
 func flatLine(name, total string, from, to time.Time) om.InvoiceLine {
@@ -187,29 +171,23 @@ func TestInvoiceRequest_PreviewBeforeTheContractStarts(t *testing.T) {
 	if c.Message != "The first invoice, sent when the contract starts on 2026-11-18" {
 		t.Errorf("message = %q", c.Message)
 	}
-
-	// The setup fee and the first month, not usage, priced from the start.
-	if len(omc.previewed) != 2 || omc.currency != "USD" {
-		t.Fatalf("previewed %+v in %q, want the two flat fees in USD", omc.previewed, omc.currency)
-	}
-	setup, monthly := omc.previewed[0], omc.previewed[1]
-	if setup.Name != "Server installation" || setup.Amount != "1500.00" || !setup.Period.From.Equal(contractStart) || !setup.Period.To.Equal(contractStart) {
-		t.Errorf("setup charge = %+v", setup)
-	}
-	if monthly.Name != "Dedicated server" || monthly.DiscountPercentage != 10 ||
-		!monthly.Period.To.Equal(time.Date(2026, time.December, 18, 0, 0, 0, 0, time.UTC)) {
-		t.Errorf("monthly charge = %+v, want a month from the start with the 10%% discount", monthly)
+	if omc.calls != 0 {
+		t.Errorf("called OpenMeter %d times before anything is subscribed", omc.calls)
 	}
 
+	// The setup fee, and the first month after its 10% discount; not usage.
 	st := ir.Status
 	if st.Total != "2400.00" || st.CurrencyCode != "USD" || len(st.Lines) != 2 {
-		t.Fatalf("status = %+v, want two lines totalling 2400.00", st)
+		t.Fatalf("status = %+v, want two USD lines totalling 2400.00", st)
 	}
-	if st.Lines[0].Period != nil {
-		t.Errorf("setup line period = %+v, want none for a one-time charge", st.Lines[0].Period)
+	setup, monthly := st.Lines[0], st.Lines[1]
+	if setup.Description != "Server installation" || setup.Amount != "1500.00" || setup.Period != nil {
+		t.Errorf("setup line = %+v, want 1500.00 with no period", setup)
 	}
-	if p := st.Lines[1].Period; p == nil || !p.End.Time.Equal(time.Date(2026, time.December, 17, 23, 59, 59, 0, time.UTC)) {
-		t.Errorf("monthly line period = %+v, want through 17 December", p)
+	if monthly.Description != "Dedicated server" || monthly.Amount != "900.00" || monthly.Period == nil ||
+		!monthly.Period.Start.Time.Equal(contractStart) ||
+		!monthly.Period.End.Time.Equal(time.Date(2026, time.December, 17, 23, 59, 59, 0, time.UTC)) {
+		t.Errorf("monthly line = %+v, want 900.00 for 18 November to 17 December", monthly)
 	}
 }
 
@@ -237,9 +215,6 @@ func TestInvoiceRequest_PreviewAfterTheStart(t *testing.T) {
 		}
 		if c.Message != "Draft invoice 01JDRAFT, which OpenMeter issues and sends when its collection period ends" {
 			t.Errorf("message = %q", c.Message)
-		}
-		if omc.previewed != nil {
-			t.Error("simulated a first invoice after the contract started")
 		}
 	})
 
