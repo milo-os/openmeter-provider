@@ -32,7 +32,10 @@ jobs:
       context: ui
     secrets: inherit
 
+  # The bundle pins the image tag built by publish-container-image, and Flux
+  # deploys it as soon as it lands, so it must not be pushed before the image.
   publish-kustomize-bundles:
+    needs: publish-container-image
     permissions:
       id-token: write
       contents: read
