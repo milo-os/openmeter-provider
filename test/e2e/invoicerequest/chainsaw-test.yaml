@@ -1,0 +1,179 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: invoicerequest
+spec:
+  description: |
+    A bare metal contract end to end against a real OpenMeter instance:
+
+      - a contract starting tomorrow isn't subscribed yet, and a Preview
+        works out its first invoice from the Offer (setup fee and first
+        month) without anything reaching OpenMeter's invoices;
+      - Issue is unsupported: OpenMeter sends the first invoice itself;
+      - a contract starting today is subscribed straight away, billing on
+        today's day of the month, and OpenMeter invoices the setup fee and
+        first month on its own;
+      - a Preview then shows what comes next.
+
+    Billing's operator, webhooks and stripe-provider do not run in e2e: the
+    Offer is published with ../offer/publish.sh and the payment method chain
+    is fabricated with status patches, as in the billingentitlement suite.
+    The first invoice stays open, so the account is released with the
+    force-delete annotation at the end.
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 20s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-ir
+              status:
+                phase: Running
+
+    - name: publish the contract Offer
+      try:
+        - apply:
+            file: offer.yaml
+        - script:
+            timeout: 30s
+            content: bash ../offer/publish.sh e2e-ir-offer
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-ir-offer
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+
+    - name: create a billable account
+      try:
+        - apply:
+            file: billingaccount.yaml
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-ir-account
+                (finalizers[?@ == 'openmeter.miloapis.com/customer-link']): ['openmeter.miloapis.com/customer-link']
+        - script:
+            content: QUERY_POD=openmeter-query-ir sh ../billingaccount/resolve-stripe-customer.sh "$NAMESPACE" customerId
+            outputs:
+              - name: stripeCustomerId
+                value: ($stdout)
+        - script:
+            content: QUERY_POD=openmeter-query-ir sh ../billingaccount/resolve-stripe-customer.sh "$NAMESPACE" paymentMethodId
+            outputs:
+              - name: stripePaymentMethodId
+                value: ($stdout)
+        - apply:
+            file: paymentmethod.yaml
+        - patch:
+            file: paymentmethod-active.yaml
+            subresource: status
+        - patch:
+            file: stripepaymentmethod-active.yaml
+            subresource: status
+        - apply:
+            file: billingaccount-with-payment-method.yaml
+        - patch:
+            file: billingaccount-payment-method-ready.yaml
+            subresource: status
+
+    - name: a contract starting tomorrow waits, and its first invoice can be previewed
+      try:
+        - script:
+            timeout: 10s
+            content: bash entitlement.sh tomorrow
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              metadata:
+                name: e2e-ir-entitlement
+              status:
+                (conditions[?type == 'OpenMeterSubscriptionSynced']):
+                  - status: "False"
+                    reason: ContractNotStarted
+        - script:
+            timeout: 150s
+            content: bash preview-first-invoice.sh
+        - script:
+            timeout: 150s
+            content: bash issue-unsupported.sh
+
+    - name: a contract starting today is subscribed and invoiced straight away
+      try:
+        - script:
+            timeout: 90s
+            content: bash restart-today.sh
+        - assert:
+            # The entitlement retries a refused subscription every 30s.
+            timeout: 100s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              metadata:
+                name: e2e-ir-entitlement
+              status:
+                (conditions[?type == 'OpenMeterSubscriptionSynced']):
+                  - status: "True"
+        - script:
+            timeout: 70s
+            content: bash expect-subscription.sh
+        - script:
+            timeout: 100s
+            content: bash first-invoice.sh
+      catch:
+        # The first invoice may be open, which keeps the account from deleting.
+        - script:
+            content: bash release-account.sh
+
+    - name: a Preview then shows what comes next
+      try:
+        - script:
+            timeout: 150s
+            content: bash preview-next-invoice.sh
+      catch:
+        - script:
+            content: bash release-account.sh
+
+    - name: clean up
+      try:
+        - script:
+            timeout: 10s
+            content: kubectl delete billingentitlement e2e-ir-entitlement -n "$NAMESPACE" --wait=false
+        - error:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              metadata:
+                name: e2e-ir-entitlement
+        - script:
+            timeout: 10s
+            content: bash release-account.sh
+        - script:
+            timeout: 10s
+            content: kubectl delete billingaccount e2e-ir-account -n "$NAMESPACE" --wait=false
+        - error:
+            timeout: 120s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-ir-account
+      catch:
+        - script:
+            content: bash release-account.sh

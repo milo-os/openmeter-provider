@@ -37,12 +37,22 @@ rules:
   - billing.miloapis.com
   resources:
   - billingentitlements/status
+  - invoicerequests/status
   - invoices/status
   - offers/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - billing.miloapis.com
+  resources:
+  - invoicerequests
+  - paymentmethods
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - billing.miloapis.com
   resources:
@@ -53,14 +63,6 @@ rules:
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - billing.miloapis.com
-  resources:
-  - paymentmethods
-  verbs:
-  - get
-  - list
   - watch
 - apiGroups:
   - stripe.billing.miloapis.com

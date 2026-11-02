@@ -105,6 +105,16 @@ type Client interface {
 	// yet paid, voided, or uncollectible.
 	PrepareInvoicesForCustomerDeletion(ctx context.Context, customerID CustomerID) error
 
+	// Fixed charges (see fixedcharges.go): previews of a customer's flat
+	// fees, for InvoiceRequests.
+
+	// UpcomingFixedCharges returns the flat-fee lines on the customer's
+	// gathering invoice, with OpenMeter's live totals.
+	UpcomingFixedCharges(ctx context.Context, customerID CustomerID) ([]om.InvoiceLine, error)
+	// DraftInvoice returns the customer's newest draft invoice with its
+	// lines, or nil.
+	DraftInvoice(ctx context.Context, customerID CustomerID) (*om.Invoice, error)
+
 	// Stripe app data (see stripe.go).
 
 	// EnsureCustomerStripeAppData upserts the customer's Stripe app data

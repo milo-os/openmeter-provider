@@ -1,0 +1,42 @@
+# A bare metal contract: a one-time setup fee and a monthly charge, published
+# with ../offer/publish.sh (billing's operator does not run in e2e).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ir-setup-fee
+spec:
+  displayName: "Server installation"
+  chargeType: OneTime
+  currency: USD
+  amount: "1500.00"
+  trigger: BillingAccountActivation
+  serviceRef: bare-metal.miloapis.com
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ir-monthly-fee
+spec:
+  displayName: "Dedicated server"
+  chargeType: Recurring
+  currency: USD
+  amount: "1000.00"
+  interval: monthly
+  serviceRef: bare-metal.miloapis.com
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-ir-offer
+  annotations:
+    kubernetes.io/display-name: "E2E Bare Metal Contract"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - OneTime
+    - Recurring
+  servicePricingRefs:
+    - name: ir-setup-fee
+      namespace: openmeter-system
+    - name: ir-monthly-fee
+      namespace: openmeter-system

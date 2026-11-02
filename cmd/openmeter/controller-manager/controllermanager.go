@@ -162,6 +162,11 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 				}).SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("creating BillingEntitlement controller: %w", err)
 				}
+				if err = (&controller.InvoiceRequestReconciler{
+					OpenMeterClient: openMeterClient,
+				}).SetupWithManager(mgr); err != nil {
+					return fmt.Errorf("creating InvoiceRequest controller: %w", err)
+				}
 				if err := controller.AddIndexers(ctx, mgr.GetFieldIndexer()); err != nil {
 					return fmt.Errorf("adding indexers: %w", err)
 				}
