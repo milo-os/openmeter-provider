@@ -155,8 +155,14 @@ func TestPreviewInvoice_SimulatesPlannedCharges(t *testing.T) {
 	if setup.Id == nil || monthly.Id == nil || *setup.Id == *monthly.Id {
 		t.Errorf("line ids = %v, %v; want distinct ids for discounts to refer to", setup.Id, monthly.Id)
 	}
-	if !monthly.Period.To.Equal(time.Date(2026, time.December, 18, 0, 0, 0, 0, time.UTC)) || !monthly.InvoiceAt.Equal(start) {
-		t.Errorf("monthly line = %+v, want the month from the start, invoiced at the start", monthly)
+	if !monthly.Period.From.Equal(start) || !monthly.Period.To.Equal(time.Date(2026, time.December, 18, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("monthly line period = %+v, want the month from the start", monthly.Period)
+	}
+	// Due now, or OpenMeter would price a future charge at zero.
+	for _, line := range sim.Lines {
+		if line.InvoiceAt.After(time.Now()) {
+			t.Errorf("line %q invoiced at %s, in the future", line.Name, line.InvoiceAt)
+		}
 	}
 	price, err := monthly.RateCard.Price.AsFlatPriceWithPaymentTerm()
 	if err != nil || price.Amount != "1000.00" || price.PaymentTerm == nil || *price.PaymentTerm != om.PricePaymentTermInAdvance {

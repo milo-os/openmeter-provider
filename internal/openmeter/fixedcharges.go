@@ -144,6 +144,12 @@ func (c *client) PreviewInvoice(ctx context.Context, customerID CustomerID, curr
 	if len(charges) == 0 {
 		return om.Invoice{}, &PermanentError{Err: errors.New("no charges to preview")}
 	}
+	// OpenMeter rates a flat fee only once it's due: one invoiced later than
+	// the simulation runs prices at zero. When a line is invoiced doesn't
+	// change its amount, so every line is invoiced now (a minute back, at
+	// OpenMeter's one-minute resolution, so clock skew can't push it into
+	// the future), and the period still says what it covers.
+	invoiceAt := time.Now().Add(-time.Minute).Truncate(time.Minute)
 	lines := make([]om.InvoiceSimulationLine, 0, len(charges))
 	for _, ch := range charges {
 		var price om.RateCardUsageBasedPrice
@@ -165,7 +171,7 @@ func (c *client) PreviewInvoice(ctx context.Context, customerID CustomerID, curr
 		lines = append(lines, om.InvoiceSimulationLine{
 			Id:        &id,
 			Name:      ch.Name,
-			InvoiceAt: ch.Period.From,
+			InvoiceAt: invoiceAt,
 			Period:    ch.Period,
 			Quantity:  "1",
 			RateCard:  rateCard,
