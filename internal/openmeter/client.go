@@ -105,6 +105,21 @@ type Client interface {
 	// yet paid, voided, or uncollectible.
 	PrepareInvoicesForCustomerDeletion(ctx context.Context, customerID CustomerID) error
 
+	// Fixed charges (see fixedcharges.go): invoicing a customer's flat
+	// fees ahead of the cycle, for InvoiceRequests.
+
+	// PendingFixedCharges returns the customer's flat-fee lines billable as
+	// of asOf, with their subscription items' discounts.
+	PendingFixedCharges(ctx context.Context, customerID CustomerID, asOf time.Time) ([]FixedCharge, error)
+	// PreviewInvoice simulates the invoice charges would make, creating
+	// nothing.
+	PreviewInvoice(ctx context.Context, customerID CustomerID, charges []FixedCharge) (om.Invoice, error)
+	// InvoiceFixedCharges invoices the lines lineIDs now. Returns
+	// ErrNothingToInvoice when none is billable.
+	InvoiceFixedCharges(ctx context.Context, customerID CustomerID, lineIDs []string, asOf time.Time) ([]om.Invoice, error)
+	// GetInvoiceWithLines reads an invoice with its lines.
+	GetInvoiceWithLines(ctx context.Context, id string) (om.Invoice, error)
+
 	// Stripe app data (see stripe.go).
 
 	// EnsureCustomerStripeAppData upserts the customer's Stripe app data

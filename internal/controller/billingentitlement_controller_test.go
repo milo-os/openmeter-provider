@@ -241,6 +241,60 @@ func TestBillingEntitlement_SubscribesAccountToOfferPlan(t *testing.T) {
 	}
 }
 
+func TestBillingEntitlement_Contract(t *testing.T) {
+	now := time.Date(2026, time.March, 18, 10, 30, 0, 0, time.UTC)
+	contractEntitlement := func(startsAt time.Time) *billingv1alpha1.BillingEntitlement {
+		be := testEntitlement(testBEName, "test-offer")
+		be.Spec.Contract = &billingv1alpha1.BillingContract{StartsAt: metav1.NewTime(startsAt)}
+		return be
+	}
+
+	t.Run("started today: subscribes, billing on the contract's day", func(t *testing.T) {
+		startsAt := time.Date(2026, time.March, 18, 0, 0, 0, 0, time.UTC)
+		r, omc, _ := newEntitlementReconciler(t, contractEntitlement(startsAt), testAccount(), cpuOffer())
+		r.Now = func() time.Time { return now }
+
+		reconcileEntitlement(t, r, testBEName)
+
+		if len(omc.ensureCalls) != 1 {
+			t.Fatalf("EnsureSubscription calls = %v", omc.calls)
+		}
+		if got := omc.ensureCalls[0].BillingAnchor; got == nil || !got.Equal(startsAt) {
+			t.Errorf("BillingAnchor = %v, want the contract start %s", got, startsAt)
+		}
+		assertCondition(t, r, metav1.ConditionTrue, conditionReasonSynced)
+	})
+
+	t.Run("starts later: waits until the start without subscribing", func(t *testing.T) {
+		startsAt := time.Date(2026, time.April, 18, 0, 0, 0, 0, time.UTC)
+		r, omc, _ := newEntitlementReconciler(t, contractEntitlement(startsAt), testAccount(), cpuOffer())
+		r.Now = func() time.Time { return now }
+
+		res := reconcileEntitlement(t, r, testBEName)
+
+		if len(omc.calls) != 0 {
+			t.Errorf("OpenMeter called before the contract starts: %v", omc.calls)
+		}
+		c := assertCondition(t, r, metav1.ConditionFalse, conditionReasonContractNotStarted)
+		if !strings.Contains(c.Message, "2026-04-18T00:00:00Z") {
+			t.Errorf("condition message = %q, want the start date", c.Message)
+		}
+		if want := startsAt.Sub(now); res.RequeueAfter != want {
+			t.Errorf("RequeueAfter = %v, want %v (until the start)", res.RequeueAfter, want)
+		}
+
+		// On the start date it subscribes.
+		r.Now = func() time.Time { return startsAt.Add(time.Second) }
+		reconcileEntitlement(t, r, testBEName)
+		if len(omc.ensureCalls) != 1 {
+			t.Fatalf("EnsureSubscription calls on the start date = %v", omc.calls)
+		}
+		if got := omc.ensureCalls[0].BillingAnchor; got == nil || !got.Equal(startsAt) {
+			t.Errorf("BillingAnchor = %v, want the contract start %s", got, startsAt)
+		}
+	})
+}
+
 func TestSubscriptionBillingAnchor(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

@@ -57,6 +57,7 @@ const (
 	conditionReasonCustomerBillingNotReady = "CustomerBillingNotReady"
 	conditionReasonPlanNotPublished        = "PlanNotPublished"
 	conditionReasonMigrationScheduled      = "MigrationScheduled"
+	conditionReasonContractNotStarted      = "ContractNotStarted"
 )
 
 // Metadata written on the subscriptions this controller creates, so they can
@@ -96,11 +97,15 @@ const (
 //   - BillingAccount deleting: the subscription is canceled, because
 //     OpenMeter refuses to delete a customer with live subscriptions and the
 //     account's own finalizer would otherwise never complete.
+//   - Contract starting later: nothing is subscribed until its start date,
+//     then the subscription bills on the contract's day of the month.
 type BillingEntitlementReconciler struct {
 	client.Client
 	OpenMeterClient openmeter.Client
 	Recorder        record.EventRecorder
 	Log             logr.Logger
+	// Now returns the current time; time.Now when unset.
+	Now func() time.Time
 }
 
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingentitlements,verbs=get;list;watch;update;patch
@@ -174,6 +179,18 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 	logger = logger.WithValues("planKey", planKey)
 
 	anchor := subscriptionBillingAnchor(&account)
+	if contract := be.Spec.Contract; contract != nil {
+		// OpenMeter can't start a subscription in the past, and a scheduled
+		// one can't be deleted cleanly (see nextSubscriptionStep), so a
+		// contract starting later is subscribed on the day it starts.
+		// Billing only admits contracts starting today or later.
+		startsAt := contract.StartsAt.UTC()
+		if wait := startsAt.Sub(r.now()); wait > 0 {
+			return r.syncWaiting(ctx, &be, conditionReasonContractNotStarted,
+				fmt.Errorf("the contract starts at %s, when its subscription is created", startsAt.Format(time.RFC3339)), wait)
+		}
+		anchor = startsAt
+	}
 	state, err := r.OpenMeterClient.EnsureSubscription(ctx, openmeter.DesiredSubscription{
 		CustomerKey:   customerKey,
 		PlanKey:       planKey,
@@ -481,10 +498,10 @@ func (r *BillingEntitlementReconciler) SetupWithManager(mgr ctrl.Manager) error 
 }
 
 // subscriptionBillingAnchor is the date the account's subscriptions bill
-// from: its invoice day of the month, the 1st under the standard terms, in
-// January 2025. OpenMeter moves an anchor back to the nearest cycle boundary
-// before a subscription starts, so only the day counts, and every plan bills
-// monthly (usageBillingPeriod). The billing profile's anchored alignment
+// from, unless a contract sets it: its invoice day of the month, the 1st
+// under the standard terms, in January 2025. OpenMeter moves an anchor
+// back to the nearest cycle boundary before a subscription starts, so only
+// the day counts, and every plan bills monthly (usageBillingPeriod). The billing profile's anchored alignment
 // says the same, but OpenMeter ignores it (see DesiredBillingProfile).
 func subscriptionBillingAnchor(account *billingv1alpha1.BillingAccount) time.Time {
 	day := billingv1alpha1.StandardPaymentTermsInvoiceDayOfMonth
@@ -492,4 +509,11 @@ func subscriptionBillingAnchor(account *billingv1alpha1.BillingAccount) time.Tim
 		day = terms.InvoiceDayOfMonth
 	}
 	return time.Date(2025, time.January, int(day), 0, 0, 0, 0, time.UTC)
+}
+
+func (r *BillingEntitlementReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }

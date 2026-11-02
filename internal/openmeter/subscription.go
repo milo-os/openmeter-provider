@@ -49,8 +49,10 @@ type DesiredSubscription struct {
 	// BillingAnchor, when set, is the date a new subscription's billing
 	// cycles count from. OpenMeter moves it back to the nearest cycle
 	// boundary before the subscription starts, so any 1st of a month bills
-	// on the 1st. Unset, a subscription bills from the day it starts.
-	// Changes and migrations keep the existing subscription's anchor.
+	// on the 1st, and a contract starting on the 18th bills on the 18th
+	// (the last day of shorter months for the 29th to 31st). Unset, a
+	// subscription bills from the day it starts. Changes and migrations
+	// keep the existing subscription's anchor.
 	BillingAnchor *time.Time
 }
 
