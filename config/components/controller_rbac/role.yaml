@@ -16,7 +16,6 @@ rules:
   resources:
   - billingaccounts
   - billingentitlements
-  - invoicerequests
   - meterdefinitions
   - offers
   verbs:
@@ -48,6 +47,15 @@ rules:
 - apiGroups:
   - billing.miloapis.com
   resources:
+  - invoicerequests
+  - paymentmethods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - billing.miloapis.com
+  resources:
   - invoices
   verbs:
   - create
@@ -55,14 +63,6 @@ rules:
   - list
   - patch
   - update
-  - watch
-- apiGroups:
-  - billing.miloapis.com
-  resources:
-  - paymentmethods
-  verbs:
-  - get
-  - list
   - watch
 - apiGroups:
   - stripe.billing.miloapis.com

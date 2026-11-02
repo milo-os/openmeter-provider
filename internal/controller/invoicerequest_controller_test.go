@@ -16,7 +16,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"slices"
 	"testing"
 	"time"
 
@@ -34,9 +33,15 @@ import (
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )
 
-const testInvoiceRequest = "acct-first-invoice"
+const (
+	testInvoiceRequest = "acct-preview"
+	contractOfferName  = "acme-bare-metal"
+)
 
-var invoiceRequestNow = time.Date(2026, time.March, 18, 10, 0, 0, 0, time.UTC)
+var (
+	invoiceRequestNow = time.Date(2026, time.November, 2, 10, 0, 0, 0, time.UTC)
+	contractStart     = time.Date(2026, time.November, 18, 0, 0, 0, 0, time.UTC)
+)
 
 // fakeInvoicingClient serves the OpenMeter calls the InvoiceRequest
 // controller makes.
@@ -44,13 +49,12 @@ type fakeInvoicingClient struct {
 	openmeter.Client // unimplemented methods panic if used
 
 	customerErr error
-	charges     []openmeter.FixedCharge
-	chargesErr  error
-	invoices    []om.Invoice // ListInvoices, newest first
-	invoiceErr  error
+	draft       *om.Invoice
+	upcoming    []om.InvoiceLine
+	upcomingErr error
 
-	invoicedLines [][]string
-	previewed     [][]openmeter.FixedCharge
+	previewed []openmeter.PlannedCharge
+	currency  string
 }
 
 func (f *fakeInvoicingClient) GetCustomer(_ context.Context, key openmeter.CustomerKey) (om.Customer, error) {
@@ -60,58 +64,66 @@ func (f *fakeInvoicingClient) GetCustomer(_ context.Context, key openmeter.Custo
 	return om.Customer{Id: "01JCUSTOMER", Key: (*string)(&key)}, nil
 }
 
-func (f *fakeInvoicingClient) PendingFixedCharges(context.Context, openmeter.CustomerID, time.Time) ([]openmeter.FixedCharge, error) {
-	return f.charges, f.chargesErr
+func (f *fakeInvoicingClient) DraftInvoice(context.Context, openmeter.CustomerID) (*om.Invoice, error) {
+	return f.draft, nil
 }
 
-func (f *fakeInvoicingClient) PreviewInvoice(_ context.Context, _ openmeter.CustomerID, charges []openmeter.FixedCharge) (om.Invoice, error) {
-	f.previewed = append(f.previewed, charges)
-	return testInvoice("", invoiceRequestNow), nil
+func (f *fakeInvoicingClient) UpcomingFixedCharges(context.Context, openmeter.CustomerID) ([]om.InvoiceLine, error) {
+	return f.upcoming, f.upcomingErr
 }
 
-func (f *fakeInvoicingClient) InvoiceFixedCharges(_ context.Context, _ openmeter.CustomerID, lineIDs []string, _ time.Time) ([]om.Invoice, error) {
-	f.invoicedLines = append(f.invoicedLines, lineIDs)
-	if f.invoiceErr != nil {
-		return nil, f.invoiceErr
+// PreviewInvoice prices the charges as OpenMeter would: discounts off,
+// no tax.
+func (f *fakeInvoicingClient) PreviewInvoice(_ context.Context, _ openmeter.CustomerID, currency string, charges []openmeter.PlannedCharge) (om.Invoice, error) {
+	f.previewed, f.currency = charges, currency
+	lines := make([]om.InvoiceLine, 0, len(charges))
+	for _, ch := range charges {
+		total := ch.Amount
+		if ch.DiscountPercentage == 10 && ch.Amount == "1000.00" {
+			total = "900.00"
+		}
+		lines = append(lines, om.InvoiceLine{Name: ch.Name, Period: ch.Period, Currency: currency,
+			Totals: om.InvoiceTotals{Total: total, TaxesExclusiveTotal: "0"}})
 	}
-	return []om.Invoice{{Id: "01JINVOICE"}}, nil
+	return om.Invoice{Currency: currency, Lines: &lines}, nil
 }
 
-func (f *fakeInvoicingClient) GetInvoiceWithLines(_ context.Context, id string) (om.Invoice, error) {
-	return testInvoice(id, invoiceRequestNow), nil
+func flatLine(name, total string, from, to time.Time) om.InvoiceLine {
+	return om.InvoiceLine{Id: name, Name: name, Currency: "USD", Period: om.Period{From: from, To: to},
+		Totals: om.InvoiceTotals{Total: total, TaxesExclusiveTotal: "0"}}
 }
 
-func (f *fakeInvoicingClient) ListInvoices(context.Context, openmeter.CustomerID) ([]om.Invoice, error) {
-	return f.invoices, nil
-}
-
-// testInvoice is a contract's first invoice: a setup fee and a first month
-// with a 10% discount, no tax.
-func testInvoice(id string, createdAt time.Time) om.Invoice {
-	from := time.Date(2026, time.March, 18, 0, 0, 0, 0, time.UTC)
-	to := from.AddDate(0, 1, 0)
-	lines := []om.InvoiceLine{
-		{Id: "l1", Name: "Server installation", Period: om.Period{From: from, To: from},
-			Totals: om.InvoiceTotals{Total: "1500.00", TaxesExclusiveTotal: "0"}},
-		{Id: "l2", Name: "Dedicated server", Period: om.Period{From: from, To: to},
-			Totals: om.InvoiceTotals{Total: "900.00", TaxesExclusiveTotal: "0"}},
-	}
-	return om.Invoice{
-		Id:        id,
-		Status:    om.InvoiceStatusDraft,
-		Currency:  "USD",
-		CreatedAt: createdAt,
-		Period:    &om.Period{From: from, To: to},
-		Lines:     &lines,
-		Totals:    om.InvoiceTotals{Total: "2400.00", TaxesExclusiveTotal: "0"},
+// contractOffer is a bare metal contract: a setup fee, and a monthly fee
+// with a 10% discount, plus usage that a first invoice doesn't carry.
+func contractOffer() *billingv1alpha1.Offer {
+	return &billingv1alpha1.Offer{
+		ObjectMeta: metav1.ObjectMeta{Name: contractOfferName},
+		Spec: billingv1alpha1.OfferSpec{
+			LaunchStage: billingv1alpha1.OfferLaunchStageGA,
+			ServicePricings: []billingv1alpha1.ServicePricingSnapshot{
+				{Name: "setup-fee", Spec: billingv1alpha1.ServicePricingSpec{
+					DisplayName: "Server installation", ChargeType: billingv1alpha1.ChargeTypeOneTime, Amount: "1500.00"}},
+				{Name: "monthly-fee", Discount: &billingv1alpha1.Discount{Percentage: 10}, Spec: billingv1alpha1.ServicePricingSpec{
+					DisplayName: "Dedicated server", ChargeType: billingv1alpha1.ChargeTypeRecurring, Amount: "1000.00"}},
+				{Name: "cpu", Spec: billingv1alpha1.ServicePricingSpec{ChargeType: billingv1alpha1.ChargeTypeUsage}},
+			},
+		},
 	}
 }
 
-func testCharges() []openmeter.FixedCharge {
-	return []openmeter.FixedCharge{{LineID: "line-setup"}, {LineID: "line-monthly"}}
+func contractEntitlementFor(startsAt time.Time) *billingv1alpha1.BillingEntitlement {
+	be := testEntitlement(testBEName, contractOfferName)
+	be.Spec.Contract = &billingv1alpha1.BillingContract{StartsAt: metav1.NewTime(startsAt)}
+	return be
 }
 
-func testInvoiceRequestObj(mode billingv1alpha1.InvoiceRequestMode) *billingv1alpha1.InvoiceRequest {
+func usdAccount() *billingv1alpha1.BillingAccount {
+	account := testAccount()
+	account.Spec.CurrencyCode = "USD"
+	return account
+}
+
+func invoiceRequestObj(mode billingv1alpha1.InvoiceRequestMode) *billingv1alpha1.InvoiceRequest {
 	return &billingv1alpha1.InvoiceRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: testInvoiceRequest, Namespace: testNamespace, Generation: 1},
 		Spec: billingv1alpha1.InvoiceRequestSpec{
@@ -121,20 +133,20 @@ func testInvoiceRequestObj(mode billingv1alpha1.InvoiceRequestMode) *billingv1al
 	}
 }
 
-func newInvoiceRequestReconciler(t *testing.T, omc *fakeInvoicingClient, objs ...client.Object) (*InvoiceRequestReconciler, *record.FakeRecorder) {
+func newInvoiceRequestReconciler(t *testing.T, omc *fakeInvoicingClient, objs ...client.Object) *InvoiceRequestReconciler {
 	t.Helper()
 	k8s := fake.NewClientBuilder().
 		WithScheme(newOfferScheme(t)).
 		WithObjects(objs...).
 		WithStatusSubresource(&billingv1alpha1.InvoiceRequest{}).
+		WithIndex(&billingv1alpha1.BillingEntitlement{}, EntitlementBillingAccountRefField, entitlementBillingAccountRef).
 		Build()
-	rec := record.NewFakeRecorder(20)
 	return &InvoiceRequestReconciler{
 		Client:          k8s,
 		OpenMeterClient: omc,
-		Recorder:        rec,
+		Recorder:        record.NewFakeRecorder(20),
 		Now:             func() time.Time { return invoiceRequestNow },
-	}, rec
+	}
 }
 
 func reconcileInvoiceRequest(r *InvoiceRequestReconciler) (*billingv1alpha1.InvoiceRequest, error) {
@@ -147,60 +159,109 @@ func reconcileInvoiceRequest(r *InvoiceRequestReconciler) (*billingv1alpha1.Invo
 	return &ir, err
 }
 
-func assertCompleted(t *testing.T, ir *billingv1alpha1.InvoiceRequest, phase billingv1alpha1.InvoiceRequestPhase, reason string) {
+func assertCompleted(t *testing.T, ir *billingv1alpha1.InvoiceRequest, phase billingv1alpha1.InvoiceRequestPhase, reason string) *metav1.Condition {
 	t.Helper()
 	if ir.Status.Phase != phase {
 		t.Errorf("phase = %q, want %q", ir.Status.Phase, phase)
 	}
 	c := apimeta.FindStatusCondition(ir.Status.Conditions, billingv1alpha1.InvoiceRequestConditionCompleted)
 	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != reason {
-		t.Errorf("Completed condition = %+v, want True/%s", c, reason)
+		t.Fatalf("Completed condition = %+v, want True/%s", c, reason)
 	}
 	if ir.Status.CompletedAt == nil || !ir.Status.CompletedAt.Time.Equal(invoiceRequestNow) {
 		t.Errorf("completedAt = %v, want %s", ir.Status.CompletedAt, invoiceRequestNow)
 	}
+	return c
 }
 
-func assertFirstInvoiceLines(t *testing.T, ir *billingv1alpha1.InvoiceRequest) {
-	t.Helper()
+func TestInvoiceRequest_PreviewBeforeTheContractStarts(t *testing.T) {
+	omc := &fakeInvoicingClient{}
+	r := newInvoiceRequestReconciler(t, omc, usdAccount(), contractOffer(), contractEntitlementFor(contractStart),
+		invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+
+	ir, err := reconcileInvoiceRequest(r)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	c := assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
+	if c.Message != "The first invoice, sent when the contract starts on 2026-11-18" {
+		t.Errorf("message = %q", c.Message)
+	}
+
+	// The setup fee and the first month, not usage, priced from the start.
+	if len(omc.previewed) != 2 || omc.currency != "USD" {
+		t.Fatalf("previewed %+v in %q, want the two flat fees in USD", omc.previewed, omc.currency)
+	}
+	setup, monthly := omc.previewed[0], omc.previewed[1]
+	if setup.Name != "Server installation" || setup.Amount != "1500.00" || !setup.Period.From.Equal(contractStart) || !setup.Period.To.Equal(contractStart) {
+		t.Errorf("setup charge = %+v", setup)
+	}
+	if monthly.Name != "Dedicated server" || monthly.DiscountPercentage != 10 ||
+		!monthly.Period.To.Equal(time.Date(2026, time.December, 18, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("monthly charge = %+v, want a month from the start with the 10%% discount", monthly)
+	}
+
 	st := ir.Status
-	if st.CurrencyCode != "USD" || st.Total != "2400.00" || len(st.Lines) != 2 {
-		t.Fatalf("status = %+v, want two USD lines totalling 2400.00", st)
+	if st.Total != "2400.00" || st.CurrencyCode != "USD" || len(st.Lines) != 2 {
+		t.Fatalf("status = %+v, want two lines totalling 2400.00", st)
 	}
-	setup, monthly := st.Lines[0], st.Lines[1]
-	if setup.Description != "Server installation" || setup.Amount != "1500.00" || setup.Period != nil {
-		t.Errorf("setup line = %+v, want a one-time charge without a period", setup)
+	if st.Lines[0].Period != nil {
+		t.Errorf("setup line period = %+v, want none for a one-time charge", st.Lines[0].Period)
 	}
-	wantEnd := time.Date(2026, time.April, 17, 23, 59, 59, 0, time.UTC)
-	if monthly.Amount != "900.00" || monthly.Period == nil || !monthly.Period.End.Time.Equal(wantEnd) {
-		t.Errorf("monthly line = %+v, want 900.00 for the month to %s", monthly, wantEnd)
+	if p := st.Lines[1].Period; p == nil || !p.End.Time.Equal(time.Date(2026, time.December, 17, 23, 59, 59, 0, time.UTC)) {
+		t.Errorf("monthly line period = %+v, want through 17 December", p)
 	}
 }
 
-func TestInvoiceRequest_Preview(t *testing.T) {
-	t.Run("prices the fixed charges without invoicing", func(t *testing.T) {
-		omc := &fakeInvoicingClient{charges: testCharges()}
-		r, _ := newInvoiceRequestReconciler(t, omc, testAccount(), testInvoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+func TestInvoiceRequest_PreviewAfterTheStart(t *testing.T) {
+	started := contractEntitlementFor(time.Date(2026, time.November, 2, 0, 0, 0, 0, time.UTC))
+	draftLines := []om.InvoiceLine{
+		flatLine("Server installation", "1500", invoiceRequestNow, invoiceRequestNow),
+		flatLine("Dedicated server", "899.97", invoiceRequestNow, time.Date(2026, time.December, 2, 0, 0, 0, 0, time.UTC)),
+	}
+
+	t.Run("the draft waiting to be issued", func(t *testing.T) {
+		omc := &fakeInvoicingClient{
+			draft:    &om.Invoice{Id: "01JDRAFT", Currency: "USD", Lines: &draftLines},
+			upcoming: []om.InvoiceLine{flatLine("Dedicated server", "900", invoiceRequestNow, invoiceRequestNow.AddDate(0, 1, 0))},
+		}
+		r := newInvoiceRequestReconciler(t, omc, usdAccount(), contractOffer(), started, invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+
+		ir, err := reconcileInvoiceRequest(r)
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		c := assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
+		if ir.Status.Total != "2399.97" || len(ir.Status.Lines) != 2 {
+			t.Errorf("status = %+v, want the draft's two lines", ir.Status)
+		}
+		if c.Message != "Draft invoice 01JDRAFT, which OpenMeter issues and sends when its collection period ends" {
+			t.Errorf("message = %q", c.Message)
+		}
+		if omc.previewed != nil {
+			t.Error("simulated a first invoice after the contract started")
+		}
+	})
+
+	t.Run("the charges for later periods", func(t *testing.T) {
+		omc := &fakeInvoicingClient{upcoming: []om.InvoiceLine{
+			flatLine("Dedicated server", "900", time.Date(2026, time.December, 2, 0, 0, 0, 0, time.UTC), time.Date(2027, time.January, 2, 0, 0, 0, 0, time.UTC)),
+		}}
+		r := newInvoiceRequestReconciler(t, omc, usdAccount(), contractOffer(), started, invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
 
 		ir, err := reconcileInvoiceRequest(r)
 		if err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
 		assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
-		assertFirstInvoiceLines(t, ir)
-		if ir.Status.InvoiceRef != nil {
-			t.Errorf("invoiceRef = %+v, want none for a preview", ir.Status.InvoiceRef)
-		}
-		if len(omc.previewed) != 1 || len(omc.invoicedLines) != 0 {
-			t.Errorf("previewed %d times, invoiced %v; want one preview and no invoice", len(omc.previewed), omc.invoicedLines)
+		if ir.Status.Total != "900" || len(ir.Status.Lines) != 1 || ir.Status.Lines[0].Description != "Dedicated server" {
+			t.Errorf("status = %+v, want next month's fee", ir.Status)
 		}
 	})
 
-	t.Run("nothing waiting is an empty preview", func(t *testing.T) {
+	t.Run("nothing waiting, or no contract", func(t *testing.T) {
 		omc := &fakeInvoicingClient{}
-		account := testAccount()
-		account.Spec.CurrencyCode = "USD"
-		r, _ := newInvoiceRequestReconciler(t, omc, account, testInvoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+		r := newInvoiceRequestReconciler(t, omc, usdAccount(), invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
 
 		ir, err := reconcileInvoiceRequest(r)
 		if err != nil {
@@ -208,103 +269,25 @@ func TestInvoiceRequest_Preview(t *testing.T) {
 		}
 		assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
 		if ir.Status.Total != "0" || len(ir.Status.Lines) != 0 || ir.Status.CurrencyCode != "USD" {
-			t.Errorf("status = %+v, want no lines, a zero total in the account's currency", ir.Status)
-		}
-		if len(omc.previewed) != 0 {
-			t.Error("simulated an invoice with no charges")
+			t.Errorf("status = %+v, want an empty preview in the account's currency", ir.Status)
 		}
 	})
 }
 
-func TestInvoiceRequest_Issue(t *testing.T) {
-	t.Run("invoices the fixed charges and names the Invoice", func(t *testing.T) {
-		omc := &fakeInvoicingClient{charges: testCharges()}
-		r, rec := newInvoiceRequestReconciler(t, omc, testAccount(), testInvoiceRequestObj(billingv1alpha1.InvoiceRequestModeIssue))
+func TestInvoiceRequest_IssueIsUnsupported(t *testing.T) {
+	r := newInvoiceRequestReconciler(t, &fakeInvoicingClient{}, usdAccount(), invoiceRequestObj(billingv1alpha1.InvoiceRequestModeIssue))
 
-		ir, err := reconcileInvoiceRequest(r)
-		if err != nil {
-			t.Fatalf("Reconcile: %v", err)
-		}
-		assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
-		assertFirstInvoiceLines(t, ir)
-		if want := [][]string{{"line-setup", "line-monthly"}}; !slices.EqualFunc(omc.invoicedLines, want, slices.Equal[[]string]) {
-			t.Errorf("invoiced lines = %v, want %v", omc.invoicedLines, want)
-		}
-		wantName := invoiceName(testAccountName, testInvoice("01JINVOICE", invoiceRequestNow))
-		if ir.Status.InvoiceRef == nil || ir.Status.InvoiceRef.Name != wantName {
-			t.Errorf("invoiceRef = %+v, want %s", ir.Status.InvoiceRef, wantName)
-		}
-		if got := ir.Annotations[IssueAttemptedAtAnnotation]; got != "2026-03-18T10:00:00Z" {
-			t.Errorf("attempt annotation = %q, want the attempt time", got)
-		}
-		if events := drainRecorder(rec); !containsEvent(events, EventReasonInvoiceIssued) {
-			t.Errorf("events = %v, want %s", events, EventReasonInvoiceIssued)
-		}
-
-		// Done: a later reconcile doesn't invoice again.
-		if _, err := reconcileInvoiceRequest(r); err != nil {
-			t.Fatal(err)
-		}
-		if len(omc.invoicedLines) != 1 {
-			t.Errorf("invoiced again after completing: %v", omc.invoicedLines)
-		}
-	})
-
-	t.Run("nothing waiting", func(t *testing.T) {
-		omc := &fakeInvoicingClient{}
-		r, _ := newInvoiceRequestReconciler(t, omc, testAccount(), testInvoiceRequestObj(billingv1alpha1.InvoiceRequestModeIssue))
-
-		ir, err := reconcileInvoiceRequest(r)
-		if err != nil {
-			t.Fatalf("Reconcile: %v", err)
-		}
-		assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseFailed, billingv1alpha1.InvoiceRequestReasonNothingToInvoice)
-		if len(omc.invoicedLines) != 0 {
-			t.Errorf("invoiced %v with no charges", omc.invoicedLines)
-		}
-	})
-
-	t.Run("charges invoiced elsewhere in the meantime", func(t *testing.T) {
-		omc := &fakeInvoicingClient{charges: testCharges(), invoiceErr: openmeter.ErrNothingToInvoice}
-		r, _ := newInvoiceRequestReconciler(t, omc, testAccount(), testInvoiceRequestObj(billingv1alpha1.InvoiceRequestModeIssue))
-
-		ir, err := reconcileInvoiceRequest(r)
-		if err != nil {
-			t.Fatalf("Reconcile: %v", err)
-		}
-		assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseFailed, billingv1alpha1.InvoiceRequestReasonNothingToInvoice)
-	})
-
-	t.Run("recovers the invoice an interrupted attempt created", func(t *testing.T) {
-		attempt := invoiceRequestNow.Add(-5 * time.Minute)
-		ir := testInvoiceRequestObj(billingv1alpha1.InvoiceRequestModeIssue)
-		ir.Annotations = map[string]string{IssueAttemptedAtAnnotation: attempt.Format(time.RFC3339)}
-		ir.Status.Phase = billingv1alpha1.InvoiceRequestPhasePending
-		omc := &fakeInvoicingClient{invoices: []om.Invoice{
-			{Id: "01JGATHERING", Status: om.InvoiceStatusGathering, CreatedAt: invoiceRequestNow},
-			{Id: "01JINVOICE", Status: om.InvoiceStatusDraft, CreatedAt: attempt.Add(2 * time.Second)},
-			{Id: "01JOLDER", Status: om.InvoiceStatusPaid, CreatedAt: attempt.AddDate(0, -1, 0)},
-		}}
-		r, _ := newInvoiceRequestReconciler(t, omc, testAccount(), ir)
-
-		got, err := reconcileInvoiceRequest(r)
-		if err != nil {
-			t.Fatalf("Reconcile: %v", err)
-		}
-		assertCompleted(t, got, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
-		if wantName := invoiceName(testAccountName, testInvoice("01JINVOICE", invoiceRequestNow)); got.Status.InvoiceRef == nil || got.Status.InvoiceRef.Name != wantName {
-			t.Errorf("invoiceRef = %+v, want the recovered invoice %s", got.Status.InvoiceRef, wantName)
-		}
-		if len(omc.invoicedLines) != 0 {
-			t.Errorf("invoiced again: %v", omc.invoicedLines)
-		}
-	})
+	ir, err := reconcileInvoiceRequest(r)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseFailed, billingv1alpha1.InvoiceRequestReasonUnsupported)
 }
 
 func TestInvoiceRequest_Failures(t *testing.T) {
 	t.Run("no OpenMeter customer", func(t *testing.T) {
-		omc := &fakeInvoicingClient{customerErr: openmeter.ErrCustomerNotFound}
-		r, _ := newInvoiceRequestReconciler(t, omc, testAccount(), testInvoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+		r := newInvoiceRequestReconciler(t, &fakeInvoicingClient{customerErr: openmeter.ErrCustomerNotFound},
+			usdAccount(), invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
 
 		ir, err := reconcileInvoiceRequest(r)
 		if err != nil {
@@ -314,7 +297,7 @@ func TestInvoiceRequest_Failures(t *testing.T) {
 	})
 
 	t.Run("missing billing account", func(t *testing.T) {
-		r, _ := newInvoiceRequestReconciler(t, &fakeInvoicingClient{}, testInvoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+		r := newInvoiceRequestReconciler(t, &fakeInvoicingClient{}, invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
 
 		ir, err := reconcileInvoiceRequest(r)
 		if err != nil {
@@ -324,8 +307,8 @@ func TestInvoiceRequest_Failures(t *testing.T) {
 	})
 
 	t.Run("transient OpenMeter error retries, staying pending", func(t *testing.T) {
-		omc := &fakeInvoicingClient{chargesErr: &openmeter.TransientError{Err: errors.New("503")}}
-		r, _ := newInvoiceRequestReconciler(t, omc, testAccount(), testInvoiceRequestObj(billingv1alpha1.InvoiceRequestModeIssue))
+		omc := &fakeInvoicingClient{upcomingErr: &openmeter.TransientError{Err: errors.New("503")}}
+		r := newInvoiceRequestReconciler(t, omc, usdAccount(), invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
 
 		ir, err := reconcileInvoiceRequest(r)
 		if err == nil {
@@ -337,8 +320,8 @@ func TestInvoiceRequest_Failures(t *testing.T) {
 	})
 
 	t.Run("permanent OpenMeter error fails", func(t *testing.T) {
-		omc := &fakeInvoicingClient{chargesErr: &openmeter.PermanentError{Err: errors.New("400")}}
-		r, _ := newInvoiceRequestReconciler(t, omc, testAccount(), testInvoiceRequestObj(billingv1alpha1.InvoiceRequestModeIssue))
+		omc := &fakeInvoicingClient{upcomingErr: &openmeter.PermanentError{Err: errors.New("400")}}
+		r := newInvoiceRequestReconciler(t, omc, usdAccount(), invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
 
 		ir, err := reconcileInvoiceRequest(r)
 		if err != nil {

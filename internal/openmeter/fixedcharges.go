@@ -7,55 +7,73 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"net/http"
 	"strings"
 	"time"
 
+	"github.com/oklog/ulid/v2"
 	om "github.com/openmeterio/openmeter/api/client/go"
+	"github.com/openmeterio/openmeter/pkg/models"
 )
 
-// ErrNothingToInvoice is returned by InvoiceFixedCharges when OpenMeter
-// finds none of the lines billable.
-var ErrNothingToInvoice = errors.New("openmeter: nothing to invoice")
+// Fixed charges are a customer's OneTime and Recurring ServicePricings:
+// flat fees. These calls back InvoiceRequest previews. OpenMeter invoices
+// in-advance flat fees on its own as soon as they're due (its subscription
+// sync invoices any pending line billable now), so a contract's setup fee
+// and first month are invoiced the moment its subscription starts, and
+// only later periods are ever left pending.
 
-// FixedCharge is a flat-fee line waiting on a customer's gathering invoice:
-// a OneTime or Recurring ServicePricing of the customer's plan, for one
-// service period.
-type FixedCharge struct {
-	// LineID is the gathering line's id.
-	LineID string
-	// Name is the line's name, as it appears on the invoice.
-	Name string
-	// Description is the line's description, if any.
-	Description *string
-	// Currency is the line's ISO 4217 currency.
-	Currency string
-	// Period is the service period the line covers.
-	Period om.Period
-	// InvoiceAt is when OpenMeter would invoice the line on its own.
-	InvoiceAt time.Time
-	// Price is the line's flat price. OpenMeter has already prorated it
-	// for a partial period.
-	Price om.RateCardUsageBasedPrice
-	// Discounts are the discounts of the subscription item the line comes
-	// from. Gathering lines don't carry them, so they're read from the
-	// subscription.
-	Discounts *om.Discounts
+// UpcomingFixedCharges returns the flat-fee lines on the customer's
+// gathering invoice, priced by OpenMeter with live data: their totals
+// include discounts and proration. They're the charges the customer's next
+// invoices will carry. customerID is OpenMeter's internal customer id, as
+// for ListInvoices.
+func (c *client) UpcomingFixedCharges(ctx context.Context, customerID CustomerID) ([]om.InvoiceLine, error) {
+	invoices, err := c.listInvoicesWithLines(ctx, customerID, om.InvoiceStatusGathering)
+	if err != nil {
+		return nil, err
+	}
+	var lines []om.InvoiceLine
+	for _, inv := range invoices {
+		for _, line := range LineItems(inv) {
+			if isFlatFee(line) {
+				lines = append(lines, line)
+			}
+		}
+	}
+	return lines, nil
 }
 
-// PendingFixedCharges returns the customer's flat-fee lines that are
-// billable as of asOf: on a gathering invoice, not deleted, and due to be
-// invoiced at or before asOf. Usage lines are left out, so invoicing these
-// never cuts an early usage invoice. customerID is OpenMeter's internal
-// customer id, as for ListInvoices.
-func (c *client) PendingFixedCharges(ctx context.Context, customerID CustomerID, asOf time.Time) ([]FixedCharge, error) {
+// DraftInvoice returns the customer's newest draft invoice with its lines,
+// or nil when there is none. With the default billing profile a draft only
+// lasts until OpenMeter's collection wait ends and it's issued.
+func (c *client) DraftInvoice(ctx context.Context, customerID CustomerID) (*om.Invoice, error) {
+	invoices, err := c.listInvoicesWithLines(ctx, customerID, om.InvoiceStatusDraft)
+	if err != nil {
+		return nil, err
+	}
+	var newest *om.Invoice
+	for i := range invoices {
+		if invoices[i].Status != om.InvoiceStatusDraft || IsInvoiceDeleted(invoices[i]) {
+			continue
+		}
+		if newest == nil || invoices[i].CreatedAt.After(newest.CreatedAt) {
+			newest = &invoices[i]
+		}
+	}
+	return newest, nil
+}
+
+// listInvoicesWithLines lists the customer's invoices in status, with
+// their lines. A customer has at most a handful in any one status, so one
+// page is enough.
+func (c *client) listInvoicesWithLines(ctx context.Context, customerID CustomerID, status om.InvoiceStatus) ([]om.Invoice, error) {
 	if customerID == "" {
 		return nil, &PermanentError{Err: errors.New("customerID is required")}
 	}
 	pageSize := om.PaginationPageSize(invoiceListPageSize)
 	resp, err := c.api.ListInvoicesWithResponse(ctx, &om.ListInvoicesParams{
 		Customers: &om.InvoiceListParamsCustomers{string(customerID)},
-		Statuses:  &om.InvoiceListParamsStatuses{om.InvoiceStatusGathering},
+		Statuses:  &om.InvoiceListParamsStatuses{status},
 		Expand:    &om.InvoiceListParamsExpand{om.InvoiceExpandLines},
 		PageSize:  &pageSize,
 	})
@@ -66,118 +84,95 @@ func (c *client) PendingFixedCharges(ctx context.Context, customerID CustomerID,
 		return nil, err
 	}
 	if resp.JSON200 == nil {
-		return nil, &PermanentError{Err: fmt.Errorf("list gathering invoices for %q: empty response body", customerID)}
+		return nil, &PermanentError{Err: fmt.Errorf("list %s invoices for %q: empty response body", status, customerID)}
 	}
-
-	var charges []FixedCharge
-	subscriptions := map[string]*om.SubscriptionExpanded{}
+	var out []om.Invoice
 	for _, inv := range resp.JSON200.Items {
-		if inv.Status != om.InvoiceStatusGathering || inv.Lines == nil || !invoiceBelongsToCustomer(inv, customerID) {
-			continue
-		}
-		for _, line := range *inv.Lines {
-			price := line.Price
-			if line.RateCard != nil && line.RateCard.Price != nil {
-				price = line.RateCard.Price
-			}
-			if line.DeletedAt != nil || line.InvoiceAt.After(asOf) || price == nil {
-				continue
-			}
-			if kind, err := price.Discriminator(); err != nil || kind != string(om.FlatPriceWithPaymentTermTypeFlat) {
-				continue
-			}
-			charge := FixedCharge{
-				LineID:      line.Id,
-				Name:        line.Name,
-				Description: line.Description,
-				Currency:    line.Currency,
-				Period:      line.Period,
-				InvoiceAt:   line.InvoiceAt,
-				Price:       *price,
-			}
-			if ref := line.Subscription; ref != nil && ref.Subscription.Id != "" {
-				sub, ok := subscriptions[ref.Subscription.Id]
-				if !ok {
-					if sub, err = c.getSubscription(ctx, ref.Subscription.Id, line.Period.From); err != nil {
-						return nil, err
-					}
-					subscriptions[ref.Subscription.Id] = sub
-				}
-				charge.Discounts = subscriptionItemDiscounts(sub, ref.Item.Id)
-			}
-			charges = append(charges, charge)
+		if inv.Status == status && invoiceBelongsToCustomer(inv, customerID) {
+			out = append(out, inv)
 		}
 	}
-	return charges, nil
+	return out, nil
 }
 
-// getSubscription reads a subscription with its phases and items as of at.
-func (c *client) getSubscription(ctx context.Context, id string, at time.Time) (*om.SubscriptionExpanded, error) {
-	resp, err := c.api.GetSubscriptionWithResponse(ctx, id, &om.GetSubscriptionParams{At: &at})
-	if err != nil {
-		return nil, classify(nil, nil, err)
-	}
-	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
-		return nil, err
-	}
-	if resp.JSON200 == nil {
-		return nil, &PermanentError{Err: fmt.Errorf("get subscription %q: empty response body", id)}
-	}
-	return resp.JSON200, nil
-}
-
-// subscriptionItemDiscounts returns the discounts of the item itemID in
-// sub, or nil when it has none or isn't found.
-func subscriptionItemDiscounts(sub *om.SubscriptionExpanded, itemID string) *om.Discounts {
-	if sub == nil || itemID == "" {
+// LineItems returns an invoice's lines that aren't deleted.
+func LineItems(inv om.Invoice) []om.InvoiceLine {
+	if inv.Lines == nil {
 		return nil
 	}
-	for _, phase := range sub.Phases {
-		for _, item := range phase.Items {
-			if item.Id == itemID {
-				return item.Discounts
-			}
-		}
-		for _, timeline := range phase.ItemTimelines {
-			for _, item := range timeline {
-				if item.Id == itemID {
-					return item.Discounts
-				}
-			}
+	var out []om.InvoiceLine
+	for _, line := range *inv.Lines {
+		if line.DeletedAt == nil {
+			out = append(out, line)
 		}
 	}
-	return nil
+	return out
 }
 
-// PreviewInvoice works out the invoice OpenMeter would cut from charges,
-// without creating anything: it runs them through OpenMeter's invoice
-// simulation with their prices and discounts. charges must share one
-// currency.
-func (c *client) PreviewInvoice(ctx context.Context, customerID CustomerID, charges []FixedCharge) (om.Invoice, error) {
+// isFlatFee reports whether line is priced flat: a OneTime or Recurring
+// ServicePricing rather than usage.
+func isFlatFee(line om.InvoiceLine) bool {
+	price := line.Price
+	if line.RateCard != nil && line.RateCard.Price != nil {
+		price = line.RateCard.Price
+	}
+	if price == nil {
+		return false
+	}
+	kind, err := price.Discriminator()
+	return err == nil && kind == string(om.FlatPriceWithPaymentTermTypeFlat)
+}
+
+// PlannedCharge is a flat fee a customer will be charged, priced from its
+// ServicePricing rather than from a subscription.
+type PlannedCharge struct {
+	// Name is the charge's name on the invoice.
+	Name string
+	// Period is the service period it covers; From equals To for a
+	// one-time charge.
+	Period om.Period
+	// Amount is the flat price before discounts, as a decimal string.
+	Amount string
+	// DiscountPercentage is the percentage discount, 0 for none.
+	DiscountPercentage int32
+}
+
+// PreviewInvoice works out the invoice charges would make for the
+// customer, creating nothing, with OpenMeter's invoice simulation: the
+// same pricing and discount calculation as a real invoice.
+func (c *client) PreviewInvoice(ctx context.Context, customerID CustomerID, currency string, charges []PlannedCharge) (om.Invoice, error) {
 	if len(charges) == 0 {
 		return om.Invoice{}, &PermanentError{Err: errors.New("no charges to preview")}
 	}
 	lines := make([]om.InvoiceSimulationLine, 0, len(charges))
 	for _, ch := range charges {
-		if ch.Currency != charges[0].Currency {
-			return om.Invoice{}, &PermanentError{Err: fmt.Errorf("charges are in %s and %s; an invoice has one currency", charges[0].Currency, ch.Currency)}
+		var price om.RateCardUsageBasedPrice
+		if err := price.FromFlatPriceWithPaymentTerm(om.FlatPriceWithPaymentTerm{
+			Type:        om.FlatPriceWithPaymentTermTypeFlat,
+			Amount:      ch.Amount,
+			PaymentTerm: ptr(om.PricePaymentTermInAdvance),
+		}); err != nil {
+			return om.Invoice{}, &PermanentError{Err: fmt.Errorf("charge %q: encode price: %w", ch.Name, err)}
 		}
-		id, price := ch.LineID, ch.Price
+		rateCard := &om.InvoiceUsageBasedRateCard{Price: &price}
+		if ch.DiscountPercentage > 0 {
+			rateCard.Discounts = &om.BillingDiscounts{
+				Percentage: &om.BillingDiscountPercentage{Percentage: models.NewPercentage(int(ch.DiscountPercentage))},
+			}
+		}
+		// A discount refers to its line by id, so every line has one.
+		id := ulid.Make().String()
 		lines = append(lines, om.InvoiceSimulationLine{
-			Id:          &id,
-			Name:        ch.Name,
-			Description: ch.Description,
-			InvoiceAt:   ch.InvoiceAt,
-			Period:      ch.Period,
-			Quantity:    "1",
-			RateCard: &om.InvoiceUsageBasedRateCard{
-				Price:     &price,
-				Discounts: billingDiscounts(ch.Discounts),
-			},
+			Id:        &id,
+			Name:      ch.Name,
+			InvoiceAt: ch.Period.From,
+			Period:    ch.Period,
+			Quantity:  "1",
+			RateCard:  rateCard,
 		})
 	}
 	resp, err := c.api.SimulateInvoiceWithResponse(ctx, string(customerID), om.SimulateInvoiceJSONRequestBody{
-		Currency: charges[0].Currency,
+		Currency: currency,
 		Lines:    lines,
 	})
 	if err != nil {
@@ -192,67 +187,9 @@ func (c *client) PreviewInvoice(ctx context.Context, customerID CustomerID, char
 	return *resp.JSON200, nil
 }
 
-// billingDiscounts converts a subscription item's discounts to the form an
-// invoice line takes.
-func billingDiscounts(d *om.Discounts) *om.BillingDiscounts {
-	if d == nil || (d.Percentage == nil && d.Usage == nil) {
-		return nil
-	}
-	out := &om.BillingDiscounts{}
-	if d.Percentage != nil {
-		out.Percentage = &om.BillingDiscountPercentage{Percentage: d.Percentage.Percentage}
-	}
-	if d.Usage != nil {
-		out.Usage = &om.BillingDiscountUsage{Quantity: d.Usage.Quantity}
-	}
-	return out
-}
-
-// InvoiceFixedCharges invoices the lines lineIDs now, as of asOf, and
-// returns the invoices OpenMeter created (usually one). Only those lines
-// are invoiced: usage keeps accruing to the normal cycle. Returns
-// ErrNothingToInvoice when none of them is billable, for example because
-// they were invoiced already.
-func (c *client) InvoiceFixedCharges(ctx context.Context, customerID CustomerID, lineIDs []string, asOf time.Time) ([]om.Invoice, error) {
-	if len(lineIDs) == 0 {
-		return nil, ErrNothingToInvoice
-	}
-	ids := append([]string(nil), lineIDs...)
-	resp, err := c.api.InvoicePendingLinesActionWithResponse(ctx, om.InvoicePendingLinesActionJSONRequestBody{
-		CustomerId: string(customerID),
-		AsOf:       &asOf,
-		Filters:    &om.InvoicePendingLinesActionFiltersInput{LineIds: &ids},
-	})
-	if err != nil {
-		return nil, classify(nil, nil, err)
-	}
-	if resp.StatusCode() == http.StatusBadRequest && isNoLinesToInvoice(resp.Body) {
-		return nil, ErrNothingToInvoice
-	}
-	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
-		return nil, err
-	}
-	if resp.JSON201 == nil || len(*resp.JSON201) == 0 {
-		return nil, ErrNothingToInvoice
-	}
-	return *resp.JSON201, nil
-}
-
-// GetInvoiceWithLines reads an invoice with its lines.
-func (c *client) GetInvoiceWithLines(ctx context.Context, id string) (om.Invoice, error) {
-	resp, err := c.api.GetInvoiceWithResponse(ctx, id, &om.GetInvoiceParams{
-		Expand: &[]om.InvoiceExpand{om.InvoiceExpandLines},
-	})
-	if err != nil {
-		return om.Invoice{}, classify(nil, nil, err)
-	}
-	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
-		return om.Invoice{}, err
-	}
-	if resp.JSON200 == nil {
-		return om.Invoice{}, &PermanentError{Err: fmt.Errorf("get invoice %q: empty response body", id)}
-	}
-	return *resp.JSON200, nil
+// MonthlyPeriod is the first monthly service period starting at start.
+func MonthlyPeriod(start time.Time) om.Period {
+	return om.Period{From: start, To: start.AddDate(0, 1, 0)}
 }
 
 // AmountBeforeTax is what totals charge before any tax added on top: the
@@ -260,6 +197,21 @@ func (c *client) GetInvoiceWithLines(ctx context.Context, id string) (om.Invoice
 // calculates it, so this is usually the total.
 func AmountBeforeTax(totals om.InvoiceTotals) (string, error) {
 	return subtractDecimal(totals.Total, totals.TaxesExclusiveTotal)
+}
+
+// AddDecimals sums decimal strings, with as many decimal places as the most
+// precise of them. An empty string counts as zero.
+func AddDecimals(values ...string) (string, error) {
+	sum, scale := new(big.Rat), 0
+	for _, v := range values {
+		r, s, err := parseDecimal(v)
+		if err != nil {
+			return "", err
+		}
+		sum.Add(sum, r)
+		scale = max(scale, s)
+	}
+	return sum.FloatString(scale), nil
 }
 
 // subtractDecimal returns a-b for decimal strings, with as many decimal

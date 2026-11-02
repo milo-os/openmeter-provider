@@ -6,19 +6,19 @@ spec:
   description: |
     A bare metal contract end to end against a real OpenMeter instance:
 
-      - a BillingEntitlement with a contract starting today subscribes the
-        account straight away, billing on today's day of the month rather
-        than the 1st;
-      - a Preview InvoiceRequest prices the setup fee and the first month
-        (OpenMeter's invoice simulation) and creates no invoice;
-      - an Issue InvoiceRequest invoices exactly those charges now, matching
-        the preview, and names the Invoice it becomes;
-      - a second Issue finds nothing left to invoice.
+      - a contract starting tomorrow isn't subscribed yet, and a Preview
+        works out its first invoice from the Offer (setup fee and first
+        month) without anything reaching OpenMeter's invoices;
+      - Issue is unsupported: OpenMeter sends the first invoice itself;
+      - a contract starting today is subscribed straight away, billing on
+        today's day of the month, and OpenMeter invoices the setup fee and
+        first month on its own;
+      - a Preview then shows what comes next.
 
     Billing's operator, webhooks and stripe-provider do not run in e2e: the
     Offer is published with ../offer/publish.sh and the payment method chain
     is fabricated with status patches, as in the billingentitlement suite.
-    The issued invoice stays open, so the account is released with the
+    The first invoice stays open, so the account is released with the
     force-delete annotation at the end.
   namespace: openmeter-system
   steps:
@@ -90,11 +90,34 @@ spec:
             file: billingaccount-payment-method-ready.yaml
             subresource: status
 
-    - name: a contract starting today subscribes now, billing on its day
+    - name: a contract starting tomorrow waits, and its first invoice can be previewed
       try:
         - script:
             timeout: 10s
-            content: bash entitlement.sh
+            content: bash entitlement.sh tomorrow
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              metadata:
+                name: e2e-ir-entitlement
+              status:
+                (conditions[?type == 'OpenMeterSubscriptionSynced']):
+                  - status: "False"
+                    reason: ContractNotStarted
+        - script:
+            timeout: 150s
+            content: bash preview-first-invoice.sh
+        - script:
+            timeout: 150s
+            content: bash issue-unsupported.sh
+
+    - name: a contract starting today is subscribed and invoiced straight away
+      try:
+        - script:
+            timeout: 90s
+            content: bash restart-today.sh
         - assert:
             # The entitlement retries a refused subscription every 30s.
             timeout: 100s
@@ -111,31 +134,18 @@ spec:
             content: bash expect-subscription.sh
         - script:
             timeout: 100s
-            content: bash wait-charges.sh
-
-    - name: a Preview prices the charges without invoicing
-      try:
-        - script:
-            timeout: 150s
-            content: bash preview.sh
-
-    - name: an Issue invoices exactly the previewed charges
-      try:
-        - script:
-            timeout: 150s
-            content: bash issue.sh
+            content: bash first-invoice.sh
       catch:
-        # The invoice may be open, which keeps the account from deleting.
+        # The first invoice may be open, which keeps the account from deleting.
         - script:
             content: bash release-account.sh
 
-    - name: a second Issue finds nothing to invoice
+    - name: a Preview then shows what comes next
       try:
         - script:
             timeout: 150s
-            content: bash reissue.sh
+            content: bash preview-next-invoice.sh
       catch:
-        # The invoice may be open, which keeps the account from deleting.
         - script:
             content: bash release-account.sh
 

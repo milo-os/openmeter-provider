@@ -35,36 +35,24 @@ import (
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )
 
-const (
-	invoiceRequestControllerName = "invoicerequest"
-
-	// IssueAttemptedAtAnnotation records, on an Issue InvoiceRequest, when
-	// this provider asked OpenMeter to invoice its charges (RFC 3339). It's
-	// written before the call, so a retry after a crash between OpenMeter
-	// creating the invoice and the request recording it can find that
-	// invoice instead of reporting nothing left to invoice.
-	IssueAttemptedAtAnnotation = "openmeter.miloapis.com/issue-attempted-at"
-
-	// issueRecoveryWindow is how long before an attempt an invoice may have
-	// been created and still count as the attempt's, allowing for clock
-	// skew between this provider and OpenMeter.
-	issueRecoveryWindow = time.Minute
-
-	// EventReasonInvoiceIssued is emitted when an Issue request creates an
-	// invoice.
-	EventReasonInvoiceIssued = "InvoiceIssued"
-)
+const invoiceRequestControllerName = "invoicerequest"
 
 // InvoiceRequestReconciler fulfils InvoiceRequests for billing accounts
 // this provider invoices, writing only status.
 //
-//   - Preview: prices the account's fixed charges billable now (its Offer's
-//     OneTime and Recurring pricings) with OpenMeter's invoice simulation,
-//     creating nothing.
-//   - Issue: invoices exactly those charges now, leaving usage on the
-//     normal cycle. The invoice is projected to a Milo Invoice like any
-//     other, once OpenMeter issues it; status.invoiceRef names it from the
-//     start, since Invoice names are deterministic (see invoiceName).
+// OpenMeter invoices in-advance flat fees by itself as soon as they're due,
+// so a contract's setup fee and first month are invoiced, and sent, the
+// moment its subscription starts. There's nothing for staff to issue, so
+// Issue requests fail as Unsupported. A Preview shows what the account
+// will be invoiced next, for its fixed charges (its Offer's OneTime and
+// Recurring pricings):
+//
+//   - before a contract starts: the first invoice, worked out from the
+//     Offer and the contract's start date with OpenMeter's invoice
+//     simulation, so staff can check it before anything reaches the
+//     customer;
+//   - otherwise: the draft invoice waiting to be issued, if there is one,
+//     or else the charges waiting for later periods, priced by OpenMeter.
 //
 // A request is done once its phase is Succeeded or Failed; it's never
 // revisited after that.
@@ -76,9 +64,11 @@ type InvoiceRequestReconciler struct {
 	Now func() time.Time
 }
 
-// +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoicerequests,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoicerequests,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoicerequests/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch
+// +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingentitlements,verbs=get;list;watch
+// +kubebuilder:rbac:groups=billing.miloapis.com,resources=offers,verbs=get;list;watch
 
 // Reconcile fulfils a single InvoiceRequest.
 func (r *InvoiceRequestReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
@@ -95,6 +85,11 @@ func (r *InvoiceRequestReconciler) Reconcile(ctx context.Context, req reconcile.
 		return ctrl.Result{}, nil
 	}
 	ctx = log.IntoContext(ctx, logger.WithValues("billingAccount", ir.Spec.BillingAccountRef.Name, "mode", ir.Spec.Mode))
+
+	if ir.Spec.Mode != billingv1alpha1.InvoiceRequestModePreview {
+		return ctrl.Result{}, r.fail(ctx, &ir, billingv1alpha1.InvoiceRequestReasonUnsupported, fmt.Sprintf(
+			"%s isn't supported: OpenMeter invoices one-time and recurring charges by itself as soon as they're due, so a contract's first invoice is sent when it starts", ir.Spec.Mode))
+	}
 
 	if ir.Status.Phase == "" {
 		ir.Status.Phase = billingv1alpha1.InvoiceRequestPhasePending
@@ -117,169 +112,149 @@ func (r *InvoiceRequestReconciler) Reconcile(ctx context.Context, req reconcile.
 	if err != nil {
 		if errors.Is(err, openmeter.ErrCustomerNotFound) {
 			return ctrl.Result{}, r.fail(ctx, &ir, billingv1alpha1.InvoiceRequestReasonFailed,
-				fmt.Sprintf("BillingAccount %q has no OpenMeter customer yet, so it has nothing to invoice", account.Name))
+				fmt.Sprintf("BillingAccount %q has no OpenMeter customer yet", account.Name))
 		}
 		return r.openMeterFailed(ctx, &ir, fmt.Errorf("get customer: %w", err))
 	}
 	customerID := openmeter.CustomerID(customer.Id)
 
-	switch ir.Spec.Mode {
-	case billingv1alpha1.InvoiceRequestModePreview:
-		return r.preview(ctx, &ir, &account, customerID)
-	case billingv1alpha1.InvoiceRequestModeIssue:
-		return r.issue(ctx, &ir, &account, customerID)
+	be, err := r.entitlementFor(ctx, &account)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	// Billing's CRD only admits Preview and Issue.
-	return ctrl.Result{}, r.fail(ctx, &ir, billingv1alpha1.InvoiceRequestReasonUnsupported,
-		fmt.Sprintf("mode %q is not supported", ir.Spec.Mode))
+	if be != nil && be.Spec.Contract != nil {
+		if startsAt := be.Spec.Contract.StartsAt.UTC(); r.now().Before(startsAt) {
+			return r.previewFirstInvoice(ctx, &ir, &account, be, customerID, startsAt)
+		}
+	}
+	return r.previewNextInvoice(ctx, &ir, &account, customerID)
 }
 
-// preview prices the account's billable fixed charges without creating
-// anything. No charges is a successful, empty preview.
-func (r *InvoiceRequestReconciler) preview(
+// previewFirstInvoice works out a contract's first invoice before it
+// starts, from its Offer's flat pricings.
+func (r *InvoiceRequestReconciler) previewFirstInvoice(
 	ctx context.Context,
 	ir *billingv1alpha1.InvoiceRequest,
 	account *billingv1alpha1.BillingAccount,
+	be *billingv1alpha1.BillingEntitlement,
 	customerID openmeter.CustomerID,
+	startsAt time.Time,
 ) (ctrl.Result, error) {
-	charges, err := r.OpenMeterClient.PendingFixedCharges(ctx, customerID, r.now())
-	if err != nil {
-		return r.openMeterFailed(ctx, ir, fmt.Errorf("list fixed charges: %w", err))
+	var offer billingv1alpha1.Offer
+	if err := r.Get(ctx, types.NamespacedName{Name: be.Spec.OfferRef.Name}, &offer); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("get offer: %w", err)
+		}
+		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed,
+			fmt.Sprintf("Offer %q not found", be.Spec.OfferRef.Name))
 	}
+	starts := startsAt.Format(time.DateOnly)
+
+	charges := contractCharges(&offer, startsAt)
 	if len(charges) == 0 {
-		return ctrl.Result{}, r.succeed(ctx, ir, account.Spec.CurrencyCode, nil, "0", nil,
-			"No fixed charges are waiting to be invoiced")
+		return ctrl.Result{}, r.succeed(ctx, ir, account.Spec.CurrencyCode, nil, "0",
+			fmt.Sprintf("Offer %q has no one-time or recurring charges to invoice when the contract starts on %s", offer.Name, starts))
 	}
-	inv, err := r.OpenMeterClient.PreviewInvoice(ctx, customerID, charges)
+	inv, err := r.OpenMeterClient.PreviewInvoice(ctx, customerID, account.Spec.CurrencyCode, charges)
 	if err != nil {
-		return r.openMeterFailed(ctx, ir, fmt.Errorf("preview invoice: %w", err))
+		return r.openMeterFailed(ctx, ir, fmt.Errorf("preview first invoice: %w", err))
 	}
-	lines, total, err := invoiceRequestLines(inv)
+	lines, total, err := requestLines(openmeter.LineItems(inv))
 	if err != nil {
 		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
 	}
-	return ctrl.Result{}, r.succeed(ctx, ir, inv.Currency, lines, total, nil,
-		fmt.Sprintf("Previewed %d fixed charges", len(lines)))
+	return ctrl.Result{}, r.succeed(ctx, ir, inv.Currency, lines, total,
+		fmt.Sprintf("The first invoice, sent when the contract starts on %s", starts))
 }
 
-// issue invoices the account's billable fixed charges now.
-func (r *InvoiceRequestReconciler) issue(
+// previewNextInvoice shows the draft invoice waiting to be issued, or else
+// the fixed charges waiting for later periods.
+func (r *InvoiceRequestReconciler) previewNextInvoice(
 	ctx context.Context,
 	ir *billingv1alpha1.InvoiceRequest,
 	account *billingv1alpha1.BillingAccount,
 	customerID openmeter.CustomerID,
 ) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
-	// A previous attempt may have created the invoice before failing to
-	// record it.
-	if attempted, ok := issueAttemptedAt(ir); ok {
-		inv, found, err := r.invoiceCreatedSince(ctx, customerID, attempted.Add(-issueRecoveryWindow))
+	draft, err := r.OpenMeterClient.DraftInvoice(ctx, customerID)
+	if err != nil {
+		return r.openMeterFailed(ctx, ir, fmt.Errorf("get draft invoice: %w", err))
+	}
+	if draft != nil {
+		lines, total, err := requestLines(openmeter.LineItems(*draft))
 		if err != nil {
-			return r.openMeterFailed(ctx, ir, err)
+			return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
 		}
-		if found {
-			logger.Info("recovered the invoice an earlier attempt created", "invoiceID", inv.Id)
-			return r.recordIssued(ctx, ir, account, inv)
-		}
+		return ctrl.Result{}, r.succeed(ctx, ir, draft.Currency, lines, total,
+			fmt.Sprintf("Draft invoice %s, which OpenMeter issues and sends when its collection period ends", draft.Id))
 	}
 
-	now := r.now()
-	charges, err := r.OpenMeterClient.PendingFixedCharges(ctx, customerID, now)
+	upcoming, err := r.OpenMeterClient.UpcomingFixedCharges(ctx, customerID)
 	if err != nil {
-		return r.openMeterFailed(ctx, ir, fmt.Errorf("list fixed charges: %w", err))
+		return r.openMeterFailed(ctx, ir, fmt.Errorf("list upcoming fixed charges: %w", err))
 	}
-	if len(charges) == 0 {
-		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonNothingToInvoice,
-			"No fixed charges are waiting to be invoiced")
+	if len(upcoming) == 0 {
+		return ctrl.Result{}, r.succeed(ctx, ir, account.Spec.CurrencyCode, nil, "0",
+			"No one-time or recurring charges are waiting to be invoiced")
 	}
-
-	// Record the attempt first; Update fails on a stale copy, so two
-	// reconciles can't both go on to invoice.
-	if ir.Annotations == nil {
-		ir.Annotations = map[string]string{}
-	}
-	ir.Annotations[IssueAttemptedAtAnnotation] = now.UTC().Format(time.RFC3339)
-	if err := r.Update(ctx, ir); err != nil {
-		return ctrl.Result{}, fmt.Errorf("record issue attempt: %w", err)
-	}
-
-	lineIDs := make([]string, 0, len(charges))
-	for _, ch := range charges {
-		lineIDs = append(lineIDs, ch.LineID)
-	}
-	invoices, err := r.OpenMeterClient.InvoiceFixedCharges(ctx, customerID, lineIDs, now)
+	lines, total, err := requestLines(upcoming)
 	if err != nil {
-		if errors.Is(err, openmeter.ErrNothingToInvoice) {
-			return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonNothingToInvoice,
-				"No fixed charges are waiting to be invoiced")
-		}
-		return r.openMeterFailed(ctx, ir, fmt.Errorf("invoice fixed charges: %w", err))
+		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
 	}
-	inv, err := r.OpenMeterClient.GetInvoiceWithLines(ctx, invoices[0].Id)
-	if err != nil {
-		return r.openMeterFailed(ctx, ir, fmt.Errorf("read issued invoice: %w", err))
-	}
-	return r.recordIssued(ctx, ir, account, inv)
+	return ctrl.Result{}, r.succeed(ctx, ir, upcoming[0].Currency, lines, total,
+		"One-time and recurring charges waiting for later billing periods")
 }
 
-// recordIssued completes an Issue request with the invoice it created.
-func (r *InvoiceRequestReconciler) recordIssued(
-	ctx context.Context,
-	ir *billingv1alpha1.InvoiceRequest,
-	account *billingv1alpha1.BillingAccount,
-	inv om.Invoice,
-) (ctrl.Result, error) {
-	lines, total, err := invoiceRequestLines(inv)
-	if err != nil {
-		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed,
-			fmt.Sprintf("OpenMeter invoice %s was created, but its lines can't be read: %v", inv.Id, err))
+// entitlementFor returns the account's BillingEntitlement that isn't being
+// deleted, or nil. Billing admits one per account.
+func (r *InvoiceRequestReconciler) entitlementFor(ctx context.Context, account *billingv1alpha1.BillingAccount) (*billingv1alpha1.BillingEntitlement, error) {
+	var list billingv1alpha1.BillingEntitlementList
+	if err := r.List(ctx, &list, client.InNamespace(account.Namespace),
+		client.MatchingFields{EntitlementBillingAccountRefField: account.Name}); err != nil {
+		return nil, fmt.Errorf("list billing entitlements for account: %w", err)
 	}
-	name := invoiceName(account.Name, inv)
-	msg := fmt.Sprintf("Created OpenMeter invoice %s; it appears as Invoice %s once OpenMeter issues it", inv.Id, name)
-	if err := r.succeed(ctx, ir, inv.Currency, lines, total, &billingv1alpha1.InvoiceRequestInvoiceRef{Name: name}, msg); err != nil {
-		return ctrl.Result{}, err
+	for i := range list.Items {
+		if list.Items[i].DeletionTimestamp.IsZero() {
+			return &list.Items[i], nil
+		}
 	}
-	r.event(ir, "Normal", EventReasonInvoiceIssued, msg)
-	return ctrl.Result{}, nil
+	return nil, nil
 }
 
-// invoiceCreatedSince returns the customer's newest non-gathering invoice
-// created at or after since, if any.
-func (r *InvoiceRequestReconciler) invoiceCreatedSince(ctx context.Context, customerID openmeter.CustomerID, since time.Time) (om.Invoice, bool, error) {
-	invoices, err := r.OpenMeterClient.ListInvoices(ctx, customerID)
-	if err != nil {
-		return om.Invoice{}, false, fmt.Errorf("list invoices: %w", err)
-	}
-	// ListInvoices is newest first.
-	for _, inv := range invoices {
-		if inv.Status == om.InvoiceStatusGathering || inv.CreatedAt.Before(since) {
+// contractCharges are the flat fees a contract starting at startsAt is
+// first invoiced for: each OneTime pricing, and the first month of each
+// Recurring one. Names and discounts match the Offer's plan (see
+// addFlatFee and resolveDiscount).
+func contractCharges(offer *billingv1alpha1.Offer, startsAt time.Time) []openmeter.PlannedCharge {
+	var charges []openmeter.PlannedCharge
+	for _, sp := range offer.Spec.ServicePricings {
+		var period om.Period
+		switch sp.Spec.ChargeType {
+		case billingv1alpha1.ChargeTypeOneTime:
+			period = om.Period{From: startsAt, To: startsAt}
+		case billingv1alpha1.ChargeTypeRecurring:
+			period = openmeter.MonthlyPeriod(startsAt)
+		default:
 			continue
 		}
-		full, err := r.OpenMeterClient.GetInvoiceWithLines(ctx, inv.Id)
-		if err != nil {
-			return om.Invoice{}, false, fmt.Errorf("read invoice %s: %w", inv.Id, err)
+		name := sp.Spec.DisplayName
+		if name == "" {
+			name = sp.Name
 		}
-		return full, true, nil
+		charge := openmeter.PlannedCharge{Name: name, Period: period, Amount: sp.Spec.Amount}
+		if sp.Discount != nil {
+			charge.DiscountPercentage = sp.Discount.Percentage
+		}
+		charges = append(charges, charge)
 	}
-	return om.Invoice{}, false, nil
+	return charges
 }
 
-// invoiceRequestLines maps an OpenMeter invoice's lines to an
-// InvoiceRequest's, with their total, each before tax.
-func invoiceRequestLines(inv om.Invoice) ([]billingv1alpha1.InvoiceRequestLine, string, error) {
-	total, err := openmeter.AmountBeforeTax(inv.Totals)
-	if err != nil {
-		return nil, "", fmt.Errorf("invoice total: %w", err)
-	}
-	if inv.Lines == nil {
-		return nil, total, nil
-	}
-	lines := make([]billingv1alpha1.InvoiceRequestLine, 0, len(*inv.Lines))
-	for _, line := range *inv.Lines {
-		if line.DeletedAt != nil {
-			continue
-		}
+// requestLines maps OpenMeter invoice lines to an InvoiceRequest's, with
+// their total, each before tax.
+func requestLines(in []om.InvoiceLine) ([]billingv1alpha1.InvoiceRequestLine, string, error) {
+	lines := make([]billingv1alpha1.InvoiceRequestLine, 0, len(in))
+	amounts := make([]string, 0, len(in))
+	for _, line := range in {
 		amount, err := openmeter.AmountBeforeTax(line.Totals)
 		if err != nil {
 			return nil, "", fmt.Errorf("line %s: %w", line.Id, err)
@@ -293,18 +268,13 @@ func invoiceRequestLines(inv om.Invoice) ([]billingv1alpha1.InvoiceRequestLine, 
 			}
 		}
 		lines = append(lines, out)
+		amounts = append(amounts, amount)
+	}
+	total, err := openmeter.AddDecimals(amounts...)
+	if err != nil {
+		return nil, "", fmt.Errorf("total: %w", err)
 	}
 	return lines, total, nil
-}
-
-// issueAttemptedAt reads IssueAttemptedAtAnnotation.
-func issueAttemptedAt(ir *billingv1alpha1.InvoiceRequest) (time.Time, bool) {
-	v, ok := ir.Annotations[IssueAttemptedAtAnnotation]
-	if !ok {
-		return time.Time{}, false
-	}
-	t, err := time.Parse(time.RFC3339, v)
-	return t, err == nil
 }
 
 func invoiceRequestDone(ir *billingv1alpha1.InvoiceRequest) bool {
@@ -312,28 +282,25 @@ func invoiceRequestDone(ir *billingv1alpha1.InvoiceRequest) bool {
 		ir.Status.Phase == billingv1alpha1.InvoiceRequestPhaseFailed
 }
 
-// succeed completes the request.
+// succeed completes the request with a preview.
 func (r *InvoiceRequestReconciler) succeed(
 	ctx context.Context,
 	ir *billingv1alpha1.InvoiceRequest,
 	currency string,
 	lines []billingv1alpha1.InvoiceRequestLine,
 	total string,
-	invoiceRef *billingv1alpha1.InvoiceRequestInvoiceRef,
 	msg string,
 ) error {
 	ir.Status.CurrencyCode = currency
 	ir.Status.Lines = lines
 	ir.Status.Total = total
-	ir.Status.InvoiceRef = invoiceRef
-	return r.complete(ctx, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, metav1.ConditionTrue,
-		billingv1alpha1.InvoiceRequestReasonSucceeded, msg)
+	return r.complete(ctx, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded, msg)
 }
 
 // fail completes the request unsuccessfully. A request is never retried
 // once failed: staff create a new one.
 func (r *InvoiceRequestReconciler) fail(ctx context.Context, ir *billingv1alpha1.InvoiceRequest, reason, msg string) error {
-	if err := r.complete(ctx, ir, billingv1alpha1.InvoiceRequestPhaseFailed, metav1.ConditionTrue, reason, msg); err != nil {
+	if err := r.complete(ctx, ir, billingv1alpha1.InvoiceRequestPhaseFailed, reason, msg); err != nil {
 		return err
 	}
 	r.event(ir, "Warning", reason, msg)
@@ -344,7 +311,6 @@ func (r *InvoiceRequestReconciler) complete(
 	ctx context.Context,
 	ir *billingv1alpha1.InvoiceRequest,
 	phase billingv1alpha1.InvoiceRequestPhase,
-	status metav1.ConditionStatus,
 	reason, msg string,
 ) error {
 	now := metav1.NewTime(r.now())
@@ -353,7 +319,7 @@ func (r *InvoiceRequestReconciler) complete(
 	ir.Status.ObservedGeneration = ir.Generation
 	apimeta.SetStatusCondition(&ir.Status.Conditions, metav1.Condition{
 		Type:               billingv1alpha1.InvoiceRequestConditionCompleted,
-		Status:             status,
+		Status:             metav1.ConditionTrue,
 		Reason:             reason,
 		Message:            msg,
 		ObservedGeneration: ir.Generation,
