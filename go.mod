@@ -2,6 +2,8 @@ module go.miloapis.com/openmeter-provider
 
 go 1.26.0
 
+toolchain go1.27.3
+
 require (
 	github.com/alpacahq/alpacadecimal v0.0.9
 	github.com/cloudevents/sdk-go/v2 v2.16.2
