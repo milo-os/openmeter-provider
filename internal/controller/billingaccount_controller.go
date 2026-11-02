@@ -339,9 +339,13 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	finalizeResult, finalizeErr := r.Finalizers.Finalize(ctx, &account)
 	if finalizeResult.Updated {
 		if err := r.Update(ctx, &account); err != nil {
-			if apierrors.IsConflict(err) {
+			switch {
+			case apierrors.IsConflict(err):
 				logger.Info("conflict persisting finalizer change; requeueing")
 				return ctrl.Result{Requeue: true}, nil
+			case apierrors.IsNotFound(err):
+				// Our finalizer was the last one; the object is gone.
+				return ctrl.Result{}, nil
 			}
 			return ctrl.Result{}, fmt.Errorf("persisting finalizer change: %w", err)
 		}

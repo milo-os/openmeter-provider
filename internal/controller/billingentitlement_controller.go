@@ -302,6 +302,10 @@ func (r *BillingEntitlementReconciler) reconcileDelete(
 
 	controllerutil.RemoveFinalizer(be, SubscriptionFinalizer)
 	if err := r.Update(ctx, be); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Ours was the last finalizer; the object is gone.
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 	}
 	return ctrl.Result{}, nil
