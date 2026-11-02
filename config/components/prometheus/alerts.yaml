@@ -32,13 +32,25 @@ spec:
               CrashLoopBackOff for 5 minutes. Check logs:
               kubectl logs -n {{ $labels.namespace }} {{ $labels.pod }} -c {{ $labels.container }} --previous
 
+        # Compares available replicas with the desired count rather than
+        # using kube_deployment_status_replicas_unavailable, which also counts
+        # the surge pods of a rolling update. A rollout whose new pods are
+        # slow to start (e.g. pulling a new image) would otherwise page while
+        # every desired replica is still serving.
         - alert: OpenMeterProviderDeploymentUnavailable
           expr: |
-            kube_deployment_status_replicas_unavailable{
+            kube_deployment_spec_replicas{
               job="kube-state-metrics",
               namespace="openmeter-system",
               deployment=~"openmeter-provider-manager|submission-consumer|openmeter-usage-apiserver"
-            } > 0
+            }
+            -
+            kube_deployment_status_replicas_available{
+              job="kube-state-metrics",
+              namespace="openmeter-system",
+              deployment=~"openmeter-provider-manager|submission-consumer|openmeter-usage-apiserver"
+            }
+            > 0
           for: 5m
           labels:
             severity: critical

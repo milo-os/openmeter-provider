@@ -28,14 +28,22 @@ tests:
   - name: Deployment unavailable replicas alert fires after 5m for both deployments
     interval: 1m
     input_series:
-      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-provider-manager"}'
+      - series: 'kube_deployment_spec_replicas{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-provider-manager"}'
+        values: '2+0x10'
+      - series: 'kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-provider-manager"}'
         values: '1+0x10'
-      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="submission-consumer"}'
+      - series: 'kube_deployment_spec_replicas{job="kube-state-metrics",namespace="openmeter-system",deployment="submission-consumer"}'
         values: '1+0x10'
-      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-usage-apiserver"}'
+      - series: 'kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="openmeter-system",deployment="submission-consumer"}'
+        values: '0+0x10'
+      - series: 'kube_deployment_spec_replicas{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-usage-apiserver"}'
+        values: '2+0x10'
+      - series: 'kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-usage-apiserver"}'
         values: '1+0x10'
-      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-api"}'
+      - series: 'kube_deployment_spec_replicas{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-api"}'
         values: '1+0x10'
+      - series: 'kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-api"}'
+        values: '0+0x10'
     promql_expr_test:
       - expr: ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing"}
         eval_time: 4m
@@ -49,6 +57,22 @@ tests:
             value: 1
           - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="openmeter-usage-apiserver",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
             value: 1
+
+  # A rolling update surges a new pod that cannot start (here, its image is
+  # not pullable yet) while every desired replica keeps serving.
+  - name: Deployment unavailable alert stays quiet during a slow rolling update
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_spec_replicas{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-provider-manager"}'
+        values: '2+0x15'
+      - series: 'kube_deployment_status_replicas_available{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-provider-manager"}'
+        values: '2+0x15'
+      - series: 'kube_deployment_status_replicas_unavailable{job="kube-state-metrics",namespace="openmeter-system",deployment="openmeter-provider-manager"}'
+        values: '1+0x15'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing"}
+        eval_time: 15m
+        exp_samples: []
 
   - name: Metrics scrape failing alert fires after 10m of failed scrapes
     interval: 1m
