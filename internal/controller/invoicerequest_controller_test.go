@@ -218,6 +218,26 @@ func TestInvoiceRequest_PreviewAfterTheStart(t *testing.T) {
 		}
 	})
 
+	t.Run("a draft with nothing to pay gives way to the charges for later periods", func(t *testing.T) {
+		usage := []om.InvoiceLine{flatLine("Compute vCPU", "0", invoiceRequestNow, invoiceRequestNow)}
+		omc := &fakeInvoicingClient{
+			draft: &om.Invoice{Id: "01JUSAGE", Currency: "USD", Lines: &usage},
+			upcoming: []om.InvoiceLine{
+				flatLine("Dedicated server", "900", time.Date(2026, time.December, 2, 0, 0, 0, 0, time.UTC), time.Date(2027, time.January, 2, 0, 0, 0, 0, time.UTC)),
+			},
+		}
+		r := newInvoiceRequestReconciler(t, omc, usdAccount(), contractOffer(), started, invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+
+		ir, err := reconcileInvoiceRequest(r)
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		c := assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
+		if ir.Status.Total != "900" || len(ir.Status.Lines) != 1 || c.Message != "One-time and recurring charges waiting for later billing periods" {
+			t.Errorf("status = %+v, message %q; want next month's fee, not the empty draft", ir.Status, c.Message)
+		}
+	})
+
 	t.Run("the charges for later periods", func(t *testing.T) {
 		omc := &fakeInvoicingClient{upcoming: []om.InvoiceLine{
 			flatLine("Dedicated server", "900", time.Date(2026, time.December, 2, 0, 0, 0, 0, time.UTC), time.Date(2027, time.January, 2, 0, 0, 0, 0, time.UTC)),

@@ -161,7 +161,10 @@ func (r *InvoiceRequestReconciler) previewFirstInvoice(
 }
 
 // previewNextInvoice shows the draft invoice waiting to be issued, or else
-// the fixed charges waiting for later periods.
+// the fixed charges waiting for later periods. A draft with nothing to pay is
+// passed over: moving an account onto a contract ends its old subscription,
+// whose last hours of usage wait in a draft for the collection period, often
+// at zero, while the contract's own fees have already been invoiced.
 func (r *InvoiceRequestReconciler) previewNextInvoice(
 	ctx context.Context,
 	ir *billingv1alpha1.InvoiceRequest,
@@ -177,8 +180,14 @@ func (r *InvoiceRequestReconciler) previewNextInvoice(
 		if err != nil {
 			return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
 		}
-		return ctrl.Result{}, r.succeed(ctx, ir, draft.Currency, lines, total,
-			fmt.Sprintf("Draft invoice %s, which OpenMeter issues and sends when its collection period ends", draft.Id))
+		zero, err := openmeter.IsZeroDecimal(total)
+		if err != nil {
+			return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
+		}
+		if !zero {
+			return ctrl.Result{}, r.succeed(ctx, ir, draft.Currency, lines, total,
+				fmt.Sprintf("Draft invoice %s, which OpenMeter issues and sends when its collection period ends", draft.Id))
+		}
 	}
 
 	upcoming, err := r.OpenMeterClient.UpcomingFixedCharges(ctx, customerID)

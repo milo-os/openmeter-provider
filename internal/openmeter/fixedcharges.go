@@ -170,6 +170,16 @@ func AddDecimals(values ...string) (string, error) {
 	return sum.FloatString(scale), nil
 }
 
+// IsZeroDecimal reports whether a decimal string is zero. An empty string
+// counts as zero.
+func IsZeroDecimal(value string) (bool, error) {
+	r, _, err := parseDecimal(value)
+	if err != nil {
+		return false, err
+	}
+	return r.Sign() == 0, nil
+}
+
 // subtractDecimal returns a-b for decimal strings, with as many decimal
 // places as the more precise of the two. An empty string counts as zero.
 func subtractDecimal(a, b string) (string, error) {
