@@ -142,13 +142,13 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 				}
 				// Every Invoice links to its Stripe page, so the key is
 				// required: fail now rather than run without the links.
-				invoiceLinks, err := stripe.NewInvoiceLinks(stripeAPIKeyFile)
+				stripeInvoices, err := stripe.NewInvoices(stripeAPIKeyFile)
 				if err != nil {
 					return fmt.Errorf("--stripe-api-key-file: %w", err)
 				}
 				if err = (&controller.BillingAccountReconciler{
 					OpenMeterClient: openMeterClient,
-					InvoiceLinks:    invoiceLinks,
+					Stripe:          stripeInvoices,
 				}).SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("creating BillingAccount controller: %w", err)
 				}

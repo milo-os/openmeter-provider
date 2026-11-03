@@ -21,8 +21,10 @@ import (
 	om "github.com/openmeterio/openmeter/api/client/go"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
+	stripev1alpha1 "go.miloapis.com/stripe-provider/api/v1alpha1"
 
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
+	"go.miloapis.com/openmeter-provider/internal/stripe"
 )
 
 func TestMapInvoiceStatus(t *testing.T) {
@@ -268,6 +270,9 @@ func newInvoiceSyncReconciler(t *testing.T, invoices []om.Invoice, objs ...clien
 	if err := billingv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
+	if err := stripev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
 	account := baseBillingAccount()
 	k8s := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -277,7 +282,7 @@ func newInvoiceSyncReconciler(t *testing.T, invoices []om.Invoice, objs ...clien
 	r := &BillingAccountReconciler{
 		Client:          k8s,
 		OpenMeterClient: &invoiceListOpenMeterClient{invoices: invoices},
-		InvoiceLinks:    &fakeInvoiceLinks{},
+		Stripe:          &fakeStripe{},
 	}
 	return r, k8s, account
 }
@@ -467,14 +472,55 @@ func TestReconcileInvoices_IgnoresOtherAccountsAndUnannotatedInvoices(t *testing
 	}
 }
 
-// fakeInvoiceLinks serves Stripe invoice links by Stripe invoice id.
-type fakeInvoiceLinks struct {
+// fakeStripe serves Stripe invoice links by Stripe invoice id, the
+// invoices of a customer, and records the metadata written onto them.
+type fakeStripe struct {
 	urls  map[string]string
 	err   error
 	calls int
+
+	customers map[string][]stripe.Invoice
+	listErr   error
+	listCalls int
+	metadata  map[string]map[string]string
 }
 
-func (f *fakeInvoiceLinks) HostedInvoiceURL(_ context.Context, stripeInvoiceID string) (string, error) {
+func (f *fakeStripe) ListCustomerInvoices(_ context.Context, customerID string) ([]stripe.Invoice, error) {
+	f.listCalls++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.customers[customerID], nil
+}
+
+func (f *fakeStripe) SetInvoiceMetadata(_ context.Context, stripeInvoiceID string, metadata map[string]string) error {
+	if f.metadata == nil {
+		f.metadata = map[string]map[string]string{}
+	}
+	if f.metadata[stripeInvoiceID] == nil {
+		f.metadata[stripeInvoiceID] = map[string]string{}
+	}
+	for k, v := range metadata {
+		f.metadata[stripeInvoiceID][k] = v
+	}
+	for customer, invoices := range f.customers {
+		for i := range invoices {
+			if invoices[i].ID != stripeInvoiceID {
+				continue
+			}
+			if invoices[i].Metadata == nil {
+				invoices[i].Metadata = map[string]string{}
+			}
+			for k, v := range metadata {
+				invoices[i].Metadata[k] = v
+			}
+		}
+		f.customers[customer] = invoices
+	}
+	return nil
+}
+
+func (f *fakeStripe) HostedInvoiceURL(_ context.Context, stripeInvoiceID string) (string, error) {
 	f.calls++
 	if f.err != nil {
 		return "", f.err
@@ -489,9 +535,9 @@ func inStripe(inv om.Invoice, stripeInvoiceID string) om.Invoice {
 
 func TestReconcileInvoices_DocumentURIIsTheStripeInvoicePage(t *testing.T) {
 	inv := inStripe(omInvoice("01OPEN", om.InvoiceStatusIssued, "10"), "in_1")
-	links := &fakeInvoiceLinks{urls: map[string]string{"in_1": "https://invoice.stripe.com/i/one"}}
+	links := &fakeStripe{urls: map[string]string{"in_1": "https://invoice.stripe.com/i/one"}}
 	r, k8s, account := newInvoiceSyncReconciler(t, []om.Invoice{inv})
-	r.InvoiceLinks = links
+	r.Stripe = links
 
 	for pass := 1; pass <= 2; pass++ {
 		if err := r.reconcileInvoices(context.Background(), account, "cust"); err != nil {
@@ -515,9 +561,9 @@ func TestReconcileInvoices_DocumentURIIsRefreshedBeforeItExpires(t *testing.T) {
 	existing := legacyInvoice("acme-account-2026-03", "01OPEN", billingv1alpha1.InvoicePhasePaid)
 	existing.Status.DocumentURI = "https://invoice.stripe.com/i/old"
 	existing.Annotations[InvoiceDocumentFetchedAtAnnotation] = time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339)
-	links := &fakeInvoiceLinks{urls: map[string]string{"in_1": "https://invoice.stripe.com/i/new"}}
+	links := &fakeStripe{urls: map[string]string{"in_1": "https://invoice.stripe.com/i/new"}}
 	r, k8s, account := newInvoiceSyncReconciler(t, []om.Invoice{inv}, existing)
-	r.InvoiceLinks = links
+	r.Stripe = links
 
 	if err := r.reconcileInvoices(context.Background(), account, "cust"); err != nil {
 		t.Fatalf("reconcileInvoices: %v", err)
@@ -537,7 +583,7 @@ func TestReconcileInvoices_DocumentURIFailureKeepsTheLinkAndTheStatus(t *testing
 	existing := legacyInvoice("acme-account-2026-03", "01OPEN", billingv1alpha1.InvoicePhaseOpen)
 	existing.Status.DocumentURI = "https://invoice.stripe.com/i/old"
 	r, k8s, account := newInvoiceSyncReconciler(t, []om.Invoice{inv}, existing)
-	r.InvoiceLinks = &fakeInvoiceLinks{err: errors.New("stripe is down")}
+	r.Stripe = &fakeStripe{err: errors.New("stripe is down")}
 
 	if err := r.reconcileInvoices(context.Background(), account, "cust"); err != nil {
 		t.Fatalf("reconcileInvoices: %v, want the link failure not to fail the sync", err)
@@ -557,17 +603,17 @@ func TestReconcileInvoices_NoDocumentURIWithoutAStripeInvoice(t *testing.T) {
 	deleted.DeletedAt = &at
 	for name, tc := range map[string]struct {
 		inv      om.Invoice
-		links    *fakeInvoiceLinks
+		links    *fakeStripe
 		existing []client.Object
 	}{
-		"not in Stripe":   {omInvoice("01OPEN", om.InvoiceStatusIssued, "10"), &fakeInvoiceLinks{}, nil},
-		"draft in Stripe": {inStripe(omInvoice("01OPEN", om.InvoiceStatusIssued, "10"), "in_draft"), &fakeInvoiceLinks{urls: map[string]string{}}, nil},
-		"deleted invoice": {deleted, &fakeInvoiceLinks{urls: map[string]string{"in_deleted": "https://invoice.stripe.com/i/deleted"}}, []client.Object{
+		"not in Stripe":   {omInvoice("01OPEN", om.InvoiceStatusIssued, "10"), &fakeStripe{}, nil},
+		"draft in Stripe": {inStripe(omInvoice("01OPEN", om.InvoiceStatusIssued, "10"), "in_draft"), &fakeStripe{urls: map[string]string{}}, nil},
+		"deleted invoice": {deleted, &fakeStripe{urls: map[string]string{"in_deleted": "https://invoice.stripe.com/i/deleted"}}, []client.Object{
 			legacyInvoice("acme-account-2026-03", "01DELETED", billingv1alpha1.InvoicePhaseOpen)}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, k8s, account := newInvoiceSyncReconciler(t, []om.Invoice{tc.inv}, tc.existing...)
-			r.InvoiceLinks = tc.links
+			r.Stripe = tc.links
 			if err := r.reconcileInvoices(context.Background(), account, "cust"); err != nil {
 				t.Fatalf("reconcileInvoices: %v", err)
 			}

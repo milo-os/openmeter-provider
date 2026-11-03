@@ -45,11 +45,27 @@ num_eq "$(echo "$st" | jq -r .total)" "$total" || fail "Invoice ${name}: total i
 
 # The link is the Stripe invoice's own hosted page (view, PDF, pay). Stripe
 # signs a new URL on every read, so compare the page each URL opens.
-hosted=$(stripe GET "/invoices/${stripe_invoice_id}" | jq -r '.hosted_invoice_url // empty')
+sinv=$(stripe GET "/invoices/${stripe_invoice_id}")
+hosted=$(echo "$sinv" | jq -r '.hosted_invoice_url // empty')
 [ -n "$hosted" ] || fail "Stripe invoice ${stripe_invoice_id} has no hosted_invoice_url"
 page=$(stripe_invoice_page "$(echo "$obj" | jq -r .status.documentUri)")
 [ -n "$page" ] && [ "$page" = "$(stripe_invoice_page "$hosted")" ] ||
   fail "Invoice ${name}: documentUri is not Stripe invoice ${stripe_invoice_id}'s hosted page ${hosted}" "$obj"
+
+# Staff can find the invoice from either side: the Milo Invoice has the
+# Stripe invoice's id and number, and the Stripe invoice the Milo Invoice's
+# name.
+number=$(echo "$sinv" | jq -r '.number // empty')
+[ -n "$number" ] || fail "Stripe invoice ${stripe_invoice_id} has no number" "$sinv"
+expect ".metadata.annotations[\"openmeter.miloapis.com/stripeInvoiceId\"] == \"${stripe_invoice_id}\"" "no Stripe invoice id annotation"
+expect ".metadata.annotations[\"openmeter.miloapis.com/stripeInvoiceNumber\"] == \"${number}\"" "no Stripe invoice number annotation"
+named() {
+  resync_account
+  sleep 2
+  md=$(stripe GET "/invoices/${stripe_invoice_id}" | jq -c .metadata)
+  [ "$(echo "$md" | jq -r .milo_invoice)" = "$name" ] && [ "$(echo "$md" | jq -r .milo_billing_account)" = "$ACCOUNT" ]
+}
+retry 20 named || fail "Stripe invoice ${stripe_invoice_id} does not name Invoice ${name}" "${md:-}"
 
 case "$phase" in
   Open)
