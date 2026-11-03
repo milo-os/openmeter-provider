@@ -341,7 +341,7 @@ func newSyncHarness(t *testing.T, account *billingv1alpha1.BillingAccount, objs 
 		Build()
 	omc := newSyncOpenMeterClient()
 	recorder := record.NewFakeRecorder(100)
-	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc, Recorder: recorder}
+	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc, Recorder: recorder, Stripe: &fakeStripe{}}
 	r.Finalizers = finalizer.NewFinalizers()
 	if err := r.Finalizers.Register(CustomerLinkFinalizer, &customerLinkFinalizer{OpenMeterClient: omc, Recorder: recorder}); err != nil {
 		t.Fatalf("register: %v", err)

@@ -131,7 +131,7 @@ func TestReconcile_PersistsSucceededFinalizerWhenSiblingFails(t *testing.T) {
 	k8s := fake.NewClientBuilder().WithScheme(scheme).WithObjects(account).Build()
 	omc := &partialFailureOpenMeterClient{}
 
-	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc}
+	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc, Stripe: &fakeStripe{}}
 	r.Finalizers = finalizer.NewFinalizers()
 	if err := r.Finalizers.Register(CustomerLinkFinalizer, &customerLinkFinalizer{OpenMeterClient: omc}); err != nil {
 		t.Fatalf("register customer finalizer: %v", err)
@@ -203,7 +203,7 @@ func TestReconcile_RemovesAllFinalizersWhenCleanupSucceeds(t *testing.T) {
 	k8s := fake.NewClientBuilder().WithScheme(scheme).WithObjects(account).Build()
 	omc := &allSucceedOpenMeterClient{}
 
-	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc}
+	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc, Stripe: &fakeStripe{}}
 	r.Finalizers = finalizer.NewFinalizers()
 	_ = r.Finalizers.Register(CustomerLinkFinalizer, &customerLinkFinalizer{OpenMeterClient: omc})
 	_ = r.Finalizers.Register(BillingProfileFinalizer, &billingProfileFinalizer{OpenMeterClient: omc})
@@ -390,7 +390,7 @@ func newDeletingAccountHarness(t *testing.T, omc openmeter.Client, annotations m
 	}
 	k8s := fake.NewClientBuilder().WithScheme(scheme).WithObjects(account).Build()
 	recorder := record.NewFakeRecorder(100)
-	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc, Recorder: recorder}
+	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc, Recorder: recorder, Stripe: &fakeStripe{}}
 	r.Finalizers = finalizer.NewFinalizers()
 	if err := r.Finalizers.Register(CustomerLinkFinalizer, &customerLinkFinalizer{OpenMeterClient: omc, Recorder: recorder}); err != nil {
 		t.Fatalf("register: %v", err)

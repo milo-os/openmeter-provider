@@ -275,9 +275,10 @@ type BillingAccountReconciler struct {
 	// Shared with MeterDefinitionReconciler at startup.
 	OpenMeterClient openmeter.Client
 
-	// InvoiceLinks reads the links to the accounts' Stripe invoices for
-	// Invoice.status.documentUri.
-	InvoiceLinks InvoiceLinker
+	// Stripe reads the accounts' invoices from Stripe: the links, numbers
+	// and amounts of OpenMeter's, and those staff create there (see
+	// reconcileStripeInvoices).
+	Stripe StripeInvoices
 
 	// Recorder emits Kubernetes events onto reconciled BillingAccounts.
 	Recorder record.EventRecorder

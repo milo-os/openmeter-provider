@@ -455,7 +455,7 @@ func TestReconcileBillingProfile_WarnsAndReannotatesOnRefusedProfile(t *testing.
 		AppsDrift:             "apps differ",
 	}
 	recorder := record.NewFakeRecorder(10)
-	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc, Recorder: recorder}
+	r := &BillingAccountReconciler{Client: k8s, OpenMeterClient: omc, Recorder: recorder, Stripe: &fakeStripe{}}
 
 	var stored billingv1alpha1.BillingAccount
 	if err := k8s.Get(context.Background(), types.NamespacedName{Name: account.Name, Namespace: account.Namespace}, &stored); err != nil {

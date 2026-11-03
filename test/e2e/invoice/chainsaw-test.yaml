@@ -12,6 +12,10 @@ spec:
         -> Stripe invoice -> Milo Invoice (Open)
         -> paid in Stripe -> OpenMeter paid -> Milo Invoice (Paid)
 
+    and an invoice created directly in Stripe, which OpenMeter never sees:
+
+      Stripe invoice -> Milo Invoice (Open) -> voided in Stripe -> Void
+
     then deletes the account, which only succeeds once nothing it owes is
     left open.
 
@@ -218,6 +222,19 @@ spec:
         - script:
             timeout: 150s
             content: bash expect-milo-invoice.sh Paid
+
+    - name: an invoice created in Stripe appears in Milo, and its void follows
+      description: |
+        Staff create invoices in Stripe themselves (a one-off charge, or the
+        replacement for one they voided), which OpenMeter never sees. The
+        provider projects them from Stripe instead.
+      try:
+        - script:
+            timeout: 120s
+            content: bash stripe-invoice.sh create
+        - script:
+            timeout: 120s
+            content: bash stripe-invoice.sh void
 
     - name: the paid account can be deleted
       description: |

@@ -25,6 +25,7 @@ import (
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
 
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
+	"go.miloapis.com/openmeter-provider/internal/stripe"
 )
 
 // InvoiceKeyAnnotation stores the OpenMeter invoice id on the Milo Invoice
@@ -45,10 +46,23 @@ const InvoiceDocumentFetchedAtAnnotation = "openmeter.miloapis.com/documentUriFe
 // long as the invoice exists.
 const documentURIRefreshAfter = 7 * 24 * time.Hour
 
-// InvoiceLinker returns the link to a Stripe invoice's hosted page
-// (*stripe.InvoiceLinks).
-type InvoiceLinker interface {
+// StripeInvoiceKeyAnnotation stores the id of the Stripe invoice a Milo
+// Invoice is for: the invoice OpenMeter issued in Stripe, or, on an Invoice
+// without InvoiceKeyAnnotation, one staff created in Stripe themselves,
+// which it is then the projection's identity for (see
+// reconcileStripeInvoices).
+const StripeInvoiceKeyAnnotation = "openmeter.miloapis.com/stripeInvoiceId"
+
+// StripeInvoiceNumberAnnotation stores the Stripe invoice's number, the one
+// printed on it and the customer quotes, so staff can find it in Stripe.
+const StripeInvoiceNumberAnnotation = "openmeter.miloapis.com/stripeInvoiceNumber"
+
+// StripeInvoices reads the accounts' invoices from Stripe and writes the
+// Milo invoice's name onto them (*stripe.Invoices).
+type StripeInvoices interface {
 	HostedInvoiceURL(ctx context.Context, stripeInvoiceID string) (string, error)
+	ListCustomerInvoices(ctx context.Context, customerID string) ([]stripe.Invoice, error)
+	SetInvoiceMetadata(ctx context.Context, stripeInvoiceID string, metadata map[string]string) error
 }
 
 // Invoice Ready condition reasons this provider sets besides the phase
@@ -138,8 +152,14 @@ const invoiceNameHashLength = 10
 // prefix. Uniqueness does not depend on the prefix — the hash is of the
 // globally unique OpenMeter invoice id.
 func invoiceName(accountName string, inv om.Invoice) string {
-	t := invoicePeriodStart(inv).UTC()
-	sum := sha256.Sum256([]byte(inv.Id))
+	return invoiceObjectName(accountName, invoicePeriodStart(inv), inv.Id)
+}
+
+// invoiceObjectName is invoiceName for an invoice with id whose period
+// starts at start.
+func invoiceObjectName(accountName string, start time.Time, id string) string {
+	t := start.UTC()
+	sum := sha256.Sum256([]byte(id))
 	suffix := fmt.Sprintf("-%04d-%02d-%s", t.Year(), int(t.Month()), hex.EncodeToString(sum[:])[:invoiceNameHashLength])
 	prefix := accountName
 	if len(prefix)+len(suffix) > maxInvoiceNameLength {
@@ -204,9 +224,22 @@ func (r *BillingAccountReconciler) reconcileInvoices(
 	if err != nil {
 		return fmt.Errorf("list invoices: %w", err)
 	}
-	projected, err := r.projectedInvoices(ctx, account)
+	projected, stripeOnly, err := r.projectedInvoices(ctx, account)
 	if err != nil {
 		return err
+	}
+	// The account's invoices as Stripe has them: OpenMeter's, with what
+	// Stripe knows and OpenMeter doesn't (credit notes, partial payments),
+	// and those staff created in Stripe. Without them (no Stripe customer
+	// yet, or Stripe failing) OpenMeter's invoices are still projected.
+	var errs []error
+	stripeInvoices, listedInStripe, err := r.listStripeInvoices(ctx, account)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	stripeByID := make(map[string]*stripe.Invoice, len(stripeInvoices))
+	for i := range stripeInvoices {
+		stripeByID[stripeInvoices[i].ID] = &stripeInvoices[i]
 	}
 
 	// Oldest first, so the Invoices' creation order follows OpenMeter's when
@@ -219,18 +252,18 @@ func (r *BillingAccountReconciler) reconcileInvoices(
 		return invoices[i].Id < invoices[j].Id
 	})
 
-	var errs []error
 	listed := make(map[string]bool, len(invoices))
 	for _, inv := range invoices {
 		listed[inv.Id] = true
 		existing := projected[inv.Id]
+		inStripe := stripeByID[openMeterStripeInvoiceID(inv)]
 
 		if openmeter.IsInvoiceDeleted(inv) {
 			// Only invoices that were never issued can be deleted, so this
 			// only finds a projection made by an earlier version that
 			// projected drafts. Close it out instead of leaving it Open.
 			if existing != nil {
-				if err := r.patchInvoiceStatus(ctx, existing, account, inv); err != nil {
+				if err := r.patchInvoiceStatus(ctx, existing, account, inv, nil); err != nil {
 					errs = append(errs, fmt.Errorf("close out Invoice for deleted invoice %s: %w", inv.Id, err))
 				}
 			}
@@ -241,9 +274,9 @@ func (r *BillingAccountReconciler) reconcileInvoices(
 		}
 
 		if existing != nil {
-			err = r.patchInvoiceStatus(ctx, existing, account, inv)
+			err = r.patchInvoiceStatus(ctx, existing, account, inv, inStripe)
 		} else {
-			err = r.createInvoice(ctx, account, inv, invoiceName(account.Name, inv))
+			err = r.createInvoice(ctx, account, inv, invoiceName(account.Name, inv), inStripe)
 		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("upsert invoice %s: %w", inv.Id, err))
@@ -258,29 +291,49 @@ func (r *BillingAccountReconciler) reconcileInvoices(
 			errs = append(errs, err)
 		}
 	}
+
+	if listedInStripe {
+		errs = append(errs, r.reconcileStripeInvoices(ctx, account, invoices, stripeInvoices, stripeOnly)...)
+	}
 	return errors.Join(errs...)
 }
 
-// projectedInvoices returns this account's existing Milo Invoices keyed by
-// the OpenMeter invoice id on their InvoiceKeyAnnotation. Invoices without
-// the annotation were not written by this provider and are ignored. Should
-// two carry the same id (not something this provider creates), the one
-// with the lexicographically smallest name wins, deterministically.
+// openMeterStripeInvoiceID is the id of the Stripe invoice OpenMeter issued
+// inv as, or "" before it has one.
+func openMeterStripeInvoiceID(inv om.Invoice) string {
+	if inv.ExternalIds == nil || inv.ExternalIds.Invoicing == nil {
+		return ""
+	}
+	return *inv.ExternalIds.Invoicing
+}
+
+// projectedInvoices returns this account's existing Milo Invoices: those
+// projected from OpenMeter keyed by the OpenMeter invoice id on their
+// InvoiceKeyAnnotation, and those projected from invoices created in Stripe
+// keyed by the Stripe invoice id on their StripeInvoiceKeyAnnotation.
+// Invoices with neither annotation were not written by this provider and
+// are ignored. Should two carry the same id (not something this provider
+// creates), the one with the lexicographically smallest name wins,
+// deterministically.
 func (r *BillingAccountReconciler) projectedInvoices(
 	ctx context.Context,
 	account *billingv1alpha1.BillingAccount,
-) (map[string]*billingv1alpha1.Invoice, error) {
+) (fromOpenMeter, fromStripe map[string]*billingv1alpha1.Invoice, err error) {
 	var list billingv1alpha1.InvoiceList
 	if err := r.List(ctx, &list, client.InNamespace(account.Namespace)); err != nil {
-		return nil, fmt.Errorf("list Invoices: %w", err)
+		return nil, nil, fmt.Errorf("list Invoices: %w", err)
 	}
-	out := make(map[string]*billingv1alpha1.Invoice)
+	fromOpenMeter = make(map[string]*billingv1alpha1.Invoice)
+	fromStripe = make(map[string]*billingv1alpha1.Invoice)
 	for i := range list.Items {
 		obj := &list.Items[i]
 		if obj.Spec.BillingAccountRef.Name != account.Name {
 			continue
 		}
-		id := obj.Annotations[InvoiceKeyAnnotation]
+		out, id := fromOpenMeter, obj.Annotations[InvoiceKeyAnnotation]
+		if id == "" {
+			out, id = fromStripe, obj.Annotations[StripeInvoiceKeyAnnotation]
+		}
 		if id == "" {
 			continue
 		}
@@ -289,7 +342,7 @@ func (r *BillingAccountReconciler) projectedInvoices(
 		}
 		out[id] = obj
 	}
-	return out, nil
+	return fromOpenMeter, fromStripe, nil
 }
 
 func (r *BillingAccountReconciler) createInvoice(
@@ -297,6 +350,7 @@ func (r *BillingAccountReconciler) createInvoice(
 	account *billingv1alpha1.BillingAccount,
 	inv om.Invoice,
 	name string,
+	inStripe *stripe.Invoice,
 ) error {
 	obj := &billingv1alpha1.Invoice{
 		ObjectMeta: metav1.ObjectMeta{
@@ -340,13 +394,14 @@ func (r *BillingAccountReconciler) createInvoice(
 			return fmt.Errorf("invoice %s maps to Invoice %s/%s, which already projects invoice %q",
 				inv.Id, account.Namespace, name, got)
 		}
-		return r.patchInvoiceStatus(ctx, &existing, account, inv)
+		return r.patchInvoiceStatus(ctx, &existing, account, inv, inStripe)
 	}
-	return r.patchInvoiceStatus(ctx, obj, account, inv)
+	return r.patchInvoiceStatus(ctx, obj, account, inv, inStripe)
 }
 
 // invoiceAmounts returns the Milo amountPaid/amountDue for an invoice in
-// phase with total. OpenMeter reports no partial payments, so:
+// phase with total, from OpenMeter alone (see stripeInvoiceAmounts for what
+// Stripe adds). OpenMeter reports no partial payments, so:
 //
 //	Paid                          → paid total, due 0
 //	Void from voided (or deleted) → paid 0, due 0 — nothing is owed
@@ -365,24 +420,57 @@ func invoiceAmounts(inv om.Invoice, phase billingv1alpha1.InvoicePhase) (paid, d
 	}
 }
 
-// patchInvoiceStatus projects inv onto obj.status. Spec is immutable and
-// never touched here. This provider is the sole writer of Invoice.status
-// (see the CRD's own doc comment: "Populated exclusively by the invoicing
-// provider"), so a plain read-modify-write is safe — unlike
+// patchInvoiceStatus projects inv onto obj.status, with the amounts Stripe
+// has for it when inStripe, its Stripe invoice, is known. Spec is immutable
+// and never touched here. This provider is the sole writer of
+// Invoice.status (see the CRD's own doc comment: "Populated exclusively by
+// the invoicing provider"), so a plain read-modify-write is safe — unlike
 // BillingAccount.status, which billing's own controller also writes.
 func (r *BillingAccountReconciler) patchInvoiceStatus(
 	ctx context.Context,
 	obj *billingv1alpha1.Invoice,
 	account *billingv1alpha1.BillingAccount,
 	inv om.Invoice,
+	inStripe *stripe.Invoice,
 ) error {
 	now := time.Now()
-	documentURI, refreshed := r.invoiceDocumentURI(ctx, obj, inv, now)
+	documentURI, refreshed := r.invoiceDocumentURI(ctx, obj, inv, inStripe, now)
 
 	annotations := map[string]string{InvoiceKeyAnnotation: inv.Id}
 	if refreshed {
 		annotations[InvoiceDocumentFetchedAtAnnotation] = now.UTC().Format(time.RFC3339)
 	}
+	addStripeInvoiceAnnotations(annotations, inStripe)
+	if err := r.patchInvoiceAnnotations(ctx, obj, annotations); err != nil {
+		return err
+	}
+
+	statusBase := obj.DeepCopy()
+	projectInvoiceStatus(obj, account, inv, now)
+	switch paid, due, ok := stripeInvoiceAmounts(inv, inStripe); {
+	case ok:
+		obj.Status.AmountPaid, obj.Status.AmountDue = paid, due
+	case inStripe == nil && obj.Annotations[StripeInvoiceKeyAnnotation] != "" &&
+		obj.Status.Phase == statusBase.Status.Phase:
+		// Stripe couldn't be read this time: keep the amounts it last gave
+		// rather than fall back to OpenMeter's until the next sync.
+		obj.Status.AmountPaid, obj.Status.AmountDue = statusBase.Status.AmountPaid, statusBase.Status.AmountDue
+	}
+	if refreshed {
+		obj.Status.DocumentURI = documentURI
+	}
+	if err := r.Status().Patch(ctx, obj, client.MergeFrom(statusBase)); err != nil {
+		return fmt.Errorf("patch Invoice status %s/%s: %w", obj.Namespace, obj.Name, err)
+	}
+	return nil
+}
+
+// patchInvoiceAnnotations sets annotations on obj, when any differ.
+func (r *BillingAccountReconciler) patchInvoiceAnnotations(
+	ctx context.Context,
+	obj *billingv1alpha1.Invoice,
+	annotations map[string]string,
+) error {
 	if needsAnnotations(obj, annotations) {
 		base := obj.DeepCopy()
 		if obj.Annotations == nil {
@@ -395,16 +483,45 @@ func (r *BillingAccountReconciler) patchInvoiceStatus(
 			return fmt.Errorf("patch Invoice metadata %s/%s: %w", obj.Namespace, obj.Name, err)
 		}
 	}
-
-	statusBase := obj.DeepCopy()
-	projectInvoiceStatus(obj, account, inv, now)
-	if refreshed {
-		obj.Status.DocumentURI = documentURI
-	}
-	if err := r.Status().Patch(ctx, obj, client.MergeFrom(statusBase)); err != nil {
-		return fmt.Errorf("patch Invoice status %s/%s: %w", obj.Namespace, obj.Name, err)
-	}
 	return nil
+}
+
+// addStripeInvoiceAnnotations adds the Stripe invoice's id and, once it is
+// finalized, its number.
+func addStripeInvoiceAnnotations(annotations map[string]string, inStripe *stripe.Invoice) {
+	if inStripe == nil {
+		return
+	}
+	annotations[StripeInvoiceKeyAnnotation] = inStripe.ID
+	if inStripe.Number != "" {
+		annotations[StripeInvoiceNumberAnnotation] = inStripe.Number
+	}
+}
+
+// stripeInvoiceAmounts returns amountPaid/amountDue for OpenMeter's inv from
+// its Stripe invoice, which is where it's paid and where staff credit it:
+// Stripe counts partial payments and credit notes, OpenMeter neither. It's
+// only used while the two agree on where the invoice stands (both open,
+// both paid, or both uncollectible), so a webhook OpenMeter hasn't
+// processed yet never pairs one's phase with the other's amounts. Totals
+// stay OpenMeter's.
+func stripeInvoiceAmounts(inv om.Invoice, inStripe *stripe.Invoice) (paid, due string, ok bool) {
+	if inStripe == nil || !strings.EqualFold(inStripe.Currency, string(inv.Currency)) {
+		return "", "", false
+	}
+	paid = stripe.FormatAmount(inStripe.AmountPaid, inStripe.Currency)
+	remaining := stripe.FormatAmount(inStripe.AmountRemaining, inStripe.Currency)
+	phase, _ := mapInvoiceStatus(inv.Status)
+	switch {
+	case inStripe.Status == stripe.InvoiceStatusOpen &&
+		(phase == billingv1alpha1.InvoicePhaseOpen || phase == billingv1alpha1.InvoicePhasePastDue):
+		return paid, remaining, true
+	case inStripe.Status == stripe.InvoiceStatusUncollectible && inv.Status == om.InvoiceStatusUncollectible:
+		return paid, remaining, true
+	case inStripe.Status == stripe.InvoiceStatusPaid && phase == billingv1alpha1.InvoicePhasePaid:
+		return paid, "0", true
+	}
+	return "", "", false
 }
 
 func needsAnnotations(obj *billingv1alpha1.Invoice, want map[string]string) bool {
@@ -421,7 +538,8 @@ func needsAnnotations(obj *billingv1alpha1.Invoice, want map[string]string) bool
 // documentURIRefreshAfter), and reports whether it read one. OpenMeter
 // renders no invoice document and keeps only the Stripe invoice's id, so the
 // link comes from Stripe: its hosted invoice page, where the customer can
-// view the invoice, download its PDF and pay it.
+// view the invoice, download its PDF and pay it. inStripe, when the
+// account's invoices were listed from Stripe, already has it.
 //
 // A failure only leaves the current link in place, to be retried on the next
 // sync: a missing link must not hold up the invoice's status.
@@ -429,21 +547,18 @@ func (r *BillingAccountReconciler) invoiceDocumentURI(
 	ctx context.Context,
 	obj *billingv1alpha1.Invoice,
 	inv om.Invoice,
+	inStripe *stripe.Invoice,
 	now time.Time,
 ) (string, bool) {
-	if openmeter.IsInvoiceDeleted(inv) ||
-		inv.ExternalIds == nil || inv.ExternalIds.Invoicing == nil || *inv.ExternalIds.Invoicing == "" {
+	stripeInvoiceID := openMeterStripeInvoiceID(inv)
+	if openmeter.IsInvoiceDeleted(inv) || stripeInvoiceID == "" || !documentURIDue(obj, now) {
 		return "", false
 	}
-	if obj.Status.DocumentURI != "" {
-		fetchedAt, err := time.Parse(time.RFC3339, obj.Annotations[InvoiceDocumentFetchedAtAnnotation])
-		if err == nil && now.Sub(fetchedAt) < documentURIRefreshAfter {
-			return "", false
-		}
+	if inStripe != nil {
+		return inStripe.HostedInvoiceURL, inStripe.HostedInvoiceURL != ""
 	}
 
-	stripeInvoiceID := *inv.ExternalIds.Invoicing
-	uri, err := r.InvoiceLinks.HostedInvoiceURL(ctx, stripeInvoiceID)
+	uri, err := r.Stripe.HostedInvoiceURL(ctx, stripeInvoiceID)
 	switch {
 	case err != nil:
 		log.FromContext(ctx).Error(err, "reading the invoice's Stripe link failed; keeping the current one",
@@ -454,6 +569,16 @@ func (r *BillingAccountReconciler) invoiceDocumentURI(
 		return "", false
 	}
 	return uri, true
+}
+
+// documentURIDue reports whether obj has no link yet or its link is due for
+// a refresh (see documentURIRefreshAfter).
+func documentURIDue(obj *billingv1alpha1.Invoice, now time.Time) bool {
+	if obj.Status.DocumentURI == "" {
+		return true
+	}
+	fetchedAt, err := time.Parse(time.RFC3339, obj.Annotations[InvoiceDocumentFetchedAtAnnotation])
+	return err != nil || now.Sub(fetchedAt) >= documentURIRefreshAfter
 }
 
 // projectInvoiceStatus writes inv's state onto obj.Status. now is only used
