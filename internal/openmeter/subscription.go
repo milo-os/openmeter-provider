@@ -260,7 +260,7 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 			return SubscriptionState{Current: *step.current, Pending: step.pending, PlanVersion: activeVersion}, nil
 		}
 		if step.kind == stepChange && desired.ChangeAtPeriodEnd {
-			period, err := c.currentBillingPeriod(ctx, step.target.Id, now)
+			period, err := c.currentBillingPeriod(ctx, step.target.Id)
 			if err != nil {
 				return SubscriptionState{}, fmt.Errorf("get billing period: %w", err)
 			}
@@ -425,10 +425,12 @@ func periodChangeTime(sub om.Subscription, period *om.Period, now time.Time, due
 	return time.Time{}, &end
 }
 
-// currentBillingPeriod returns the subscription's billing period at the
-// given time, or nil when OpenMeter reports none.
-func (c *client) currentBillingPeriod(ctx context.Context, subscriptionID string, at time.Time) (*om.Period, error) {
-	rsp, err := c.api.GetSubscriptionWithResponse(ctx, subscriptionID, &om.GetSubscriptionParams{At: &at})
+// currentBillingPeriod returns the subscription's current billing period,
+// or nil when OpenMeter reports none. It's always read as of now: OpenMeter
+// (v1.0.0-beta.232) answers a query at another time with 501 "historical
+// queries are not supported".
+func (c *client) currentBillingPeriod(ctx context.Context, subscriptionID string) (*om.Period, error) {
+	rsp, err := c.api.GetSubscriptionWithResponse(ctx, subscriptionID, nil)
 	if err != nil {
 		return nil, classify(nil, nil, err)
 	}

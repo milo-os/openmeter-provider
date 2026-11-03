@@ -35,7 +35,8 @@ import (
 //     its start; a change bills from the anchor it carries, else migrate and
 //     v1 change keep the previous one, while a v3 change bills from the
 //     change. Anchors are not normalized.
-//   - GET /subscriptions/{id} reports the period seeded in billingPeriods.
+//   - GET /subscriptions/{id} reports the period seeded in billingPeriods,
+//     and refuses an "at" time with 501, as OpenMeter does.
 //
 // Statuses are stored, not computed from time.
 func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) bool {
@@ -151,6 +152,10 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 
 	switch {
 	case r.Method == http.MethodGet && action == "":
+		if r.URL.Query().Has("at") {
+			problem(http.StatusNotImplemented, "historical queries are not supported")
+			return true
+		}
 		expanded := om.SubscriptionExpanded{Id: sub.Id, ActiveFrom: sub.ActiveFrom, BillingAnchor: sub.BillingAnchor}
 		if period, ok := f.billingPeriods[sub.Id]; ok {
 			expanded.Alignment = &om.SubscriptionAlignment{CurrentAlignedBillingPeriod: &period}
