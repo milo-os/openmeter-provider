@@ -36,6 +36,12 @@ const subscriptionListPageSize = 100
 // means the server state is moving underneath us.
 const maxSubscriptionSteps = 4
 
+// periodChangeTolerance is how soon after a billing period starts a plan
+// change deferred to it can still be timed at its start. OpenMeter accepts
+// a change up to two minutes in the past (the new subscription can't start
+// any earlier); this leaves room for the two clocks to differ.
+const periodChangeTolerance = 90 * time.Second
+
 // DesiredSubscription is the subscription a reconciler wants a customer to
 // have: exactly one live subscription on the active version of PlanKey.
 type DesiredSubscription struct {
@@ -52,8 +58,28 @@ type DesiredSubscription struct {
 	// on the 1st, and a contract starting on the 18th bills on the 18th
 	// (the last day of shorter months for the 29th to 31st). Unset, a
 	// subscription bills from the day it starts. Changes and migrations
-	// keep the existing subscription's anchor.
+	// keep the existing subscription's anchor, unless MoveAnchor is set.
 	BillingAnchor *time.Time
+	// MoveAnchor makes a plan change move the subscription to
+	// BillingAnchor instead of keeping its own: an account moving onto a
+	// contract bills on the contract's day from then on.
+	MoveAnchor bool
+	// ChangeAtPeriodEnd makes a plan change wait until the subscription's
+	// current billing period ends, so the period is billed entirely by the
+	// plan it started on: an amended contract carries one price per
+	// invoice. Until then nothing changes, and SubscriptionState.ChangeAt
+	// says when it will. The change is timed at the boundary, so it must be
+	// made within periodChangeTolerance of it; later than that it waits for
+	// the next one, unless ChangeDue has passed. Migrations to a new version
+	// of the same plan are still immediate.
+	ChangeAtPeriodEnd bool
+	// ChangeDue is when a change deferred by ChangeAtPeriodEnd was due, as
+	// SubscriptionState.ChangeAt reported it. Once it has passed, a change
+	// that missed its boundary (the provider was down, say) is made
+	// immediately rather than a period late.
+	ChangeDue *time.Time
+	// Now is the current time; time.Now when zero.
+	Now time.Time
 }
 
 // SubscriptionState is a customer's subscription after EnsureSubscription.
@@ -66,6 +92,10 @@ type SubscriptionState struct {
 	Pending *om.Subscription
 	// PlanVersion is the active version of the desired plan.
 	PlanVersion int
+	// ChangeAt, when set, is when Current changes to the desired plan,
+	// which it isn't on yet: the end of its billing period, for a
+	// DesiredSubscription with ChangeAtPeriodEnd.
+	ChangeAt *time.Time
 }
 
 // subscriptionStepKind is the next mutation needed to converge.
@@ -103,6 +133,8 @@ type subscriptionStep struct {
 	kind subscriptionStepKind
 	// target is the subscription the step acts on (unset for create).
 	target om.Subscription
+	// at, for a change, is when it takes effect; zero means immediately.
+	at time.Time
 	// current and pending describe the converged state (kind == stepNone).
 	current *om.Subscription
 	pending *om.Subscription
@@ -213,6 +245,10 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 		return SubscriptionState{}, fmt.Errorf("plan %q: %w", desired.PlanKey, ErrPlanNotPublished)
 	}
 	activeVersion := active.Version
+	now := desired.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
 
 	for range maxSubscriptionSteps {
 		subs, err := c.ListSubscriptions(ctx, desired.CustomerKey)
@@ -222,6 +258,17 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 		step := nextSubscriptionStep(subs, desired.PlanKey, activeVersion)
 		if step.kind == stepNone {
 			return SubscriptionState{Current: *step.current, Pending: step.pending, PlanVersion: activeVersion}, nil
+		}
+		if step.kind == stepChange && desired.ChangeAtPeriodEnd {
+			period, err := c.currentBillingPeriod(ctx, step.target.Id, now)
+			if err != nil {
+				return SubscriptionState{}, fmt.Errorf("get billing period: %w", err)
+			}
+			at, wait := periodChangeTime(step.target, period, now, desired.ChangeDue)
+			if wait != nil {
+				return SubscriptionState{Current: step.target, PlanVersion: activeVersion, ChangeAt: wait}, nil
+			}
+			step.at = at
 		}
 		if err := c.applySubscriptionStep(ctx, desired, step, *active); err != nil {
 			return SubscriptionState{}, fmt.Errorf("%s subscription: %w", step.kind, err)
@@ -234,7 +281,7 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubscription, step subscriptionStep, active omv3.BillingPlan) error {
 	metadata := om.Metadata(desired.Metadata)
 	if (step.kind == stepChange || step.kind == stepMigrate) && planHasUnitConfig(active) {
-		return c.changeSubscriptionV3(ctx, desired, step.target, active.Version)
+		return c.changeSubscriptionV3(ctx, desired, step, active.Version)
 	}
 	switch step.kind {
 	case stepCreate:
@@ -275,15 +322,23 @@ func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubsc
 
 	case stepChange:
 		var timing om.SubscriptionTiming
-		if err := timing.FromSubscriptionTimingEnum(om.SubscriptionTimingEnumImmediate); err != nil {
+		if step.at.IsZero() {
+			if err := timing.FromSubscriptionTimingEnum(om.SubscriptionTimingEnumImmediate); err != nil {
+				return &PermanentError{Err: err}
+			}
+		} else if err := timing.FromSubscriptionTiming1(step.at); err != nil {
 			return &PermanentError{Err: err}
 		}
-		var body om.SubscriptionChange
-		if err := body.FromPlanSubscriptionChange(om.PlanSubscriptionChange{
+		change := om.PlanSubscriptionChange{
 			Plan:     om.PlanReferenceInput{Key: desired.PlanKey},
 			Timing:   timing,
 			Metadata: &metadata,
-		}); err != nil {
+		}
+		if desired.MoveAnchor {
+			change.BillingAnchor = desired.BillingAnchor
+		}
+		var body om.SubscriptionChange
+		if err := body.FromPlanSubscriptionChange(change); err != nil {
 			return &PermanentError{Err: err}
 		}
 		rsp, err := c.api.ChangeSubscriptionWithResponse(ctx, step.target.Id, body)
@@ -311,19 +366,29 @@ func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubsc
 	return &PermanentError{Err: fmt.Errorf("unknown subscription step %d", step.kind)}
 }
 
-// changeSubscriptionV3 moves the subscription onto planKey@version
-// immediately, the change and the migration in one. The v1 API refuses both
-// when the plan converts usage, so they go through v3, which cannot carry the
-// subscription's metadata: v3 labels allow no "/" in keys or values. Unlike
-// v1, a v3 change without an anchor bills from the moment of the change, so
-// it carries the existing subscription's anchor over.
-func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscription, target om.Subscription, version int) error {
+// changeSubscriptionV3 moves the subscription onto planKey@version, the
+// change and the migration in one, immediately or at step.at. The v1 API
+// refuses both when the plan converts usage, so they go through v3, which
+// cannot carry the subscription's metadata: v3 labels allow no "/" in keys
+// or values. Unlike v1, a v3 change without an anchor bills from the moment
+// of the change, so it carries the existing subscription's anchor over
+// (or desired.BillingAnchor, with MoveAnchor).
+func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscription, step subscriptionStep, version int) error {
+	target := step.target
 	var timing omv3.BillingSubscriptionEditTiming
-	if err := timing.FromBillingSubscriptionEditTimingEnum(omv3.BillingSubscriptionEditTimingEnumImmediate); err != nil {
+	if step.at.IsZero() {
+		if err := timing.FromBillingSubscriptionEditTimingEnum(omv3.BillingSubscriptionEditTimingEnumImmediate); err != nil {
+			return &PermanentError{Err: err}
+		}
+	} else if err := timing.FromDateTime(step.at); err != nil {
 		return &PermanentError{Err: err}
 	}
 	body := omv3.BillingSubscriptionChange{Timing: timing}
-	if !target.BillingAnchor.IsZero() {
+	switch {
+	case step.kind == stepChange && desired.MoveAnchor && desired.BillingAnchor != nil:
+		anchor := *desired.BillingAnchor
+		body.BillingAnchor = &anchor
+	case !target.BillingAnchor.IsZero():
 		anchor := target.BillingAnchor
 		body.BillingAnchor = &anchor
 	}
@@ -333,6 +398,47 @@ func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscr
 	body.Plan.Version = &version
 	_, err := c.v3.do(ctx, http.MethodPost, "/subscriptions/"+url.PathEscape(target.Id)+"/change", nil, body, nil)
 	return reclassifySubscription(err)
+}
+
+// periodChangeTime decides when a plan change deferred to the end of the
+// subscription's billing period happens. Within periodChangeTolerance of a
+// period starting, it returns that start, to time the change at. Once due
+// has passed, the boundary was missed, and it returns neither, to change
+// immediately. Otherwise it returns when to come back: the end of the
+// current period.
+//
+// A subscription in its first period, which started when it did, waits for
+// the period to end, since a change at its start would leave it empty. With
+// no aligned period (OpenMeter reports one for active, aligned
+// subscriptions), the change happens immediately.
+func periodChangeTime(sub om.Subscription, period *om.Period, now time.Time, due *time.Time) (at time.Time, wait *time.Time) {
+	if period == nil {
+		return time.Time{}, nil
+	}
+	if period.From.After(sub.ActiveFrom) && !now.Before(period.From) && now.Sub(period.From) <= periodChangeTolerance {
+		return period.From, nil
+	}
+	if due != nil && !now.Before(*due) {
+		return time.Time{}, nil
+	}
+	end := period.To
+	return time.Time{}, &end
+}
+
+// currentBillingPeriod returns the subscription's billing period at the
+// given time, or nil when OpenMeter reports none.
+func (c *client) currentBillingPeriod(ctx context.Context, subscriptionID string, at time.Time) (*om.Period, error) {
+	rsp, err := c.api.GetSubscriptionWithResponse(ctx, subscriptionID, &om.GetSubscriptionParams{At: &at})
+	if err != nil {
+		return nil, classify(nil, nil, err)
+	}
+	if err := classifySubscription(rsp.HTTPResponse, rsp.Body); err != nil {
+		return nil, err
+	}
+	if rsp.JSON200 == nil || rsp.JSON200.Alignment == nil {
+		return nil, nil
+	}
+	return rsp.JSON200.Alignment.CurrentAlignedBillingPeriod, nil
 }
 
 // CancelSubscriptions ends every live subscription of the customer now:

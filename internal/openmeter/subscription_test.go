@@ -28,10 +28,14 @@ import (
 //   - next_billing_cycle ends the current subscription in 30 days and
 //     schedules its successor then; immediate ends it now;
 //   - v1 change and migrate refuse a target plan that converts usage, which
-//     only the v3 change route (immediate) accepts. It keeps no metadata.
+//     only the v3 change route accepts. It keeps no metadata.
+//   - a change is immediate or timed at a custom time, which may be up to
+//     two minutes in the past; the new subscription starts then.
 //   - a subscription bills from the anchor it was created with, else from
-//     its start; v1 change and migrate keep the previous anchor, while a v3
-//     change without one bills from the change. Anchors are not normalized.
+//     its start; a change bills from the anchor it carries, else migrate and
+//     v1 change keep the previous one, while a v3 change bills from the
+//     change. Anchors are not normalized.
+//   - GET /subscriptions/{id} reports the period seeded in billingPeriods.
 //
 // Statuses are stored, not computed from time.
 func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) bool {
@@ -76,8 +80,9 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 			problem(http.StatusBadRequest, "bad body")
 			return true
 		}
-		if e, err := body.Timing.AsBillingSubscriptionEditTimingEnum(); err != nil || e != omv3.BillingSubscriptionEditTimingEnumImmediate {
-			problem(http.StatusBadRequest, "only immediate timing is emulated")
+		at, err := v3ChangeTime(body.Timing)
+		if err != nil {
+			problem(http.StatusBadRequest, err.Error())
 			return true
 		}
 		plan, ok := f.planVersion(*body.Plan.Key, *body.Plan.Version)
@@ -86,8 +91,7 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 			return true
 		}
 		f.v3Changes++
-		f.endSubscription(&sub, false)
-		next := f.newSubscription(sub.CustomerId, plan, om.SubscriptionStatusActive, time.Now(), nil)
+		next := f.changeSubscription(&sub, plan, at, nil)
 		if body.BillingAnchor != nil {
 			f.setAnchor(next.Id, *body.BillingAnchor)
 		}
@@ -146,6 +150,13 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	switch {
+	case r.Method == http.MethodGet && action == "":
+		expanded := om.SubscriptionExpanded{Id: sub.Id, ActiveFrom: sub.ActiveFrom, BillingAnchor: sub.BillingAnchor}
+		if period, ok := f.billingPeriods[sub.Id]; ok {
+			expanded.Alignment = &om.SubscriptionAlignment{CurrentAlignedBillingPeriod: &period}
+		}
+		writeJSON(http.StatusOK, expanded)
+
 	case r.Method == http.MethodDelete && action == "":
 		if sub.Status != om.SubscriptionStatusScheduled {
 			forbidden()
@@ -184,9 +195,17 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 			problem(http.StatusBadRequest, "unit_config is not representable in v1")
 			return true
 		}
-		f.endSubscription(&sub, false)
-		next := f.newSubscription(sub.CustomerId, plan, om.SubscriptionStatusActive, time.Now(), body.Metadata)
-		f.setAnchor(next.Id, sub.BillingAnchor)
+		at, err := v1ChangeTime(body.Timing)
+		if err != nil {
+			problem(http.StatusBadRequest, err.Error())
+			return true
+		}
+		anchor := sub.BillingAnchor
+		next := f.changeSubscription(&sub, plan, at, body.Metadata)
+		if body.BillingAnchor != nil {
+			anchor = *body.BillingAnchor
+		}
+		f.setAnchor(next.Id, anchor)
 		writeJSON(http.StatusOK, om.SubscriptionChangeResponseBody{Current: sub, Next: om.SubscriptionExpanded{Id: next.Id}})
 
 	case action == "migrate":
@@ -255,6 +274,53 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
 	return true
+}
+
+// changeSubscription ends sub at (now when zero) and starts its successor
+// on plan then, recording a custom time in changesAt.
+func (f *fakeServer) changeSubscription(sub *om.Subscription, plan omv3.BillingPlan, at time.Time, metadata *om.Metadata) om.Subscription {
+	f.endSubscription(sub, false)
+	start := time.Now()
+	if !at.IsZero() {
+		f.changesAt[sub.Id] = at
+		sub.ActiveTo = &at
+		f.subscriptions[sub.Id] = *sub
+		start = at
+	}
+	return f.newSubscription(sub.CustomerId, plan, om.SubscriptionStatusActive, start, metadata)
+}
+
+// v1ChangeTime is a v1 change's custom time, zero for immediate.
+func v1ChangeTime(t om.SubscriptionTiming) (time.Time, error) {
+	if e, err := t.AsSubscriptionTimingEnum(); err == nil && e == om.SubscriptionTimingEnumImmediate {
+		return time.Time{}, nil
+	}
+	at, err := t.AsSubscriptionTiming1()
+	if err != nil {
+		return time.Time{}, errors.New("only immediate or custom timing is emulated")
+	}
+	return at, checkChangeTime(at)
+}
+
+// v3ChangeTime is a v3 change's custom time, zero for immediate.
+func v3ChangeTime(t omv3.BillingSubscriptionEditTiming) (time.Time, error) {
+	if e, err := t.AsBillingSubscriptionEditTimingEnum(); err == nil && e == omv3.BillingSubscriptionEditTimingEnumImmediate {
+		return time.Time{}, nil
+	}
+	at, err := t.AsDateTime()
+	if err != nil {
+		return time.Time{}, errors.New("only immediate or custom timing is emulated")
+	}
+	return at, checkChangeTime(at)
+}
+
+// checkChangeTime refuses to start the next subscription more than two
+// minutes in the past, as OpenMeter does.
+func checkChangeTime(at time.Time) error {
+	if at.Before(time.Now().Add(-2 * time.Minute)) {
+		return errors.New("cannot create subscription in the past")
+	}
+	return nil
 }
 
 func timingIsNextCycle(t *om.SubscriptionTiming) bool {
@@ -800,6 +866,146 @@ func scheduleExternalMigration(t *testing.T, f *fakeServer, subID string, versio
 	}
 	f.endSubscription(&sub, true)
 	f.newSubscription(sub.CustomerId, plan, om.SubscriptionStatusScheduled, *sub.ActiveTo, sub.Metadata)
+}
+
+// TestEnsureSubscription_MoveAnchor: an account moving onto a contract
+// bills on the contract's day from the change, through v1 and v3 alike.
+func TestEnsureSubscription_MoveAnchor(t *testing.T) {
+	contractDay := time.Date(2026, time.December, 18, 0, 0, 0, 0, time.UTC)
+	moving := func(planKey string) DesiredSubscription {
+		d := desiredSub(planKey)
+		d.BillingAnchor = &contractDay
+		d.MoveAnchor = true
+		return d
+	}
+
+	for _, tc := range []struct{ name, planKey string }{{"v1 change", "q"}, {"v3 change", "r"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, f := newTestClient(t)
+			f.seedCustomer("cust")
+			f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+			f.seedPlanVersion(tc.planKey, 1, omv3.BillingPlanStatusActive)
+			if tc.planKey == "r" {
+				f.convertUsage("r")
+			}
+			if _, err := c.EnsureSubscription(context.Background(), desiredSub("p")); err != nil {
+				t.Fatalf("subscribe: %v", err)
+			}
+
+			state, err := c.EnsureSubscription(context.Background(), moving(tc.planKey))
+			if err != nil {
+				t.Fatalf("move onto %s: %v", tc.planKey, err)
+			}
+			if state.Current.Plan.Key != tc.planKey || !state.Current.BillingAnchor.Equal(contractDay) {
+				t.Errorf("plan %s, anchor %s; want %s anchored at %s", state.Current.Plan.Key, state.Current.BillingAnchor, tc.planKey, contractDay)
+			}
+		})
+	}
+}
+
+func TestPeriodChangeTime(t *testing.T) {
+	started := time.Date(2026, time.November, 18, 9, 30, 0, 0, time.UTC)
+	boundary := time.Date(2026, time.December, 18, 0, 0, 0, 0, time.UTC)
+	next := boundary.AddDate(0, 1, 0)
+	sub := om.Subscription{ActiveFrom: started}
+
+	tests := []struct {
+		name     string
+		period   *om.Period
+		now      time.Time
+		due      *time.Time
+		wantAt   time.Time
+		wantWait *time.Time
+	}{
+		{name: "no period changes now", now: boundary},
+		{name: "first period waits for its end",
+			period: &om.Period{From: started, To: boundary}, now: started.Add(time.Minute), wantWait: &boundary},
+		{name: "mid period waits for its end",
+			period: &om.Period{From: boundary, To: next}, now: boundary.AddDate(0, 0, 10), wantWait: &next},
+		{name: "just after a boundary is timed at it",
+			period: &om.Period{From: boundary, To: next}, now: boundary.Add(5 * time.Second), wantAt: boundary},
+		{name: "at the tolerance is timed at it",
+			period: &om.Period{From: boundary, To: next}, now: boundary.Add(periodChangeTolerance), wantAt: boundary},
+		{name: "past the tolerance waits for the next one",
+			period: &om.Period{From: boundary, To: next}, now: boundary.Add(periodChangeTolerance + time.Second), wantWait: &next},
+		{name: "a missed boundary changes now",
+			period: &om.Period{From: boundary, To: next}, now: boundary.Add(10 * time.Minute), due: &boundary},
+		{name: "not yet due waits",
+			period: &om.Period{From: started, To: boundary}, now: boundary.Add(-time.Hour), due: &boundary, wantWait: &boundary},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			at, wait := periodChangeTime(sub, tt.period, tt.now, tt.due)
+			if !at.Equal(tt.wantAt) {
+				t.Errorf("at = %s, want %s", at, tt.wantAt)
+			}
+			switch {
+			case (wait == nil) != (tt.wantWait == nil):
+				t.Errorf("wait = %v, want %v", wait, tt.wantWait)
+			case wait != nil && !wait.Equal(*tt.wantWait):
+				t.Errorf("wait = %s, want %s", wait, tt.wantWait)
+			}
+		})
+	}
+}
+
+// TestEnsureSubscription_ChangeAtPeriodEnd: an amended contract keeps its
+// plan until the billing period ends, then changes timed at the boundary,
+// keeping its billing day.
+func TestEnsureSubscription_ChangeAtPeriodEnd(t *testing.T) {
+	c, f := newTestClient(t)
+	f.seedCustomer("cust")
+	f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+	f.seedPlanVersion("q", 1, omv3.BillingPlanStatusActive)
+	before, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	sub := before.Current
+	amend := desiredSub("q")
+	amend.ChangeAtPeriodEnd = true
+
+	// Mid period: nothing changes until it ends.
+	now := time.Now()
+	periodEnd := now.Add(10 * 24 * time.Hour)
+	f.billingPeriods[sub.Id] = om.Period{From: sub.ActiveFrom, To: periodEnd}
+	writes := f.subscriptionWrites
+	amend.Now = now
+	state, err := c.EnsureSubscription(context.Background(), amend)
+	if err != nil {
+		t.Fatalf("amend mid period: %v", err)
+	}
+	if f.subscriptionWrites != writes || state.Current.Id != sub.Id || state.ChangeAt == nil || !state.ChangeAt.Equal(periodEnd) {
+		t.Fatalf("writes = %d, state = %+v; want none, still %s, changing at %s", f.subscriptionWrites-writes, state, sub.Id, periodEnd)
+	}
+
+	// Just after the next period starts: the change is timed at its start.
+	boundary := sub.ActiveFrom.Add(time.Second)
+	f.billingPeriods[sub.Id] = om.Period{From: boundary, To: boundary.AddDate(0, 1, 0)}
+	amend.Now = boundary.Add(20 * time.Second)
+	state, err = c.EnsureSubscription(context.Background(), amend)
+	if err != nil {
+		t.Fatalf("amend at the boundary: %v", err)
+	}
+	if state.Current.Plan.Key != "q" || state.ChangeAt != nil {
+		t.Fatalf("state = %+v, want on q with nothing pending", state)
+	}
+	if at := f.changesAt[sub.Id]; !at.Equal(boundary) {
+		t.Errorf("change timed at %s, want %s", at, boundary)
+	}
+	if !state.Current.BillingAnchor.Equal(sub.BillingAnchor) {
+		t.Errorf("anchor = %s, want the contract's %s", state.Current.BillingAnchor, sub.BillingAnchor)
+	}
+
+	// A new version of the same plan still migrates straight away.
+	f.publishPlanVersion("q", 2)
+	state, err = c.EnsureSubscription(context.Background(), amend)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if state.Current.Plan.Version != 2 || state.ChangeAt != nil {
+		t.Errorf("state = %+v, want migrated to v2 now", state)
+	}
 }
 
 func TestEnsureSubscription_ExternalPendingMigrationIsConverged(t *testing.T) {

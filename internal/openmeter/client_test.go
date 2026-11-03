@@ -58,6 +58,12 @@ type fakeServer struct {
 	// counts the changes made through the v3 API.
 	subscriptionWrites int
 	v3Changes          int
+	// billingPeriods is each subscription's current aligned billing period,
+	// as GET /subscriptions/{id} reports it; unset reports none.
+	billingPeriods map[string]om.Period
+	// changesAt records the custom timing of each plan change, by the id of
+	// the subscription it ended.
+	changesAt map[string]time.Time
 	// pendingLinesInvoiced counts invoice-pending-lines actions;
 	// invoicesDeleted records deleted invoice ids in order.
 	pendingLinesInvoiced int
@@ -148,6 +154,8 @@ func newTestClient(t *testing.T) (Client, *fakeServer) {
 		featureByID:             map[string]string{},
 		plans:                   map[string]omv3.BillingPlan{},
 		subscriptions:           map[string]om.Subscription{},
+		billingPeriods:          map[string]om.Period{},
+		changesAt:               map[string]time.Time{},
 		pendingLines:            map[string]fakePendingLines{},
 	}
 	srv := httptest.NewServer(f)

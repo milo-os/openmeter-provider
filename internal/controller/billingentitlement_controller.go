@@ -58,7 +58,21 @@ const (
 	conditionReasonPlanNotPublished        = "PlanNotPublished"
 	conditionReasonMigrationScheduled      = "MigrationScheduled"
 	conditionReasonContractNotStarted      = "ContractNotStarted"
+	conditionReasonOfferChangeScheduled    = "OfferChangeScheduled"
 )
+
+// ContractStartedAnnotation records on a BillingEntitlement that its
+// account has been moved onto its contract, with the contract's start as
+// the value. From then on a change of offerRef amends the contract, and
+// takes effect at the end of the billing period, rather than moving the
+// account onto it there and then.
+const ContractStartedAnnotation = "openmeter.miloapis.com/contractStartedAt"
+
+// OfferChangeAtAnnotation records on a BillingEntitlement when an amendment
+// to its contract is due (RFC 3339): the end of the billing period it was
+// made in. A change that misses that boundary is made as soon as it can,
+// rather than a period late. Removed once the change is made.
+const OfferChangeAtAnnotation = "openmeter.miloapis.com/offerChangeAt"
 
 // Metadata written on the subscriptions this controller creates, so they can
 // be traced back from OpenMeter.
@@ -98,7 +112,12 @@ const (
 //     OpenMeter refuses to delete a customer with live subscriptions and the
 //     account's own finalizer would otherwise never complete.
 //   - Contract starting later: nothing is subscribed until its start date,
-//     then the subscription bills on the contract's day of the month.
+//     then the subscription bills on the contract's day of the month. An
+//     account moving onto a contract keeps its subscription until then, and
+//     changes plan and billing day on the start date.
+//   - offerRef switched on a started contract: the subscription changes
+//     plan at the end of its billing period, so each invoice carries one
+//     price.
 type BillingEntitlementReconciler struct {
 	client.Client
 	OpenMeterClient openmeter.Client
@@ -178,29 +197,43 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 	planKey := planKeyForOffer(&offer)
 	logger = logger.WithValues("planKey", planKey)
 
+	now := r.now()
 	anchor := subscriptionBillingAnchor(&account)
-	if contract := be.Spec.Contract; contract != nil {
-		// OpenMeter can't start a subscription in the past, and a scheduled
-		// one can't be deleted cleanly (see nextSubscriptionStep), so a
-		// contract starting later is subscribed on the day it starts.
-		// Billing only admits contracts starting today or later.
-		startsAt := contract.StartsAt.UTC()
-		if wait := startsAt.Sub(r.now()); wait > 0 {
-			return r.syncWaiting(ctx, &be, conditionReasonContractNotStarted,
-				fmt.Errorf("the contract starts at %s, when its subscription is created", startsAt.Format(time.RFC3339)), wait)
-		}
-		anchor = startsAt
-	}
-	state, err := r.OpenMeterClient.EnsureSubscription(ctx, openmeter.DesiredSubscription{
-		CustomerKey:   customerKey,
-		PlanKey:       planKey,
-		BillingAnchor: &anchor,
+	desired := openmeter.DesiredSubscription{
+		CustomerKey: customerKey,
+		PlanKey:     planKey,
 		Metadata: map[string]string{
 			subscriptionMetadataEntitlement:    be.Namespace + "/" + be.Name,
 			subscriptionMetadataBillingAccount: account.Name,
 			subscriptionMetadataOffer:          offer.Name,
 		},
-	})
+		Now: now,
+	}
+	contractStarted := false
+	if contract := be.Spec.Contract; contract != nil {
+		// OpenMeter can't start a subscription in the past, and a scheduled
+		// one can't be deleted cleanly (see nextSubscriptionStep), so a
+		// contract starting later is subscribed on the day it starts. An
+		// account already subscribed keeps that subscription until then.
+		// Billing only admits contracts starting today or later.
+		startsAt := contract.StartsAt.UTC()
+		if wait := startsAt.Sub(now); wait > 0 {
+			return r.syncWaiting(ctx, &be, conditionReasonContractNotStarted,
+				fmt.Errorf("the contract starts at %s, when the account is subscribed to its Offer", startsAt.Format(time.RFC3339)), wait)
+		}
+		anchor = startsAt
+		// Moving onto the contract changes plan at once and bills on the
+		// contract's day; once moved, a change amends the contract and waits
+		// for the end of the billing period.
+		_, contractStarted = be.Annotations[ContractStartedAnnotation]
+		desired.MoveAnchor = !contractStarted
+		desired.ChangeAtPeriodEnd = contractStarted
+		if due, err := time.Parse(time.RFC3339, be.Annotations[OfferChangeAtAnnotation]); err == nil {
+			desired.ChangeDue = &due
+		}
+	}
+	desired.BillingAnchor = &anchor
+	state, err := r.OpenMeterClient.EnsureSubscription(ctx, desired)
 	if err != nil {
 		switch {
 		case errors.Is(err, openmeter.ErrCustomerNotFound):
@@ -219,8 +252,24 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		return r.openMeterFailed(ctx, &be, fmt.Errorf("ensure subscription: %w", err))
 	}
 
+	if be.Spec.Contract != nil {
+		if err := r.recordContractState(ctx, &be, state.ChangeAt); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Subscriptions can be changed in OpenMeter directly; the resync
+	// restores the entitled one without waiting for a Kubernetes event.
+	requeueAfter := subscriptionResyncAfter
 	reason, msg := conditionReasonSynced, subscriptionMessage(state)
-	if state.Pending != nil {
+	switch {
+	case state.ChangeAt != nil:
+		reason = conditionReasonOfferChangeScheduled
+		msg += fmt.Sprintf("; changes to Offer %q at the end of its billing period, %s",
+			offer.Name, state.ChangeAt.UTC().Format(time.RFC3339))
+		// Just after the boundary, so OpenMeter is in the new period too.
+		requeueAfter = min(requeueAfter, state.ChangeAt.Sub(now)+changeAtPeriodEndDelay)
+	case state.Pending != nil:
 		reason = conditionReasonMigrationScheduled
 	}
 	changed, err := r.setSyncedCondition(ctx, &be, metav1.ConditionTrue, reason, msg)
@@ -231,9 +280,50 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		logger.Info("reconciled billing entitlement subscription", "subscriptionID", state.Current.Id)
 		r.event(&be, "Normal", EventReasonSynced, msg)
 	}
-	// Subscriptions can be changed in OpenMeter directly; the resync
-	// restores the entitled one without waiting for a Kubernetes event.
-	return ctrl.Result{RequeueAfter: subscriptionResyncAfter}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// changeAtPeriodEndDelay is how long after a billing period ends the
+// entitlement is reconciled to make the change deferred to it, allowing for
+// the provider's clock running ahead of OpenMeter's. It must stay well
+// inside openmeter's periodChangeTolerance.
+const changeAtPeriodEndDelay = 5 * time.Second
+
+// recordContractState records on a contract's entitlement that the account
+// is on its contract, once it is (ContractStartedAnnotation), and when an
+// amendment is due, while one is (OfferChangeAtAnnotation).
+func (r *BillingEntitlementReconciler) recordContractState(ctx context.Context, be *billingv1alpha1.BillingEntitlement, changeAt *time.Time) error {
+	want := map[string]string{}
+	if _, started := be.Annotations[ContractStartedAnnotation]; started || changeAt == nil {
+		want[ContractStartedAnnotation] = be.Spec.Contract.StartsAt.UTC().Format(time.RFC3339)
+	}
+	if changeAt != nil {
+		want[OfferChangeAtAnnotation] = changeAt.UTC().Format(time.RFC3339)
+	}
+	base := be.DeepCopy()
+	changed := false
+	for _, key := range []string{ContractStartedAnnotation, OfferChangeAtAnnotation} {
+		value, ok := want[key]
+		current, has := be.Annotations[key]
+		switch {
+		case ok && (!has || current != value):
+			if be.Annotations == nil {
+				be.Annotations = map[string]string{}
+			}
+			be.Annotations[key] = value
+			changed = true
+		case !ok && has:
+			delete(be.Annotations, key)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := r.Patch(ctx, be, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("record the contract's state: %w", err)
+	}
+	return nil
 }
 
 // subscriptionMessage describes a converged subscription for the condition.

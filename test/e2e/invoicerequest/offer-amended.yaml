@@ -1,0 +1,27 @@
+# The contract amended: a higher monthly charge, and no setup fee, which was
+# charged when the contract started.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ir-monthly-fee-amended
+spec:
+  displayName: "Dedicated server"
+  chargeType: Recurring
+  currency: USD
+  amount: "1200.00"
+  interval: monthly
+  serviceRef: bare-metal.miloapis.com
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-ir-offer-amended
+  annotations:
+    kubernetes.io/display-name: "E2E Bare Metal Contract (amended)"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - Recurring
+  servicePricingRefs:
+    - name: ir-monthly-fee-amended
+      namespace: openmeter-system
