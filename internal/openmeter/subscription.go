@@ -394,8 +394,11 @@ func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscr
 	}
 	key := string(desired.CustomerKey)
 	body.Customer.Key = &key
-	body.Plan.Key = &desired.PlanKey
-	body.Plan.Version = &version
+	body.Plan = &struct {
+		Id      *omv3.ULID        `json:"id,omitempty"`
+		Key     *omv3.ResourceKey `json:"key,omitempty"`
+		Version *int              `json:"version,omitempty"`
+	}{Key: &desired.PlanKey, Version: &version}
 	_, err := c.v3.do(ctx, http.MethodPost, "/subscriptions/"+url.PathEscape(target.Id)+"/change", nil, body, nil)
 	return reclassifySubscription(err)
 }
