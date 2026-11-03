@@ -295,6 +295,82 @@ func TestBillingEntitlement_Contract(t *testing.T) {
 	})
 }
 
+// TestBillingEntitlement_ContractMoveAndAmend: an account moved onto a
+// contract changes plan and billing day on the start date, and from then on
+// a change of Offer waits for the end of the billing period.
+func TestBillingEntitlement_ContractMoveAndAmend(t *testing.T) {
+	startsAt := time.Date(2026, time.March, 18, 0, 0, 0, 0, time.UTC)
+	now := startsAt.Add(time.Minute)
+	be := testEntitlement(testBEName, "test-offer")
+	be.Spec.Contract = &billingv1alpha1.BillingContract{StartsAt: metav1.NewTime(startsAt)}
+	r, omc, _ := newEntitlementReconciler(t, be, testAccount(), cpuOffer())
+	r.Now = func() time.Time { return now }
+
+	// The start date: the plan changes now, onto the contract's day.
+	reconcileEntitlement(t, r, testBEName)
+	d := omc.ensureCalls[0]
+	if !d.MoveAnchor || d.ChangeAtPeriodEnd || d.BillingAnchor == nil || !d.BillingAnchor.Equal(startsAt) {
+		t.Fatalf("moving onto the contract: MoveAnchor %v, ChangeAtPeriodEnd %v, anchor %v; want a move to %s now",
+			d.MoveAnchor, d.ChangeAtPeriodEnd, d.BillingAnchor, startsAt)
+	}
+	got, _ := getEntitlement(t, r, testBEName)
+	if v := got.Annotations[ContractStartedAnnotation]; v != "2026-03-18T00:00:00Z" {
+		t.Fatalf("%s = %q, want the contract's start", ContractStartedAnnotation, v)
+	}
+	assertCondition(t, r, metav1.ConditionTrue, conditionReasonSynced)
+
+	// An amendment: the change waits for the end of the billing period.
+	periodEnd := time.Date(2026, time.April, 18, 0, 0, 0, 0, time.UTC)
+	now = time.Date(2026, time.March, 25, 12, 0, 0, 0, time.UTC)
+	omc.ensureFn = func(d openmeter.DesiredSubscription) (openmeter.SubscriptionState, error) {
+		return openmeter.SubscriptionState{
+			Current:     om.Subscription{Id: "sub-1", Status: om.SubscriptionStatusActive, Plan: &om.PlanReference{Key: "old-plan", Version: 1}},
+			PlanVersion: 1,
+			ChangeAt:    &periodEnd,
+		}, nil
+	}
+	res := reconcileEntitlement(t, r, testBEName)
+	d = omc.ensureCalls[len(omc.ensureCalls)-1]
+	if d.MoveAnchor || !d.ChangeAtPeriodEnd || d.ChangeDue != nil {
+		t.Errorf("amending: MoveAnchor %v, ChangeAtPeriodEnd %v, ChangeDue %v; want the change at the period end", d.MoveAnchor, d.ChangeAtPeriodEnd, d.ChangeDue)
+	}
+	c := assertCondition(t, r, metav1.ConditionTrue, conditionReasonOfferChangeScheduled)
+	if !strings.Contains(c.Message, "2026-04-18T00:00:00Z") {
+		t.Errorf("condition message = %q, want when it changes", c.Message)
+	}
+	if want := subscriptionResyncAfter; res.RequeueAfter != want {
+		t.Errorf("RequeueAfter = %v, want the resync %v (the change is weeks away)", res.RequeueAfter, want)
+	}
+	got, _ = getEntitlement(t, r, testBEName)
+	if v := got.Annotations[OfferChangeAtAnnotation]; v != "2026-04-18T00:00:00Z" {
+		t.Errorf("%s = %q, want the period end", OfferChangeAtAnnotation, v)
+	}
+
+	// Shortly before the end it comes back just after the boundary, and
+	// says when the change was due.
+	now = periodEnd.Add(-time.Minute)
+	res = reconcileEntitlement(t, r, testBEName)
+	if want := time.Minute + changeAtPeriodEndDelay; res.RequeueAfter != want {
+		t.Errorf("RequeueAfter = %v, want %v (just after the boundary)", res.RequeueAfter, want)
+	}
+	if d = omc.ensureCalls[len(omc.ensureCalls)-1]; d.ChangeDue == nil || !d.ChangeDue.Equal(periodEnd) {
+		t.Errorf("ChangeDue = %v, want %s", d.ChangeDue, periodEnd)
+	}
+
+	// Once the change is made, the due date goes.
+	omc.ensureFn = nil
+	now = periodEnd.Add(changeAtPeriodEndDelay)
+	reconcileEntitlement(t, r, testBEName)
+	got, _ = getEntitlement(t, r, testBEName)
+	if _, ok := got.Annotations[OfferChangeAtAnnotation]; ok {
+		t.Errorf("%s still set after the change", OfferChangeAtAnnotation)
+	}
+	if _, ok := got.Annotations[ContractStartedAnnotation]; !ok {
+		t.Errorf("%s removed", ContractStartedAnnotation)
+	}
+	assertCondition(t, r, metav1.ConditionTrue, conditionReasonSynced)
+}
+
 func TestSubscriptionBillingAnchor(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

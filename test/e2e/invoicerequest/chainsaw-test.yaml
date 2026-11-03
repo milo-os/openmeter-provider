@@ -13,7 +13,9 @@ spec:
       - a contract starting today is subscribed straight away, billing on
         today's day of the month, and OpenMeter invoices the setup fee and
         first month on its own;
-      - a Preview then shows what comes next.
+      - a Preview then shows what comes next;
+      - amending the started contract waits for the end of its billing
+        period, rather than changing the subscription straight away.
 
     Billing's operator, webhooks and stripe-provider do not run in e2e: the
     Offer is published with ../offer/publish.sh and the payment method chain
@@ -145,6 +147,30 @@ spec:
         - script:
             timeout: 150s
             content: bash preview-next-invoice.sh
+      catch:
+        - script:
+            content: bash release-account.sh
+
+    - name: amending the contract waits for the end of the billing period
+      try:
+        - apply:
+            file: offer-amended.yaml
+        - script:
+            timeout: 30s
+            content: bash ../offer/publish.sh e2e-ir-offer-amended
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-ir-offer-amended
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+        - script:
+            timeout: 90s
+            content: bash amend.sh
       catch:
         - script:
             content: bash release-account.sh
