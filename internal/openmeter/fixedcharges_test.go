@@ -156,6 +156,11 @@ func TestDecimals(t *testing.T) {
 	if got, err := AddDecimals(); err != nil || got != "0" {
 		t.Errorf("AddDecimals() = %q, %v; want 0", got, err)
 	}
+	for value, want := range map[string]bool{"0": true, "0.00": true, "": true, "0.01": false, "-1": false} {
+		if got, err := IsZeroDecimal(value); err != nil || got != want {
+			t.Errorf("IsZeroDecimal(%q) = %v, %v; want %v", value, got, err, want)
+		}
+	}
 	if _, err := AmountBeforeTax(om.InvoiceTotals{Total: "lots"}); err == nil {
 		t.Error("an invalid total: want an error")
 	}
