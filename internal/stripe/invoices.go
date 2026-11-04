@@ -63,6 +63,34 @@ type Invoice struct {
 	// HostedInvoiceURL is "" while the invoice is a draft.
 	HostedInvoiceURL string
 	Metadata         map[string]string
+	// AttemptCount is how many times Stripe has tried to collect the
+	// invoice, and NextPaymentAttempt when it will try next (nil when it
+	// won't retry).
+	AttemptCount       int64
+	NextPaymentAttempt *time.Time
+	// PaymentIntentID is the PaymentIntent collecting the invoice, on
+	// Stripe API versions that still put it on the invoice. Later versions
+	// list it under the invoice's payments; see LatestPaymentAttempt.
+	PaymentIntentID string
+}
+
+// PaymentIntent statuses LatestPaymentAttempt reports.
+const (
+	PaymentIntentRequiresPaymentMethod = "requires_payment_method"
+	PaymentIntentRequiresAction        = "requires_action"
+	PaymentIntentProcessing            = "processing"
+	PaymentIntentSucceeded             = "succeeded"
+)
+
+// PaymentAttempt is where the latest attempt to collect an invoice stands:
+// its PaymentIntent's status and, when it failed, Stripe's error. The error
+// is only for mapping onto a normalized reason; it must never be shown as
+// is.
+type PaymentAttempt struct {
+	Status      string
+	ErrorType   string
+	ErrorCode   string
+	DeclineCode string
 }
 
 // Invoices reads and annotates invoices in Stripe with the API key of the
@@ -131,6 +159,86 @@ func (c *Invoices) ListCustomerInvoices(ctx context.Context, customerID string) 
 		query.Set("starting_after", page.Data[len(page.Data)-1].ID)
 	}
 	return nil, fmt.Errorf("list Stripe invoices of customer %s: more than %d pages", customerID, maxInvoicePages)
+}
+
+// LatestPaymentAttempt returns the state of the latest attempt to collect
+// inv, or nil when Stripe has no PaymentIntent for it.
+func (c *Invoices) LatestPaymentAttempt(ctx context.Context, inv Invoice) (*PaymentAttempt, error) {
+	id := inv.PaymentIntentID
+	if id == "" {
+		var err error
+		if id, err = c.latestInvoicePaymentIntent(ctx, inv.ID); err != nil {
+			return nil, err
+		}
+	}
+	if id == "" {
+		return nil, nil
+	}
+	var pi struct {
+		Status           string `json:"status"`
+		LastPaymentError *struct {
+			Type        string `json:"type"`
+			Code        string `json:"code"`
+			DeclineCode string `json:"decline_code"`
+		} `json:"last_payment_error"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/payment_intents/"+url.PathEscape(id), nil, &pi); err != nil {
+		return nil, fmt.Errorf("get Stripe PaymentIntent %s: %w", id, err)
+	}
+	attempt := &PaymentAttempt{Status: pi.Status}
+	if e := pi.LastPaymentError; e != nil {
+		attempt.ErrorType, attempt.ErrorCode, attempt.DeclineCode = e.Type, e.Code, e.DeclineCode
+	}
+	return attempt, nil
+}
+
+// latestInvoicePaymentIntent returns the PaymentIntent of the invoice's
+// newest payment, from the invoice payments Stripe lists for it on API
+// versions that no longer put payment_intent on the invoice.
+func (c *Invoices) latestInvoicePaymentIntent(ctx context.Context, invoiceID string) (string, error) {
+	var page struct {
+		Data []struct {
+			Created int64 `json:"created"`
+			Payment struct {
+				Type          string          `json:"type"`
+				PaymentIntent json.RawMessage `json:"payment_intent"`
+			} `json:"payment"`
+		} `json:"data"`
+	}
+	query := url.Values{"invoice": {invoiceID}, "limit": {"100"}}
+	if err := c.do(ctx, http.MethodGet, "/v1/invoice_payments?"+query.Encode(), nil, &page); err != nil {
+		return "", fmt.Errorf("list payments of Stripe invoice %s: %w", invoiceID, err)
+	}
+	var id string
+	var newest int64
+	for _, p := range page.Data {
+		if p.Payment.Type != "payment_intent" {
+			continue
+		}
+		if pid := expandableID(p.Payment.PaymentIntent); pid != "" && (id == "" || p.Created > newest) {
+			id, newest = pid, p.Created
+		}
+	}
+	return id, nil
+}
+
+// expandableID returns the id of a Stripe field that is either an id or,
+// when expanded, an object with one.
+func expandableID(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var id string
+	if err := json.Unmarshal(raw, &id); err == nil {
+		return id
+	}
+	var obj struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return obj.ID
+	}
+	return ""
 }
 
 // SetInvoiceMetadata sets the given metadata keys on the invoice, leaving
@@ -209,25 +317,31 @@ type apiInvoice struct {
 	StatusTransitions struct {
 		PaidAt *int64 `json:"paid_at"`
 	} `json:"status_transitions"`
+	AttemptCount       int64           `json:"attempt_count"`
+	NextPaymentAttempt *int64          `json:"next_payment_attempt"`
+	PaymentIntent      json.RawMessage `json:"payment_intent"`
 }
 
 func (a apiInvoice) invoice() Invoice {
 	return Invoice{
-		ID:               a.ID,
-		Number:           deref(a.Number),
-		Status:           deref(a.Status),
-		Currency:         strings.ToUpper(a.Currency),
-		Total:            a.Total,
-		AmountDue:        a.AmountDue,
-		AmountPaid:       a.AmountPaid,
-		AmountRemaining:  a.AmountRemaining,
-		Created:          unix(a.Created),
-		PeriodStart:      unix(a.PeriodStart),
-		PeriodEnd:        unix(a.PeriodEnd),
-		DueDate:          unixPtr(a.DueDate),
-		PaidAt:           unixPtr(a.StatusTransitions.PaidAt),
-		HostedInvoiceURL: deref(a.HostedInvoiceURL),
-		Metadata:         a.Metadata,
+		ID:                 a.ID,
+		Number:             deref(a.Number),
+		Status:             deref(a.Status),
+		Currency:           strings.ToUpper(a.Currency),
+		Total:              a.Total,
+		AmountDue:          a.AmountDue,
+		AmountPaid:         a.AmountPaid,
+		AmountRemaining:    a.AmountRemaining,
+		Created:            unix(a.Created),
+		PeriodStart:        unix(a.PeriodStart),
+		PeriodEnd:          unix(a.PeriodEnd),
+		DueDate:            unixPtr(a.DueDate),
+		PaidAt:             unixPtr(a.StatusTransitions.PaidAt),
+		HostedInvoiceURL:   deref(a.HostedInvoiceURL),
+		Metadata:           a.Metadata,
+		AttemptCount:       a.AttemptCount,
+		NextPaymentAttempt: unixPtr(a.NextPaymentAttempt),
+		PaymentIntentID:    expandableID(a.PaymentIntent),
 	}
 }
 

@@ -245,8 +245,16 @@ func (r *BillingAccountReconciler) patchStripeInvoiceStatus(
 	if refreshLink {
 		annotations[InvoiceDocumentFetchedAtAnnotation] = now.UTC().Format(time.RFC3339)
 	}
+	attemptEvent, attempts := r.paymentAttemptEvent(ctx, obj, inv)
+	if attempts != "" {
+		annotations[PaymentAttemptsReportedAnnotation] = attempts
+	}
 	if err := r.patchInvoiceAnnotations(ctx, obj, annotations); err != nil {
 		return err
+	}
+	// See patchInvoiceStatus.
+	if attemptEvent != nil {
+		defer recordInvoiceEvents(r.Recorder, obj, *attemptEvent)
 	}
 
 	statusBase := obj.DeepCopy()
@@ -257,6 +265,7 @@ func (r *BillingAccountReconciler) patchStripeInvoiceStatus(
 	if err := r.Status().Patch(ctx, obj, client.MergeFrom(statusBase)); err != nil {
 		return fmt.Errorf("patch Invoice status %s/%s: %w", obj.Namespace, obj.Name, err)
 	}
+	recordInvoiceEvents(r.Recorder, obj, invoiceStatusEvents(obj, statusBase.Status)...)
 	return nil
 }
 

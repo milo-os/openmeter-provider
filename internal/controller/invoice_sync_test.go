@@ -483,6 +483,19 @@ type fakeStripe struct {
 	listErr   error
 	listCalls int
 	metadata  map[string]map[string]string
+
+	// attempts is the latest payment attempt by Stripe invoice id.
+	attempts     map[string]*stripe.PaymentAttempt
+	attemptErr   error
+	attemptCalls int
+}
+
+func (f *fakeStripe) LatestPaymentAttempt(_ context.Context, inv stripe.Invoice) (*stripe.PaymentAttempt, error) {
+	f.attemptCalls++
+	if f.attemptErr != nil {
+		return nil, f.attemptErr
+	}
+	return f.attempts[inv.ID], nil
 }
 
 func (f *fakeStripe) ListCustomerInvoices(_ context.Context, customerID string) ([]stripe.Invoice, error) {
