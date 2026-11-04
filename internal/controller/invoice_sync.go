@@ -63,6 +63,7 @@ type StripeInvoices interface {
 	HostedInvoiceURL(ctx context.Context, stripeInvoiceID string) (string, error)
 	ListCustomerInvoices(ctx context.Context, customerID string) ([]stripe.Invoice, error)
 	SetInvoiceMetadata(ctx context.Context, stripeInvoiceID string, metadata map[string]string) error
+	LatestPaymentAttempt(ctx context.Context, inv stripe.Invoice) (*stripe.PaymentAttempt, error)
 }
 
 // Invoice Ready condition reasons this provider sets besides the phase
@@ -441,8 +442,18 @@ func (r *BillingAccountReconciler) patchInvoiceStatus(
 		annotations[InvoiceDocumentFetchedAtAnnotation] = now.UTC().Format(time.RFC3339)
 	}
 	addStripeInvoiceAnnotations(annotations, inStripe)
+	attemptEvent, attempts := r.paymentAttemptEvent(ctx, obj, inStripe)
+	if attempts != "" {
+		annotations[PaymentAttemptsReportedAnnotation] = attempts
+	}
 	if err := r.patchInvoiceAnnotations(ctx, obj, annotations); err != nil {
 		return err
+	}
+	// The attempt is stored now, so record it whatever happens to the
+	// status write; it goes after the status events, which come first on
+	// the timeline.
+	if attemptEvent != nil {
+		defer recordInvoiceEvents(r.Recorder, obj, *attemptEvent)
 	}
 
 	statusBase := obj.DeepCopy()
@@ -462,6 +473,7 @@ func (r *BillingAccountReconciler) patchInvoiceStatus(
 	if err := r.Status().Patch(ctx, obj, client.MergeFrom(statusBase)); err != nil {
 		return fmt.Errorf("patch Invoice status %s/%s: %w", obj.Namespace, obj.Name, err)
 	}
+	recordInvoiceEvents(r.Recorder, obj, invoiceStatusEvents(obj, statusBase.Status)...)
 	return nil
 }
 

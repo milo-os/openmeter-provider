@@ -175,3 +175,67 @@ func TestFormatAmount(t *testing.T) {
 		}
 	}
 }
+
+func TestLatestPaymentAttempt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/invoice_payments" && r.URL.Query().Get("invoice") == "in_basil":
+			// Newer API versions: the PaymentIntent is on the invoice's
+			// payments, newest not necessarily first.
+			_, _ = w.Write([]byte(`{"data":[
+				{"created":100,"payment":{"type":"payment_intent","payment_intent":"pi_old"}},
+				{"created":200,"payment":{"type":"payment_intent","payment_intent":{"id":"pi_new"}}},
+				{"created":300,"payment":{"type":"charge","charge":"ch_1"}}
+			]}`))
+		case r.URL.Path == "/v1/invoice_payments":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		case r.URL.Path == "/v1/payment_intents/pi_new":
+			_, _ = w.Write([]byte(`{"id":"pi_new","status":"requires_payment_method","last_payment_error":{"type":"card_error","code":"card_declined","decline_code":"insufficient_funds","message":"Your card has insufficient funds."}}`))
+		case r.URL.Path == "/v1/payment_intents/pi_legacy":
+			_, _ = w.Write([]byte(`{"id":"pi_legacy","status":"requires_action","last_payment_error":null}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"message":"not found"}}`))
+		}
+	}))
+	defer srv.Close()
+	c := newTestInvoices(t, "sk_test_123", srv.URL)
+	ctx := context.Background()
+
+	got, err := c.LatestPaymentAttempt(ctx, Invoice{ID: "in_basil"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := PaymentAttempt{Status: PaymentIntentRequiresPaymentMethod, ErrorType: "card_error", ErrorCode: "card_declined", DeclineCode: "insufficient_funds"}
+	if got == nil || *got != want {
+		t.Errorf("invoice payments: got %+v, want %+v", got, want)
+	}
+
+	got, err = c.LatestPaymentAttempt(ctx, Invoice{ID: "in_legacy", PaymentIntentID: "pi_legacy"})
+	if err != nil || got == nil || got.Status != PaymentIntentRequiresAction || got.ErrorCode != "" {
+		t.Errorf("payment_intent on the invoice: got %+v, %v", got, err)
+	}
+
+	got, err = c.LatestPaymentAttempt(ctx, Invoice{ID: "in_none"})
+	if err != nil || got != nil {
+		t.Errorf("no payments: got %+v, %v; want nil", got, err)
+	}
+}
+
+func TestInvoicePaymentFields(t *testing.T) {
+	for name, raw := range map[string]string{
+		"id":       `"pi_1"`,
+		"expanded": `{"id":"pi_1","object":"payment_intent"}`,
+	} {
+		inv := apiInvoice{AttemptCount: 2, NextPaymentAttempt: ptrTo(int64(1762335000)), PaymentIntent: []byte(raw)}.invoice()
+		if inv.PaymentIntentID != "pi_1" || inv.AttemptCount != 2 || inv.NextPaymentAttempt == nil ||
+			!inv.NextPaymentAttempt.Equal(time.Unix(1762335000, 0)) {
+			t.Errorf("%s: got %+v", name, inv)
+		}
+	}
+	if inv := (apiInvoice{PaymentIntent: []byte("null")}).invoice(); inv.PaymentIntentID != "" || inv.NextPaymentAttempt != nil {
+		t.Errorf("null payment_intent: got %+v", inv)
+	}
+}
+
+func ptrTo[T any](v T) *T { return &v }

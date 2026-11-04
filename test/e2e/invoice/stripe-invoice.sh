@@ -1,12 +1,16 @@
 #!/bin/bash
-# stripe-invoice.sh <create|void> — an invoice staff create in Stripe
+# stripe-invoice.sh <create|decline|void> — an invoice staff create in Stripe
 # themselves, for the account's Stripe customer, which OpenMeter never sees.
 #
-#   create  creates and finalizes a $12.34 invoice sent for payment in 30
-#           days, and expects an Open Milo Invoice for it, projected from
-#           Stripe, with the Stripe invoice naming it in its metadata.
-#   void    voids it in Stripe and expects the Milo Invoice to be Void with
-#           nothing owed.
+#   create   creates and finalizes a $12.34 invoice sent for payment in 30
+#            days, and expects an Open Milo Invoice for it, projected from
+#            Stripe, with the Stripe invoice naming it in its metadata.
+#   decline  tries to pay it with Stripe's test card that can be attached to
+#            a customer but whose every charge is declined, and expects it to
+#            stay Open with the whole amount still due. The card is detached
+#            again afterwards.
+#   void     voids it in Stripe and expects the Milo Invoice to be Void with
+#            nothing owed.
 #
 # auto_advance is off so Stripe neither emails nor charges anyone. The
 # invoice's id is kept in /tmp between the two steps (chainsaw script
@@ -34,6 +38,26 @@ case "$action" in
     want_phase=Open
     want_due=12.34
     ;;
+  decline)
+    id=$(cat "$cache")
+    # Attaching a test token gives the customer its own copy of the card.
+    # Cards declined outright (pm_card_visa_chargeDeclined*) can't be
+    # attached, since Stripe checks a card when attaching it; this one
+    # (4000 0000 0000 0341) passes that check and fails every charge.
+    attached=$(stripe POST /payment_methods/pm_card_chargeCustomerFail/attach -d "customer=${customer}")
+    pm=$(echo "$attached" | jq -r '.id // empty')
+    [ -n "$pm" ] || fail "could not attach the declining test card to customer ${customer}" "$attached"
+    # Stripe answers 402 with the decline; the invoice records the attempt.
+    paid=$(stripe POST "/invoices/${id}/pay" -d "payment_method=${pm}")
+    echo "Stripe's answer to the payment: $(echo "$paid" | jq -c '.error // {status}')"
+    stripe POST "/payment_methods/${pm}/detach" >/dev/null
+    sinv=$(stripe GET "/invoices/${id}")
+    [ "$(echo "$sinv" | jq -r .status)" = "open" ] || fail "Stripe invoice ${id} is not open after the declined payment" "$sinv"
+    [ "$(echo "$sinv" | jq -r '.attempt_count // 0')" -ge 1 ] || fail "Stripe invoice ${id} records no payment attempt" "$sinv"
+    echo "OK: payment of Stripe invoice ${id} declined"
+    want_phase=Open
+    want_due=12.34
+    ;;
   void)
     id=$(cat "$cache")
     sinv=$(stripe POST "/invoices/${id}/void")
@@ -43,7 +67,7 @@ case "$action" in
     want_due=0
     ;;
   *)
-    fail "usage: stripe-invoice.sh <create|void>"
+    fail "usage: stripe-invoice.sh <create|decline|void>"
     ;;
 esac
 
