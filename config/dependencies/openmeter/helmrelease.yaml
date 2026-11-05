@@ -112,6 +112,9 @@ spec:
     # Webhook delivery service (outbound events/invoices).
     svix:
       enabled: true
+      image:
+        repository: docker.io/svix/svix-server
+        tag: v1.104.0
       # GitOps note: Svix signs webhooks with this secret. See
       # https://openmeter.io/docs/reference/webhooks for rotating it.
       # Dev-only: In production and staging this MUST be a real
