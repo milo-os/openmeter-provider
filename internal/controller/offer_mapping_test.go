@@ -545,6 +545,40 @@ func TestBuildOfferMapping_FlatFeeNamesDoNotCollide(t *testing.T) {
 	}
 }
 
+// TestBuildOfferMapping_FeeQuantities: a fee's rate card charges its amount
+// times its quantity, named with the quantity, in its unit when it has one.
+// A fee with no quantity, from a snapshot taken before quantities, keeps
+// its name and amount.
+func TestBuildOfferMapping_FeeQuantities(t *testing.T) {
+	offer := baseOffer()
+	offer.Spec.ServicePricings = append(offer.Spec.ServicePricings,
+		billingv1alpha1.ServicePricingSnapshot{Name: "servers", Quantity: 3, Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeRecurring, DisplayName: "Dedicated server", Amount: "1000.00",
+			Interval: billingv1alpha1.ChargeIntervalMonthly}},
+		billingv1alpha1.ServicePricingSnapshot{Name: "ports", Quantity: 4, Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeRecurring, DisplayName: "Cross connect", Amount: "300.00",
+			PricingUnit: "port", Interval: billingv1alpha1.ChargeIntervalMonthly}},
+		billingv1alpha1.ServicePricingSnapshot{Name: "setup", Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeOneTime, DisplayName: "Setup fee", Amount: "1500.00",
+			ServiceRef: "compute.datumapis.com"}},
+	)
+	m := mustMapping(t, offer)
+
+	for i, want := range []struct{ name, amount, description string }{
+		{"Dedicated server × 3", "3000.00", "ServicePricing servers"},
+		{"Cross connect: 4 port × $300.00", "1200.00", "ServicePricing ports"},
+		{"Setup fee", "1500.00", "ServicePricing setup (compute.datumapis.com)"},
+	} {
+		rc, flat := mustFlatRateCard(t, m.Plan.Phases[0], i)
+		if rc.Name != want.name || flat.Amount != want.amount {
+			t.Errorf("rate card %d = %q for %s, want %q for %s", i, rc.Name, flat.Amount, want.name, want.amount)
+		}
+		if rc.Description == nil || !strings.HasPrefix(*rc.Description, want.description) {
+			t.Errorf("rate card %d description = %v, want prefix %q", i, rc.Description, want.description)
+		}
+	}
+}
+
 func TestBuildOfferMapping_ProjectNameDimensionAllowed(t *testing.T) {
 	offer := baseOffer()
 	offer.Spec.ServicePricings = []billingv1alpha1.ServicePricingSnapshot{

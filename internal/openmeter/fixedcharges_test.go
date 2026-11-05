@@ -137,6 +137,30 @@ func TestDiscountedAmount(t *testing.T) {
 	}
 }
 
+func TestMultiplyAmount(t *testing.T) {
+	for _, tc := range []struct {
+		amount   string
+		quantity int32
+		want     string
+	}{
+		{"1000.00", 1, "1000.00"},
+		{"1000.00", 3, "3000.00"},
+		{"300", 4, "1200"},
+		{"0.125", 3, "0.375"},
+	} {
+		got, err := MultiplyAmount(tc.amount, tc.quantity)
+		if err != nil || got != tc.want {
+			t.Errorf("MultiplyAmount(%s, %d) = %q, %v; want %q", tc.amount, tc.quantity, got, err, tc.want)
+		}
+	}
+	if _, err := MultiplyAmount("1000", 0); err == nil {
+		t.Error("a zero quantity: want an error")
+	}
+	if _, err := MultiplyAmount("lots", 2); err == nil {
+		t.Error("an invalid amount: want an error")
+	}
+}
+
 func TestDecimals(t *testing.T) {
 	for _, tc := range []struct {
 		total, exclusiveTax, want string

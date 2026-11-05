@@ -429,11 +429,15 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 		return err
 	}
 	key := boundedKey(sanitizeKeyPart(sp.Name), "flat_fee", sp.Name)
-	name := sp.Spec.DisplayName
-	if name == "" {
-		name = sp.Name
+	name := feeName(sp)
+	amount, err := openmeter.MultiplyAmount(sp.Spec.Amount, feeQuantity(sp))
+	if err != nil {
+		return invalidOffer("service pricing %q: %v", sp.Name, err)
 	}
-	description := fmt.Sprintf("ServicePricing %s (%s)", sp.Name, sp.Spec.ServiceRef)
+	description := fmt.Sprintf("ServicePricing %s", sp.Name)
+	if sp.Spec.ServiceRef != "" {
+		description = fmt.Sprintf("ServicePricing %s (%s)", sp.Name, sp.Spec.ServiceRef)
+	}
 	// v1 charged flat fees in advance by default; v3 defaults to arrears.
 	paymentTerm := omv3.BillingPricePaymentTermInAdvance
 	card := omv3.BillingRateCard{
@@ -445,7 +449,7 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	}
 	if err := card.Price.FromBillingPriceFlat(omv3.BillingPriceFlat{
 		Type:   omv3.BillingPriceFlatTypeFlat,
-		Amount: sp.Spec.Amount,
+		Amount: amount,
 	}); err != nil {
 		return fmt.Errorf("service pricing %q: encode price: %w", sp.Name, err)
 	}
@@ -468,6 +472,36 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	}
 	b.rateCards = append(b.rateCards, card)
 	return nil
+}
+
+// feeQuantity is how many of a fee an Offer charges: its snapshot's
+// quantity, or 1 for a snapshot taken before quantities existed.
+func feeQuantity(sp billingv1alpha1.ServicePricingSnapshot) int32 {
+	if sp.Quantity > 0 {
+		return sp.Quantity
+	}
+	return 1
+}
+
+// feeName is a fee's rate card name, which OpenMeter uses for its invoice
+// lines: its display name, with its quantity in its pricingUnit when it has
+// one ("Cross connect: 4 port × $300.00"), or as a count when it's charged
+// more than once ("Dedicated server × 3"). The amount on the rate card is
+// the fee's total, so the name is where the unit price shows.
+func feeName(sp billingv1alpha1.ServicePricingSnapshot) string {
+	name := sp.Spec.DisplayName
+	if name == "" {
+		name = sp.Name
+	}
+	quantity := feeQuantity(sp)
+	switch {
+	case sp.Spec.PricingUnit != "":
+		return fmt.Sprintf("%s: %d %s × $%s", name, quantity, sp.Spec.PricingUnit, sp.Spec.Amount)
+	case quantity > 1:
+		return fmt.Sprintf("%s × %d", name, quantity)
+	default:
+		return name
+	}
 }
 
 // usageFeature builds the feature for meter restricted by filters (nil for

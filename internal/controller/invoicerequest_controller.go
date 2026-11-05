@@ -224,8 +224,9 @@ func (r *InvoiceRequestReconciler) entitlementFor(ctx context.Context, account *
 
 // firstInvoiceLines are the charges a contract starting at startsAt is
 // first invoiced for, with their total: each OneTime pricing, and the
-// first month of each Recurring one, after the Offer's discounts. Names
-// match the Offer's plan (see addFlatFee). Usage isn't included.
+// first month of each Recurring one, each times its quantity and after
+// the Offer's discounts. Names match the Offer's plan (see addFlatFee).
+// Usage isn't included.
 func firstInvoiceLines(offer *billingv1alpha1.Offer, startsAt time.Time) ([]billingv1alpha1.InvoiceRequestLine, string, error) {
 	var lines []billingv1alpha1.InvoiceRequestLine
 	var amounts []string
@@ -245,14 +246,15 @@ func firstInvoiceLines(offer *billingv1alpha1.Offer, startsAt time.Time) ([]bill
 		if sp.Discount != nil {
 			percentage = sp.Discount.Percentage
 		}
-		amount, err := openmeter.DiscountedAmount(sp.Spec.Amount, percentage)
+		charged, err := openmeter.MultiplyAmount(sp.Spec.Amount, feeQuantity(sp))
 		if err != nil {
 			return nil, "", fmt.Errorf("service pricing %q: %w", sp.Name, err)
 		}
-		name := sp.Spec.DisplayName
-		if name == "" {
-			name = sp.Name
+		amount, err := openmeter.DiscountedAmount(charged, percentage)
+		if err != nil {
+			return nil, "", fmt.Errorf("service pricing %q: %w", sp.Name, err)
 		}
+		name := feeName(sp)
 		lines = append(lines, billingv1alpha1.InvoiceRequestLine{Description: name, Period: period, Amount: amount})
 		amounts = append(amounts, amount)
 	}
