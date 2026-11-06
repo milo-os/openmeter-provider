@@ -191,6 +191,36 @@ func TestInvoiceRequest_PreviewBeforeTheContractStarts(t *testing.T) {
 	}
 }
 
+// TestInvoiceRequest_PreviewChargesFeeQuantities: a fee charged more than
+// once is previewed as its amount times its quantity, before its discount,
+// named as the plan names it.
+func TestInvoiceRequest_PreviewChargesFeeQuantities(t *testing.T) {
+	offer := contractOffer()
+	offer.Spec.ServicePricings[1].Quantity = 3
+	offer.Spec.ServicePricings[0].Spec.PricingUnit = "server"
+	offer.Spec.ServicePricings[0].Quantity = 2
+
+	omc := &fakeInvoicingClient{}
+	r := newInvoiceRequestReconciler(t, omc, usdAccount(), offer, contractEntitlementFor(contractStart),
+		invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+	ir, err := reconcileInvoiceRequest(r)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// 2 × 1500.00 setup, and 3 × 1000.00 a month less 10%.
+	st := ir.Status
+	if st.Total != "5700.00" || len(st.Lines) != 2 {
+		t.Fatalf("status = %+v, want two lines totalling 5700.00", st)
+	}
+	if l := st.Lines[0]; l.Description != "Server installation: 2 server × $1500.00" || l.Amount != "3000.00" {
+		t.Errorf("setup line = %+v", l)
+	}
+	if l := st.Lines[1]; l.Description != "Dedicated server × 3" || l.Amount != "2700.00" {
+		t.Errorf("monthly line = %+v", l)
+	}
+}
+
 func TestInvoiceRequest_PreviewAfterTheStart(t *testing.T) {
 	started := contractEntitlementFor(time.Date(2026, time.November, 2, 0, 0, 0, 0, time.UTC))
 	draftLines := []om.InvoiceLine{

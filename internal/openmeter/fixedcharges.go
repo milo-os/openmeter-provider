@@ -148,6 +148,21 @@ func DiscountedAmount(amount string, percentage int32) (string, error) {
 	return new(big.Rat).SetFrac(q, big.NewInt(100)).FloatString(2), nil
 }
 
+// MultiplyAmount returns a fee's amount times its quantity, with as many
+// decimal places as amount: the amount of a fee an Offer charges more than
+// once, such as three servers at the same monthly price.
+func MultiplyAmount(amount string, quantity int32) (string, error) {
+	if quantity < 1 {
+		return "", fmt.Errorf("quantity %d must be at least 1", quantity)
+	}
+	r, scale, err := parseDecimal(amount)
+	if err != nil {
+		return "", err
+	}
+	r.Mul(r, big.NewRat(int64(quantity), 1))
+	return r.FloatString(scale), nil
+}
+
 // AmountBeforeTax is what totals charge before any tax added on top: the
 // total less exclusive taxes. OpenMeter adds no tax itself when Stripe
 // calculates it, so this is usually the total.
