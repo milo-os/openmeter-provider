@@ -1,7 +1,7 @@
 #!/bin/bash
 # Before the contract starts, a Preview works out its first invoice from the
-# Offer: the setup fee and the first month from the start date. Nothing is
-# subscribed or invoiced yet.
+# Offer: the setup fee and the first month from the start date. The account
+# stays on pay as you go until then, and nothing is invoiced yet.
 . ./lib.sh
 
 tomorrow=$(date -u -d '1 day' +%Y-%m-%d 2>/dev/null || date -u -v+1d +%Y-%m-%d)
@@ -17,8 +17,10 @@ ok=$(echo "$st" | jq -r --arg d "$tomorrow" '
 [ "$ok" = "true" ] || fail "unexpected first-invoice preview" "$st"
 
 customer=$(kubectl get billingaccount "$ACCOUNT" -n "$NS" -o jsonpath='{.metadata.uid}')
-live=$(om_get "/customers/${customer}/subscriptions" | jq '[.items[]? | select(.status != "inactive")] | length')
-[ "$live" -eq 0 ] || fail "the contract was subscribed before it starts ($live live subscriptions)"
+payg=$(plan_key "$(kubectl get offer e2e-ir-payg -o jsonpath='{.metadata.uid}')")
+live=$(om_get "/customers/${customer}/subscriptions" | jq -c '[.items[]? | select(.status != "inactive") | {id, status, plan: .plan.key}]')
+[ "$(echo "$live" | jq -r --arg k "$payg" 'length == 1 and .[0].plan == $k')" = "true" ] ||
+  fail "the account didn't stay on pay as you go until the contract starts" "$live"
 invoices=$(om_get "/billing/invoices?customers=$(customer_id)" | jq '[.items[]? | select(.status != "gathering")] | length')
 [ "$invoices" -eq 0 ] || fail "a preview left $invoices invoice(s)"
 echo "OK: first invoice previewed: $(echo "$st" | jq -c '{total, lines: [.lines[] | {description, amount}]}')"

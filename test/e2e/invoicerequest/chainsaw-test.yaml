@@ -4,18 +4,32 @@ metadata:
   name: invoicerequest
 spec:
   description: |
-    A bare metal contract end to end against a real OpenMeter instance:
+    A bare metal contract end to end against a real OpenMeter instance,
+    for an account that starts on pay as you go:
 
-      - a contract starting tomorrow isn't subscribed yet, and a Preview
-        works out its first invoice from the Offer (setup fee and first
-        month) without anything reaching OpenMeter's invoices;
+      - on pay as you go (usage only) the account is subscribed, and nothing
+        is invoiced up front;
+      - moving it onto a contract starting tomorrow keeps it on pay as you
+        go until then, and a Preview works out the first invoice from the
+        Offer (setup fee and first month) without anything reaching
+        OpenMeter's invoices;
       - Issue is unsupported: OpenMeter sends the first invoice itself;
-      - a contract starting today is subscribed straight away, billing on
-        today's day of the month, and OpenMeter invoices the setup fee and
-        first month on its own;
-      - a Preview then shows what comes next;
+      - moving it onto a contract starting today changes its plan straight
+        away, ends pay as you go and bills on today's day of the month, and
+        OpenMeter invoices the setup fee and first month on its own;
+      - a Preview then shows what comes next, and OpenMeter already holds
+        next month's fee from the end of the billing period, so later
+        months need nobody;
       - amending the started contract waits for the end of its billing
-        period, rather than changing the subscription straight away.
+        period, rather than changing the subscription straight away;
+      - once the amendment is due, the account is billed the amended
+        monthly charge on the same billing day, and the setup fee isn't
+        charged again. OpenMeter's clock can't move a month forward, so the
+        due date recorded on the entitlement is moved back instead, which
+        takes the provider's path for a period boundary it missed.
+
+    Not covered: a later month's invoice actually being issued, which needs
+    OpenMeter's clock to reach the next billing period.
 
     Billing's operator, webhooks and stripe-provider do not run in e2e: the
     Offer is published with ../offer/publish.sh and the payment method chain
@@ -38,13 +52,27 @@ spec:
               status:
                 phase: Running
 
-    - name: publish the contract Offer
+    - name: publish the pay-as-you-go and contract Offers
       try:
+        - apply:
+            file: payg.yaml
         - apply:
             file: offer.yaml
         - script:
             timeout: 30s
-            content: bash ../offer/publish.sh e2e-ir-offer
+            content: |
+              bash ../offer/publish.sh e2e-ir-payg
+              bash ../offer/publish.sh e2e-ir-offer
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-ir-payg
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
         - assert:
             timeout: 60s
             resource:
@@ -92,7 +120,26 @@ spec:
             file: billingaccount-payment-method-ready.yaml
             subresource: status
 
-    - name: a contract starting tomorrow waits, and its first invoice can be previewed
+    - name: an account on pay as you go is subscribed to it
+      try:
+        - script:
+            timeout: 10s
+            content: bash entitlement.sh payg
+        - assert:
+            timeout: 60s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingEntitlement
+              metadata:
+                name: e2e-ir-entitlement
+              status:
+                (conditions[?type == 'OpenMeterSubscriptionSynced']):
+                  - status: "True"
+        - script:
+            timeout: 70s
+            content: bash expect-payg.sh
+
+    - name: moving it onto a contract starting tomorrow keeps pay as you go until then
       try:
         - script:
             timeout: 10s
@@ -109,16 +156,19 @@ spec:
                   - status: "False"
                     reason: ContractNotStarted
         - script:
+            timeout: 70s
+            content: bash expect-payg.sh
+        - script:
             timeout: 150s
             content: bash preview-first-invoice.sh
         - script:
             timeout: 150s
             content: bash issue-unsupported.sh
 
-    - name: a contract starting today is subscribed and invoiced straight away
+    - name: moving it onto a contract starting today changes its plan and invoices it straight away
       try:
         - script:
-            timeout: 90s
+            timeout: 150s
             content: bash restart-today.sh
         - assert:
             # The entitlement retries a refused subscription every 30s.
@@ -142,11 +192,14 @@ spec:
         - script:
             content: bash release-account.sh
 
-    - name: a Preview then shows what comes next
+    - name: a Preview then shows what comes next, and next month's fee is waiting
       try:
         - script:
             timeout: 150s
             content: bash preview-next-invoice.sh
+        - script:
+            timeout: 90s
+            content: bash next-month.sh
       catch:
         - script:
             content: bash release-account.sh
@@ -171,6 +224,15 @@ spec:
         - script:
             timeout: 90s
             content: bash amend.sh
+      catch:
+        - script:
+            content: bash release-account.sh
+
+    - name: once the amendment is due, the amended charge is billed and the setup fee isn't again
+      try:
+        - script:
+            timeout: 120s
+            content: bash amend-due.sh
       catch:
         - script:
             content: bash release-account.sh

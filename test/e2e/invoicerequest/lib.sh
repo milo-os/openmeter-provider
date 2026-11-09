@@ -39,3 +39,21 @@ wait_done() {
   done
   fail "InvoiceRequest $name did not finish" "$st"
 }
+
+# live_subscription — the customer's one live subscription, as JSON.
+live_subscription() {
+  om_get "/customers/$(kubectl get billingaccount "$ACCOUNT" -n "$NS" -o jsonpath='{.metadata.uid}')/subscriptions" |
+    jq -c '[.items // [] | .[] | select(.status != "inactive")] | if length == 1 then .[0] else error("\(length) live subscriptions") end'
+}
+
+# billing_period SUBSCRIPTION_ID — the subscription's current billing period.
+billing_period() {
+  om_get "/subscriptions/$1" | jq -c '.alignment.currentAlignedBillingPeriod'
+}
+
+# invoice_lines — every line of every invoice of the account's customer,
+# gathering ones included, with its invoice's status.
+invoice_lines() {
+  om_get "/billing/invoices?customers=$(customer_id)&expand=lines" |
+    jq -c '[.items[]? | .status as $s | .id as $inv | .lines[]? | {invoice: $inv, status: $s, name, total: .totals.total, from: .period.from, to: .period.to}]'
+}
