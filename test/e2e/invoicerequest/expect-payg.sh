@@ -1,6 +1,9 @@
 #!/bin/bash
-# The account has one live subscription, on the pay-as-you-go plan, and no
-# invoice: a usage plan bills in arrears.
+# The account has one live subscription, on the pay-as-you-go plan, and
+# nothing to pay: a usage plan bills in arrears, so it charges nothing up
+# front. An invoice with nothing on it is allowed: when restart-today.sh
+# deletes the entitlement, its subscription is canceled and OpenMeter
+# invoices the last period's usage, which is none.
 . ./lib.sh
 
 customer=$(kubectl get billingaccount "$ACCOUNT" -n "$NS" -o jsonpath='{.metadata.uid}')
@@ -15,6 +18,7 @@ if ! retry 30 check; then
   fail "no single active subscription on the pay-as-you-go plan" \
     "$(echo "${subs:-[]}" | jq -c '[.[] | {id, status, plan: .plan.key, activeFrom, activeTo}]')"
 fi
-invoices=$(om_get "/billing/invoices?customers=$(customer_id)" | jq '[.items[]? | select(.status != "gathering")] | length')
-[ "$invoices" -eq 0 ] || fail "pay as you go was invoiced up front ($invoices invoice(s))"
+charged=$(om_get "/billing/invoices?customers=$(customer_id)" |
+  jq -c '[.items[]? | select(.status != "gathering" and ((.totals.total // "0") | tonumber) != 0) | {id, status, total: .totals.total}]')
+[ "$(echo "$charged" | jq length)" -eq 0 ] || fail "pay as you go was invoiced up front" "$charged"
 echo "OK: on pay as you go: $(echo "$subs" | jq -c '.[0] | {id, plan: .plan.key, billingAnchor}')"
