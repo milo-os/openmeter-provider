@@ -579,6 +579,49 @@ func TestBuildOfferMapping_FeeQuantities(t *testing.T) {
 	}
 }
 
+// Each Recurring fee is charged on its pricing's own interval and billed as
+// its snapshot's billingTiming says: in advance without one, as every fee
+// was before billing had the field. One-time fees are always in advance.
+func TestBuildOfferMapping_FeeTimingAndInterval(t *testing.T) {
+	recurring := func(name string, interval billingv1alpha1.ChargeInterval, timing billingv1alpha1.BillingTiming) billingv1alpha1.ServicePricingSnapshot {
+		return billingv1alpha1.ServicePricingSnapshot{Name: name, BillingTiming: timing, Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeRecurring, DisplayName: name, Amount: "100.00", Interval: interval}}
+	}
+	offer := baseOffer()
+	offer.Spec.ServicePricings = append(offer.Spec.ServicePricings,
+		recurring("rack-space", billingv1alpha1.ChargeIntervalMonthly, billingv1alpha1.BillingTimingInAdvance),
+		recurring("cross-connect", billingv1alpha1.ChargeIntervalMonthly, billingv1alpha1.BillingTimingInArrears),
+		recurring("from-before-timing", "", ""),
+		recurring("maintenance", billingv1alpha1.ChargeIntervalQuarterly, billingv1alpha1.BillingTimingInArrears),
+		recurring("support", billingv1alpha1.ChargeIntervalAnnual, ""),
+		billingv1alpha1.ServicePricingSnapshot{Name: "setup", Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeOneTime, DisplayName: "setup", Amount: "1500.00"}},
+	)
+	m := mustMapping(t, offer)
+
+	inAdvance, inArrears := omv3.BillingPricePaymentTermInAdvance, omv3.BillingPricePaymentTermInArrears
+	for i, want := range []struct {
+		cadence string
+		term    omv3.BillingPricePaymentTerm
+	}{
+		{"P1M", inAdvance},
+		{"P1M", inArrears},
+		{"P1M", inAdvance},
+		{"P3M", inArrears},
+		{"P1Y", inAdvance},
+		{"", inAdvance},
+	} {
+		rc, _ := mustFlatRateCard(t, m.Plan.Phases[0], i)
+		cadence := ""
+		if rc.BillingCadence != nil {
+			cadence = string(*rc.BillingCadence)
+		}
+		if cadence != want.cadence || rc.PaymentTerm == nil || *rc.PaymentTerm != want.term {
+			t.Errorf("rate card %d (%s) = cadence %q, term %v; want %q, %s", i, rc.Name, cadence, rc.PaymentTerm, want.cadence, want.term)
+		}
+	}
+}
+
 func TestBuildOfferMapping_ProjectNameDimensionAllowed(t *testing.T) {
 	offer := baseOffer()
 	offer.Spec.ServicePricings = []billingv1alpha1.ServicePricingSnapshot{
