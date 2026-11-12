@@ -428,6 +428,14 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	if sp.Spec.Amount == "" {
 		return invalidOffer("service pricing %q: %s pricing has no amount", sp.Name, sp.Spec.ChargeType)
 	}
+	// Ending a fee after its periods means removing it from the
+	// subscription with a v3 edit, which the OpenMeter this runs against
+	// (1.0.0-beta.232) doesn't have. Publishing it anyway would charge the
+	// fee after its endsAt, so the Offer isn't published until that lands.
+	if sp.Periods > 0 {
+		return invalidOffer("service pricing %q: periods (%d) aren't supported yet: "+
+			"the fee would keep being charged after its last period", sp.Name, sp.Periods)
+	}
 	discounts, err := resolveDiscount(sp)
 	if err != nil {
 		return err

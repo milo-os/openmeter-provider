@@ -732,6 +732,11 @@ func TestBuildOfferMapping_RejectsUnrepresentable(t *testing.T) {
 			})},
 			"last tier"},
 		{"flat fee without amount", []billingv1alpha1.ServicePricingSnapshot{oneTime("fee", "")}, "no amount"},
+		{"fee with periods",
+			[]billingv1alpha1.ServicePricingSnapshot{{Name: "support", Periods: 3, Spec: billingv1alpha1.ServicePricingSpec{
+				ChargeType: billingv1alpha1.ChargeTypeRecurring, Amount: "1200.00", Interval: billingv1alpha1.ChargeIntervalAnnual,
+			}}},
+			"periods (3) aren't supported yet"},
 		{"non-positive unit conversion",
 			[]billingv1alpha1.ServicePricingSnapshot{func() billingv1alpha1.ServicePricingSnapshot {
 				sp := usagePricing("u", billingv1alpha1.PricingRate{Flat: "1"})
