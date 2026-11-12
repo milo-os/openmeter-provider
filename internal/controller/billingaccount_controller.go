@@ -20,10 +20,13 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/finalizer"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
@@ -64,6 +67,18 @@ const (
 	// Milo Invoice on an unrelated BillingAccount/binding/payment-method
 	// event or the manager's 10h resync.
 	syncedRequeueAfter = 10 * time.Minute
+
+	// subscriptionChangeRecheckAfter is how soon a synced account is
+	// re-reconciled while one of its subscriptions changed within the last
+	// subscriptionChangeRecheckWindow. OpenMeter invoices one-time fees and
+	// other charges billed in advance as soon as a subscription starts or
+	// changes, and staff setting up a contract expect that invoice to show up
+	// in Milo straight away, not at the next syncedRequeueAfter.
+	subscriptionChangeRecheckAfter = 30 * time.Second
+	// subscriptionChangeRecheckWindow is how long after a subscription
+	// change the account is re-reconciled every
+	// subscriptionChangeRecheckAfter.
+	subscriptionChangeRecheckWindow = 5 * time.Minute
 
 	// customerNameMaxLength is OpenMeter's limit on a customer name (1-256
 	// characters in api/openapi.yaml's CustomerCreate/CustomerReplaceUpdate;
@@ -255,7 +270,10 @@ func (n *notices) forgetPrefix(prefix string) {
 // one.
 //
 // A synced account is re-reconciled every syncedRequeueAfter so OpenMeter
-// invoice status changes reach the Milo Invoices.
+// invoice status changes reach the Milo Invoices, and every
+// subscriptionChangeRecheckAfter for a few minutes after one of its
+// subscriptions is created or changed, so an invoice OpenMeter issues for it
+// straight away (a one-time fee, say) shows up within seconds.
 //
 // spec.paymentTerms IS synced, via a per-account BillingProfile (see
 // billingprofile_sync.go) — but only partly: OpenMeter honors netDays
@@ -287,6 +305,9 @@ type BillingAccountReconciler struct {
 	// remove-after-cleanup bookkeeping (see SetupWithManager, and
 	// customerLinkFinalizer's Finalize method for the cleanup itself).
 	Finalizers finalizer.Finalizers
+
+	// Now returns the current time; time.Now when unset.
+	Now func() time.Time
 
 	// Log is the reconciler-scoped logger. Each Reconcile call derives a
 	// per-reconcile logger with account/namespace/customerKey values.
@@ -442,7 +463,38 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	} else {
 		logger.V(1).Info("billing account already in sync")
 	}
-	return ctrl.Result{RequeueAfter: syncedRequeueAfter}, nil
+	return ctrl.Result{RequeueAfter: r.syncedRequeue(ctx, &account)}, nil
+}
+
+// syncedRequeue is when a synced account is reconciled again:
+// subscriptionChangeRecheckAfter while one of its entitlements'
+// subscriptions changed within subscriptionChangeRecheckWindow
+// (SubscriptionChangedAnnotation), otherwise syncedRequeueAfter.
+func (r *BillingAccountReconciler) syncedRequeue(ctx context.Context, account *billingv1alpha1.BillingAccount) time.Duration {
+	var entitlements billingv1alpha1.BillingEntitlementList
+	if err := r.List(ctx, &entitlements, client.InNamespace(account.Namespace),
+		client.MatchingFields{EntitlementBillingAccountRefField: account.Name}); err != nil {
+		log.FromContext(ctx).Error(err, "list the account's entitlements")
+		return syncedRequeueAfter
+	}
+	now := r.now()
+	for i := range entitlements.Items {
+		changedAt, err := time.Parse(time.RFC3339, entitlements.Items[i].Annotations[SubscriptionChangedAnnotation])
+		if err != nil {
+			continue
+		}
+		if since := now.Sub(changedAt); since >= 0 && since < subscriptionChangeRecheckWindow {
+			return subscriptionChangeRecheckAfter
+		}
+	}
+	return syncedRequeueAfter
+}
+
+func (r *BillingAccountReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // noticePrefix is the per-account key prefix for BillingAccountReconciler's
@@ -628,6 +680,13 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(),
 				&billingv1alpha1.BillingAccount{}, handler.OnlyControllerOwner()),
 		).
+		// A subscription just created or changed may have been invoiced
+		// already: check the account now, then every
+		// subscriptionChangeRecheckAfter for a while (see syncedRequeue).
+		Watches(&billingv1alpha1.BillingEntitlement{},
+			handler.EnqueueRequestsFromMapFunc(mapEntitlementToAccount),
+			builder.WithPredicates(subscriptionChangedPredicate()),
+		).
 		Complete(r)
 }
 
@@ -807,4 +866,34 @@ func liveSubscriptionIDs(subs []om.Subscription) []string {
 		}
 	}
 	return live
+}
+
+// mapEntitlementToAccount enqueues the BillingAccount a BillingEntitlement
+// belongs to.
+func mapEntitlementToAccount(_ context.Context, obj client.Object) []reconcile.Request {
+	be, ok := obj.(*billingv1alpha1.BillingEntitlement)
+	if !ok || be.Spec.BillingAccountRef.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{
+		Namespace: be.Namespace, Name: be.Spec.BillingAccountRef.Name,
+	}}}
+}
+
+// subscriptionChangedPredicate passes BillingEntitlement events that record
+// a new subscription change (SubscriptionChangedAnnotation), and nothing
+// else: the account reconcile doesn't otherwise depend on entitlements.
+func subscriptionChangedPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			_, ok := e.Object.GetAnnotations()[SubscriptionChangedAnnotation]
+			return ok
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			newAt, ok := e.ObjectNew.GetAnnotations()[SubscriptionChangedAnnotation]
+			return ok && newAt != e.ObjectOld.GetAnnotations()[SubscriptionChangedAnnotation]
+		},
+		DeleteFunc:  func(event.DeleteEvent) bool { return false },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
 }
