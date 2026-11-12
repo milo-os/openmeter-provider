@@ -227,6 +227,11 @@ type Client interface {
 	// CancelSubscriptions ends every live subscription of the customer
 	// immediately. A missing customer is treated as success.
 	CancelSubscriptions(ctx context.Context, customerKey CustomerKey) error
+	// EndFees stops charging fees that run for a set number of periods:
+	// in the billing period that ends at a fee's EndsAt it removes the fee's
+	// item at the next billing cycle, and one found still charging after
+	// EndsAt it removes now. See fee_end.go.
+	EndFees(ctx context.Context, subscriptionID string, fees []FeeEnd, now time.Time) (FeeEndResult, error)
 
 	// Usage ingestion (see ingest.go).
 

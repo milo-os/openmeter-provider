@@ -100,6 +100,52 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 		return true
 	}
 
+	if strings.HasPrefix(r.URL.Path, "/api/v3/openmeter/subscriptions/") && strings.HasSuffix(r.URL.Path, "/edit") {
+		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v3/openmeter/subscriptions/"), "/edit")
+		sub, ok := f.subscriptions[id]
+		if !ok {
+			problem(http.StatusNotFound, "subscription not found")
+			return true
+		}
+		var body omv3.BillingSubscriptionEdit
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Timing == nil {
+			problem(http.StatusBadRequest, "bad body")
+			return true
+		}
+		timing, err := body.Timing.AsBillingSubscriptionEditTimingEnum()
+		if err != nil {
+			problem(http.StatusBadRequest, "bad timing")
+			return true
+		}
+		edit := fakeFeeEdit{subscription: id, timing: string(timing)}
+		for _, op := range body.Customizations {
+			remove, err := op.AsBillingSubscriptionEditRemoveItem()
+			if err != nil || remove.Type != omv3.BillingSubscriptionEditRemoveItemTypeRemoveItem {
+				problem(http.StatusBadRequest, "only remove_item is faked")
+				return true
+			}
+			edit.keys = append(edit.keys, remove.PhaseKey+"/"+remove.ItemKey)
+			items := f.subItems[id]
+			for i := range items {
+				if items[i].Key != remove.ItemKey {
+					continue
+				}
+				if timing == omv3.BillingSubscriptionEditTimingEnumImmediate {
+					items = append(items[:i], items[i+1:]...)
+				} else {
+					end := f.billingPeriods[id].To
+					items[i].ActiveTo = &end
+				}
+				break
+			}
+			f.subItems[id] = items
+		}
+		f.feeEdits = append(f.feeEdits, edit)
+		f.subscriptionWrites++
+		writeJSON(http.StatusOK, map[string]string{"id": sub.Id})
+		return true
+	}
+
 	if !strings.HasPrefix(r.URL.Path, "/api/v1/subscriptions") {
 		return false
 	}
@@ -159,6 +205,9 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 		expanded := om.SubscriptionExpanded{Id: sub.Id, ActiveFrom: sub.ActiveFrom, BillingAnchor: sub.BillingAnchor}
 		if period, ok := f.billingPeriods[sub.Id]; ok {
 			expanded.Alignment = &om.SubscriptionAlignment{CurrentAlignedBillingPeriod: &period}
+		}
+		if items, ok := f.subItems[sub.Id]; ok {
+			expanded.Phases = []om.SubscriptionPhaseExpanded{{Key: "default_phase", ActiveFrom: sub.ActiveFrom, Items: items}}
 		}
 		writeJSON(http.StatusOK, expanded)
 
@@ -1343,4 +1392,86 @@ func TestClassifySubscription(t *testing.T) {
 	if errors.Is(err, ErrCustomerBillingNotReady) || !IsPermanent(err) {
 		t.Errorf("409 overlap = %v, want a plain permanent error", err)
 	}
+}
+
+// fakeFeeEdit is one item-removal edit EndFees sent.
+type fakeFeeEdit struct {
+	subscription string
+	timing       string
+	// keys are "phase/item".
+	keys []string
+}
+
+func TestEndFees(t *testing.T) {
+	anchor := time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC)
+	month := func(m int) time.Time { return anchor.AddDate(0, m, 0) }
+	setup := func(t *testing.T, period int) (Client, *fakeServer, string) {
+		t.Helper()
+		c, f := newTestClient(t)
+		f.seedCustomer("cust")
+		f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+		state, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		id := state.Current.Id
+		f.billingPeriods[id] = om.Period{From: month(period), To: month(period + 1)}
+		f.subItems[id] = []om.SubscriptionItem{{Key: "promo_fee"}, {Key: "rack_space"}}
+		return c, f, id
+	}
+	// A fee charged for three months from 12 November ends on 12 February.
+	promo := FeeEnd{ItemKey: "promo_fee", EndsAt: month(3)}
+
+	t.Run("before its last period, nothing yet", func(t *testing.T) {
+		c, f, id := setup(t, 1)
+		res, err := c.EndFees(context.Background(), id, []FeeEnd{promo}, month(1).Add(time.Hour))
+		if err != nil {
+			t.Fatalf("EndFees: %v", err)
+		}
+		if len(f.feeEdits) != 0 || res.NextCheck == nil || !res.NextCheck.Equal(month(2)) {
+			t.Fatalf("edits = %v, next check = %v; want none, and to look again at %s", f.feeEdits, res.NextCheck, month(2))
+		}
+	})
+
+	t.Run("in its last period, removed at the next billing cycle, once", func(t *testing.T) {
+		c, f, id := setup(t, 2)
+		res, err := c.EndFees(context.Background(), id, []FeeEnd{promo}, month(2).Add(time.Hour))
+		if err != nil {
+			t.Fatalf("EndFees: %v", err)
+		}
+		if len(res.Scheduled) != 1 || len(f.feeEdits) != 1 || f.feeEdits[0].timing != "next_billing_cycle" ||
+			f.feeEdits[0].keys[0] != "default_phase/promo_fee" {
+			t.Fatalf("result = %+v, edits = %+v", res, f.feeEdits)
+		}
+		// Scheduled already: the next pass sends nothing.
+		if _, err := c.EndFees(context.Background(), id, []FeeEnd{promo}, month(2).Add(2*time.Hour)); err != nil {
+			t.Fatalf("EndFees again: %v", err)
+		}
+		if len(f.feeEdits) != 1 {
+			t.Errorf("sent %d edits, want 1", len(f.feeEdits))
+		}
+	})
+
+	t.Run("still charging after its end, removed now and reported", func(t *testing.T) {
+		c, f, id := setup(t, 4)
+		res, err := c.EndFees(context.Background(), id, []FeeEnd{promo}, month(4).Add(time.Hour))
+		if err != nil {
+			t.Fatalf("EndFees: %v", err)
+		}
+		if len(res.RemovedLate) != 1 || len(f.feeEdits) != 1 || f.feeEdits[0].timing != "immediate" {
+			t.Fatalf("result = %+v, edits = %+v", res, f.feeEdits)
+		}
+		if len(f.subItems[id]) != 1 || f.subItems[id][0].Key != "rack_space" {
+			t.Errorf("items = %+v, want only rack_space", f.subItems[id])
+		}
+	})
+
+	t.Run("already gone, nothing to do", func(t *testing.T) {
+		c, f, id := setup(t, 4)
+		f.subItems[id] = []om.SubscriptionItem{{Key: "rack_space"}}
+		res, err := c.EndFees(context.Background(), id, []FeeEnd{promo}, month(4).Add(time.Hour))
+		if err != nil || len(f.feeEdits) != 0 || len(res.RemovedLate)+len(res.Scheduled) != 0 {
+			t.Fatalf("err = %v, result = %+v, edits = %+v", err, res, f.feeEdits)
+		}
+	})
 }

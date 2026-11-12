@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/alpacahq/alpacadecimal"
 	om "github.com/openmeterio/openmeter/api/client/go"
@@ -428,19 +429,14 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	if sp.Spec.Amount == "" {
 		return invalidOffer("service pricing %q: %s pricing has no amount", sp.Name, sp.Spec.ChargeType)
 	}
-	// Ending a fee after its periods means removing it from the
-	// subscription with a v3 edit, which the OpenMeter this runs against
-	// (1.0.0-beta.232) doesn't have. Publishing it anyway would charge the
-	// fee after its endsAt, so the Offer isn't published until that lands.
-	if sp.Periods > 0 {
-		return invalidOffer("service pricing %q: periods (%d) aren't supported yet: "+
-			"the fee would keep being charged after its last period", sp.Name, sp.Periods)
-	}
+	// A fee with periods is a rate card like any other: the entitlement
+	// controller removes it from the subscription once its last period ends
+	// (see feeEnds).
 	discounts, err := resolveDiscount(sp)
 	if err != nil {
 		return err
 	}
-	key := boundedKey(sanitizeKeyPart(sp.Name), "flat_fee", sp.Name)
+	key := flatFeeKey(sp)
 	name := feeName(sp)
 	amount, err := openmeter.MultiplyAmount(sp.Spec.Amount, feeQuantity(sp))
 	if err != nil {
@@ -488,6 +484,61 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	}
 	b.rateCards = append(b.rateCards, card)
 	return nil
+}
+
+// flatFeeKey is a fee's rate card key, which is also its subscription
+// item's key.
+func flatFeeKey(sp billingv1alpha1.ServicePricingSnapshot) string {
+	return boundedKey(sanitizeKeyPart(sp.Name), "flat_fee", sp.Name)
+}
+
+// feeEndsAt is when a Recurring fee charged for periods intervals from
+// startsAt stops: periods intervals after startsAt, on startsAt's day of
+// the month, or the month's last day when it's shorter. It matches
+// billing's validation.FeeEndsAt, which status.contract.fees[].endsAt
+// shows.
+func feeEndsAt(startsAt time.Time, interval billingv1alpha1.ChargeInterval, periods int32) time.Time {
+	start := startsAt.UTC()
+	months := int(periods)
+	switch interval {
+	case billingv1alpha1.ChargeIntervalQuarterly:
+		months *= 3
+	case billingv1alpha1.ChargeIntervalAnnual:
+		months *= 12
+	}
+	first := time.Date(start.Year(), start.Month()+time.Month(months), 1, 0, 0, 0, 0, time.UTC)
+	day := start.Day()
+	if last := first.AddDate(0, 1, -1).Day(); day > last {
+		day = last
+	}
+	return time.Date(first.Year(), first.Month(), day,
+		start.Hour(), start.Minute(), start.Second(), start.Nanosecond(), time.UTC)
+}
+
+// feeEnds are the Offer's Recurring fees that run for a set number of
+// periods, with when each ends, counted from startsAt: the contract's start,
+// or the subscription's for an account without a contract. Keyed by item
+// key, with each fee's name for events.
+func feeEnds(offer *billingv1alpha1.Offer, startsAt time.Time) ([]openmeter.FeeEnd, map[string]string) {
+	var ends []openmeter.FeeEnd
+	names := map[string]string{}
+	for _, sp := range offer.Spec.ServicePricings {
+		if sp.Spec.ChargeType != billingv1alpha1.ChargeTypeRecurring || sp.Periods <= 0 {
+			continue
+		}
+		key := flatFeeKey(sp)
+		ends = append(ends, openmeter.FeeEnd{ItemKey: key, EndsAt: feeEndsAt(startsAt, sp.Spec.Interval, sp.Periods)})
+		names[key] = feeDisplayName(sp)
+	}
+	return ends, names
+}
+
+// feeDisplayName is how events name a fee: its display name, or its pricing.
+func feeDisplayName(sp billingv1alpha1.ServicePricingSnapshot) string {
+	if sp.Spec.DisplayName != "" {
+		return sp.Spec.DisplayName
+	}
+	return sp.Name
 }
 
 // feeInArrears reports whether a fee is billed in arrears: a Recurring fee

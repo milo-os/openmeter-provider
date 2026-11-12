@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -732,11 +733,6 @@ func TestBuildOfferMapping_RejectsUnrepresentable(t *testing.T) {
 			})},
 			"last tier"},
 		{"flat fee without amount", []billingv1alpha1.ServicePricingSnapshot{oneTime("fee", "")}, "no amount"},
-		{"fee with periods",
-			[]billingv1alpha1.ServicePricingSnapshot{{Name: "support", Periods: 3, Spec: billingv1alpha1.ServicePricingSpec{
-				ChargeType: billingv1alpha1.ChargeTypeRecurring, Amount: "1200.00", Interval: billingv1alpha1.ChargeIntervalAnnual,
-			}}},
-			"periods (3) aren't supported yet"},
 		{"non-positive unit conversion",
 			[]billingv1alpha1.ServicePricingSnapshot{func() billingv1alpha1.ServicePricingSnapshot {
 				sp := usagePricing("u", billingv1alpha1.PricingRate{Flat: "1"})
@@ -949,5 +945,43 @@ func TestBuildOfferMapping_DiscountOverrides(t *testing.T) {
 	migrationCard, ok := byName["Migration Fee"]
 	if !ok || migrationCard.Discounts != nil {
 		t.Errorf("migration fee card discount = %+v (ok=%v), want nil", migrationCard.Discounts, ok)
+	}
+}
+
+// A fee that runs for a set number of periods maps like any other; the
+// entitlement controller ends it.
+func TestBuildOfferMapping_FeeWithPeriods(t *testing.T) {
+	offer := baseOffer()
+	offer.Spec.ServicePricings = append(offer.Spec.ServicePricings, billingv1alpha1.ServicePricingSnapshot{
+		Name: "promo", Periods: 3, Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeRecurring, DisplayName: "Promo", Amount: "100.00",
+			Interval: billingv1alpha1.ChargeIntervalMonthly,
+		},
+	})
+	m := mustMapping(t, offer)
+	if rc, _ := mustFlatRateCard(t, m.Plan.Phases[0], 0); rc.Key != flatFeeKey(offer.Spec.ServicePricings[len(offer.Spec.ServicePricings)-1]) {
+		t.Errorf("rate card key = %q, want the fee's item key", rc.Key)
+	}
+}
+
+func TestFeeEndsAt(t *testing.T) {
+	start := time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		interval billingv1alpha1.ChargeInterval
+		periods  int32
+		want     time.Time
+	}{
+		{billingv1alpha1.ChargeIntervalMonthly, 3, time.Date(2027, time.February, 12, 0, 0, 0, 0, time.UTC)},
+		{"", 36, time.Date(2029, time.November, 12, 0, 0, 0, 0, time.UTC)},
+		{billingv1alpha1.ChargeIntervalQuarterly, 4, time.Date(2027, time.November, 12, 0, 0, 0, 0, time.UTC)},
+		{billingv1alpha1.ChargeIntervalAnnual, 3, time.Date(2029, time.November, 12, 0, 0, 0, 0, time.UTC)},
+	} {
+		if got := feeEndsAt(start, tc.interval, tc.periods); !got.Equal(tc.want) {
+			t.Errorf("%s × %d: %s, want %s", tc.interval, tc.periods, got, tc.want)
+		}
+	}
+	// The 31st into a shorter month, as billing's FeeEndsAt does.
+	if got := feeEndsAt(time.Date(2027, time.January, 31, 0, 0, 0, 0, time.UTC), "", 1); !got.Equal(time.Date(2027, time.February, 28, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("31 January + 1 month = %s, want 28 February", got)
 	}
 }
