@@ -45,6 +45,17 @@ type fakeSubscriptionClient struct {
 	ensureCalls []openmeter.DesiredSubscription
 	ensureFn    func(openmeter.DesiredSubscription) (openmeter.SubscriptionState, error)
 	cancelFn    func(openmeter.CustomerKey) error
+	endCalls    [][]openmeter.FeeEnd
+	endFn       func([]openmeter.FeeEnd) (openmeter.FeeEndResult, error)
+}
+
+func (f *fakeSubscriptionClient) EndFees(_ context.Context, subscriptionID string, fees []openmeter.FeeEnd, _ time.Time) (openmeter.FeeEndResult, error) {
+	f.calls = append(f.calls, "EndFees "+subscriptionID)
+	f.endCalls = append(f.endCalls, fees)
+	if f.endFn != nil {
+		return f.endFn(fees)
+	}
+	return openmeter.FeeEndResult{}, nil
 }
 
 func (f *fakeSubscriptionClient) EnsureSubscription(_ context.Context, d openmeter.DesiredSubscription) (openmeter.SubscriptionState, error) {
@@ -719,5 +730,105 @@ func TestBillingEntitlement_RecordsSubscriptionChange(t *testing.T) {
 	be, _ = getEntitlement(t, r, testBEName)
 	if got, want := be.Annotations[SubscriptionChangedAnnotation], "2026-11-12T18:47:50Z"; got != want {
 		t.Errorf("%s = %q after a pass that changed nothing, want it left at %q", SubscriptionChangedAnnotation, got, want)
+	}
+}
+
+// A contract fee that runs for a set number of periods is ended once its
+// last period is over: the controller asks for it with the fee's item key
+// and end, counted from the contract's start, records what happened, and
+// comes back when the fee's last period can start.
+func TestBillingEntitlement_EndsFeesAfterTheirPeriods(t *testing.T) {
+	now := time.Date(2027, time.January, 20, 9, 0, 0, 0, time.UTC)
+	start := time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC)
+	offer := cpuOffer()
+	promo := billingv1alpha1.ServicePricingSnapshot{
+		Name: "promo-fee", Periods: 3,
+		Spec: billingv1alpha1.ServicePricingSpec{
+			DisplayName: "Promo", ChargeType: billingv1alpha1.ChargeTypeRecurring,
+			Amount: "100.00", Interval: billingv1alpha1.ChargeIntervalMonthly,
+		},
+	}
+	offer.Spec.ServicePricings = append(offer.Spec.ServicePricings, promo)
+	be := testEntitlement(testBEName, "test-offer")
+	be.Spec.Contract = &billingv1alpha1.BillingContract{StartsAt: metav1.NewTime(start)}
+	be.Annotations = map[string]string{ContractStartedAnnotation: start.Format(time.RFC3339)}
+
+	endsAt := time.Date(2027, time.February, 12, 0, 0, 0, 0, time.UTC)
+
+	t.Run("scheduled in its last period", func(t *testing.T) {
+		r, omc, rec := newEntitlementReconciler(t, be.DeepCopy(), testAccount(), offer.DeepCopy())
+		r.Now = func() time.Time { return now }
+		omc.endFn = func(fees []openmeter.FeeEnd) (openmeter.FeeEndResult, error) {
+			return openmeter.FeeEndResult{Scheduled: fees}, nil
+		}
+		reconcileEntitlement(t, r, testBEName)
+		if len(omc.endCalls) != 1 || len(omc.endCalls[0]) != 1 {
+			t.Fatalf("EndFees calls = %v, want one with the promo fee", omc.endCalls)
+		}
+		got := omc.endCalls[0][0]
+		if got.ItemKey != flatFeeKey(promo) || !got.EndsAt.Equal(endsAt) {
+			t.Errorf("fee end = %+v, want %s ending %s", got, flatFeeKey(promo), endsAt)
+		}
+		if !hasEventPrefix(rec, "Normal "+EventReasonFeeEndScheduled+" Promo's last period ends 2027-02-12T00:00:00Z") {
+			t.Error("no FeeEndScheduled event")
+		}
+	})
+
+	t.Run("comes back when its last period starts", func(t *testing.T) {
+		r, omc, _ := newEntitlementReconciler(t, be.DeepCopy(), testAccount(), offer.DeepCopy())
+		r.Now = func() time.Time { return now }
+		// The last period starts sooner than the periodic resync.
+		soon := now.Add(10 * time.Minute)
+		omc.endFn = func([]openmeter.FeeEnd) (openmeter.FeeEndResult, error) {
+			return openmeter.FeeEndResult{NextCheck: &soon}, nil
+		}
+		res := reconcileEntitlement(t, r, testBEName)
+		if want := soon.Sub(now) + changeAtPeriodEndDelay; res.RequeueAfter != want {
+			t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, want)
+		}
+	})
+
+	t.Run("removed late and reported", func(t *testing.T) {
+		r, omc, rec := newEntitlementReconciler(t, be.DeepCopy(), testAccount(), offer.DeepCopy())
+		r.Now = func() time.Time { return now }
+		omc.endFn = func(fees []openmeter.FeeEnd) (openmeter.FeeEndResult, error) {
+			return openmeter.FeeEndResult{RemovedLate: fees}, nil
+		}
+		reconcileEntitlement(t, r, testBEName)
+		if !hasEventPrefix(rec, "Warning "+EventReasonFeeEndedLate+" Promo should have stopped") {
+			t.Error("no FeeEndedLate warning")
+		}
+	})
+
+	t.Run("not while an amendment waits", func(t *testing.T) {
+		r, omc, _ := newEntitlementReconciler(t, be.DeepCopy(), testAccount(), offer.DeepCopy())
+		r.Now = func() time.Time { return now }
+		omc.ensureFn = func(d openmeter.DesiredSubscription) (openmeter.SubscriptionState, error) {
+			changeAt := time.Date(2027, time.February, 12, 0, 0, 0, 0, time.UTC)
+			return openmeter.SubscriptionState{
+				Current: om.Subscription{Id: "sub-1", Status: om.SubscriptionStatusActive,
+					Plan: &om.PlanReference{Key: "old-plan", Version: 1}},
+				PlanVersion: 1,
+				ChangeAt:    &changeAt,
+			}, nil
+		}
+		reconcileEntitlement(t, r, testBEName)
+		if len(omc.endCalls) != 0 {
+			t.Errorf("EndFees called %d times while an amendment waits", len(omc.endCalls))
+		}
+	})
+}
+
+// hasEventPrefix reports whether the recorder holds an event starting with want.
+func hasEventPrefix(rec *record.FakeRecorder, want string) bool {
+	for {
+		select {
+		case e := <-rec.Events:
+			if strings.HasPrefix(e, want) {
+				return true
+			}
+		default:
+			return false
+		}
 	}
 }

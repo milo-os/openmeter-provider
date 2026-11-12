@@ -64,6 +64,10 @@ type fakeServer struct {
 	// changesAt records the custom timing of each plan change, by the id of
 	// the subscription it ended.
 	changesAt map[string]time.Time
+	// subItems is each subscription's current phase items, by subscription
+	// id, for EndFees; feeEdits records the item removals it sent.
+	subItems map[string][]om.SubscriptionItem
+	feeEdits []fakeFeeEdit
 	// pendingLinesInvoiced counts invoice-pending-lines actions;
 	// invoicesDeleted records deleted invoice ids in order.
 	pendingLinesInvoiced int
@@ -156,6 +160,7 @@ func newTestClient(t *testing.T) (Client, *fakeServer) {
 		subscriptions:           map[string]om.Subscription{},
 		billingPeriods:          map[string]om.Period{},
 		changesAt:               map[string]time.Time{},
+		subItems:                map[string][]om.SubscriptionItem{},
 		pendingLines:            map[string]fakePendingLines{},
 	}
 	srv := httptest.NewServer(f)

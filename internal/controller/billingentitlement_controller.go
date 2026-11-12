@@ -74,6 +74,16 @@ const ContractStartedAnnotation = "openmeter.miloapis.com/contractStartedAt"
 // rather than a period late. Removed once the change is made.
 const OfferChangeAtAnnotation = "openmeter.miloapis.com/offerChangeAt"
 
+// Event reasons for fees that run for a set number of periods.
+const (
+	// EventReasonFeeEndScheduled: a fee's removal at the end of its last
+	// period was sent to OpenMeter.
+	EventReasonFeeEndScheduled = "FeeEndScheduled"
+	// EventReasonFeeEndedLate: a fee was found still charging after its
+	// last period and removed then; the periods after need crediting.
+	EventReasonFeeEndedLate = "FeeEndedLate"
+)
+
 // SubscriptionChangedAnnotation records on a BillingEntitlement when this
 // provider last created or changed its OpenMeter subscription (RFC 3339).
 // OpenMeter invoices one-time fees and other charges billed in advance as
@@ -288,6 +298,36 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 	case state.Pending != nil:
 		reason = conditionReasonMigrationScheduled
 	}
+	// Fees that run for a set number of periods are removed once their last
+	// period ends. Not while an amendment waits: the subscription is still
+	// on the previous Offer's plan, whose fees the new Offer's don't name.
+	if state.ChangeAt == nil {
+		startsAt := state.Current.ActiveFrom
+		if be.Spec.Contract != nil {
+			startsAt = be.Spec.Contract.StartsAt.Time
+		}
+		if ends, names := feeEnds(&offer, startsAt); len(ends) > 0 {
+			ended, err := r.OpenMeterClient.EndFees(ctx, state.Current.Id, ends, now)
+			if err != nil {
+				return r.openMeterFailed(ctx, &be, fmt.Errorf("end fees after their periods: %w", err))
+			}
+			for _, fee := range ended.Scheduled {
+				r.event(&be, "Normal", EventReasonFeeEndScheduled, fmt.Sprintf(
+					"%s's last period ends %s; it's removed from the subscription then",
+					names[fee.ItemKey], fee.EndsAt.UTC().Format(time.RFC3339)))
+			}
+			for _, fee := range ended.RemovedLate {
+				r.event(&be, "Warning", EventReasonFeeEndedLate, fmt.Sprintf(
+					"%s should have stopped at %s and was still charging; it's been removed now, "+
+						"and any period charged after %s needs crediting",
+					names[fee.ItemKey], fee.EndsAt.UTC().Format(time.RFC3339), fee.EndsAt.UTC().Format(time.RFC3339)))
+			}
+			if ended.NextCheck != nil {
+				requeueAfter = min(requeueAfter, ended.NextCheck.Sub(now)+changeAtPeriodEndDelay)
+			}
+		}
+	}
+
 	changed, err := r.setSyncedCondition(ctx, &be, metav1.ConditionTrue, reason, msg)
 	if err != nil {
 		return ctrl.Result{}, err
