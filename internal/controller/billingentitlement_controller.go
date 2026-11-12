@@ -74,6 +74,14 @@ const ContractStartedAnnotation = "openmeter.miloapis.com/contractStartedAt"
 // rather than a period late. Removed once the change is made.
 const OfferChangeAtAnnotation = "openmeter.miloapis.com/offerChangeAt"
 
+// SubscriptionChangedAnnotation records on a BillingEntitlement when this
+// provider last created or changed its OpenMeter subscription (RFC 3339).
+// OpenMeter invoices one-time fees and other charges billed in advance as
+// soon as a subscription starts, so the BillingAccountReconciler checks for
+// new invoices more often for a while afterwards (see
+// subscriptionChangeRecheckWindow).
+const SubscriptionChangedAnnotation = "openmeter.miloapis.com/subscriptionChangedAt"
+
 // Metadata written on the subscriptions this controller creates, so they can
 // be traced back from OpenMeter.
 const (
@@ -257,6 +265,14 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 			return ctrl.Result{}, err
 		}
 	}
+	if state.Changed {
+		// Best effort: the next pass sees no change to record, so a failure
+		// here only means the account's invoices arrive at its next periodic
+		// sync instead.
+		if err := r.recordSubscriptionChange(ctx, &be, now); err != nil {
+			logger.Error(err, "could not record the subscription change")
+		}
+	}
 
 	// Subscriptions can be changed in OpenMeter directly; the resync
 	// restores the entitled one without waiting for a Kubernetes event.
@@ -322,6 +338,22 @@ func (r *BillingEntitlementReconciler) recordContractState(ctx context.Context, 
 	}
 	if err := r.Patch(ctx, be, client.MergeFrom(base)); err != nil {
 		return fmt.Errorf("record the contract's state: %w", err)
+	}
+	return nil
+}
+
+// recordSubscriptionChange records on the entitlement that its subscription
+// was just created or changed (SubscriptionChangedAnnotation), so the
+// account's new invoices are picked up within seconds rather than at its
+// next periodic sync.
+func (r *BillingEntitlementReconciler) recordSubscriptionChange(ctx context.Context, be *billingv1alpha1.BillingEntitlement, at time.Time) error {
+	base := be.DeepCopy()
+	if be.Annotations == nil {
+		be.Annotations = map[string]string{}
+	}
+	be.Annotations[SubscriptionChangedAnnotation] = at.UTC().Format(time.RFC3339)
+	if err := r.Patch(ctx, be, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("record the subscription change: %w", err)
 	}
 	return nil
 }

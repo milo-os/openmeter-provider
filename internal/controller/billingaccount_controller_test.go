@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/finalizer"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -338,6 +339,7 @@ func newSyncHarness(t *testing.T, account *billingv1alpha1.BillingAccount, objs 
 	account.Finalizers = []string{CustomerLinkFinalizer}
 	k8s := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(append([]client.Object{account}, objs...)...).
+		WithIndex(&billingv1alpha1.BillingEntitlement{}, EntitlementBillingAccountRefField, entitlementBillingAccountRef).
 		Build()
 	omc := newSyncOpenMeterClient()
 	recorder := record.NewFakeRecorder(100)
@@ -764,5 +766,88 @@ func TestReconcile_SyncFailedOnlyWhenTheFailureChanges(t *testing.T) {
 		if n := countEvents(events, EventReasonSynced); n != step.wantSynced {
 			t.Errorf("%s: %d Synced events, want %d: %v", step.name, n, step.wantSynced, events)
 		}
+	}
+}
+
+// For a few minutes after one of the account's subscriptions is created or
+// changed, a synced account is checked every subscriptionChangeRecheckAfter,
+// so an invoice OpenMeter issues straight away (a contract's one-time fee)
+// reaches Milo within seconds; otherwise every syncedRequeueAfter.
+func TestReconcile_RechecksSoonAfterSubscriptionChange(t *testing.T) {
+	now := time.Date(2026, time.November, 12, 18, 50, 0, 0, time.UTC)
+	entitlement := func(name, account string, changedAt time.Time) *billingv1alpha1.BillingEntitlement {
+		be := &billingv1alpha1.BillingEntitlement{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "org-a", Name: name},
+			Spec: billingv1alpha1.BillingEntitlementSpec{
+				BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: account},
+				OfferRef:          billingv1alpha1.OfferReference{Name: "offer"},
+			},
+		}
+		if !changedAt.IsZero() {
+			be.Annotations = map[string]string{SubscriptionChangedAnnotation: changedAt.Format(time.RFC3339)}
+		}
+		return be
+	}
+	tests := []struct {
+		name        string
+		entitlement *billingv1alpha1.BillingEntitlement
+		want        time.Duration
+	}{
+		{name: "no entitlement", want: syncedRequeueAfter},
+		{name: "never changed", entitlement: entitlement("be", "acme-account", time.Time{}), want: syncedRequeueAfter},
+		{name: "changed a minute ago", entitlement: entitlement("be", "acme-account", now.Add(-time.Minute)), want: subscriptionChangeRecheckAfter},
+		{name: "changed six minutes ago", entitlement: entitlement("be", "acme-account", now.Add(-6*time.Minute)), want: syncedRequeueAfter},
+		{name: "another account's change", entitlement: entitlement("be", "other-account", now.Add(-time.Minute)), want: syncedRequeueAfter},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := baseBillingAccount()
+			account.Spec.ContactInfo = &billingv1alpha1.BillingContactInfo{Email: "a@example.com"}
+			var objs []client.Object
+			if tt.entitlement != nil {
+				objs = append(objs, tt.entitlement)
+			}
+			h := newSyncHarness(t, account, objs...)
+			h.r.Now = func() time.Time { return now }
+			if res := h.reconcile(t); res.RequeueAfter != tt.want {
+				t.Errorf("RequeueAfter = %v, want %v", res.RequeueAfter, tt.want)
+			}
+		})
+	}
+}
+
+// The account is reconciled when one of its entitlements records a new
+// subscription change, and not on the entitlement's other updates.
+func TestSubscriptionChangedPredicate(t *testing.T) {
+	be := func(changedAt string) *billingv1alpha1.BillingEntitlement {
+		e := &billingv1alpha1.BillingEntitlement{ObjectMeta: metav1.ObjectMeta{Namespace: "org-a", Name: "be"}}
+		if changedAt != "" {
+			e.Annotations = map[string]string{SubscriptionChangedAnnotation: changedAt}
+		}
+		return e
+	}
+	p := subscriptionChangedPredicate()
+	if !p.Update(event.UpdateEvent{ObjectOld: be(""), ObjectNew: be("2026-11-12T18:47:50Z")}) {
+		t.Error("first change not passed")
+	}
+	if !p.Update(event.UpdateEvent{ObjectOld: be("2026-11-12T18:47:50Z"), ObjectNew: be("2026-11-12T19:00:00Z")}) {
+		t.Error("later change not passed")
+	}
+	if p.Update(event.UpdateEvent{ObjectOld: be("2026-11-12T18:47:50Z"), ObjectNew: be("2026-11-12T18:47:50Z")}) {
+		t.Error("update without a new change passed")
+	}
+	if p.Create(event.CreateEvent{Object: be("")}) {
+		t.Error("entitlement without a change passed on create")
+	}
+	if !p.Create(event.CreateEvent{Object: be("2026-11-12T18:47:50Z")}) {
+		t.Error("entitlement with a change not passed on create")
+	}
+
+	reqs := mapEntitlementToAccount(context.Background(), &billingv1alpha1.BillingEntitlement{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "org-a", Name: "be"},
+		Spec:       billingv1alpha1.BillingEntitlementSpec{BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: "acme-account"}},
+	})
+	if len(reqs) != 1 || reqs[0].Namespace != "org-a" || reqs[0].Name != "acme-account" {
+		t.Errorf("mapEntitlementToAccount = %v, want org-a/acme-account", reqs)
 	}
 }

@@ -96,6 +96,12 @@ type SubscriptionState struct {
 	// which it isn't on yet: the end of its billing period, for a
 	// DesiredSubscription with ChangeAtPeriodEnd.
 	ChangeAt *time.Time
+	// Changed reports that this call changed the customer's subscriptions:
+	// created, changed, migrated or restored one, or deleted a scheduled one.
+	// OpenMeter invoices charges billed in advance, such as
+	// one-time fees, as soon as a subscription starts, so a new invoice may
+	// follow shortly.
+	Changed bool
 }
 
 // subscriptionStepKind is the next mutation needed to converge.
@@ -250,6 +256,7 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 		now = time.Now()
 	}
 
+	changed := false
 	for range maxSubscriptionSteps {
 		subs, err := c.ListSubscriptions(ctx, desired.CustomerKey)
 		if err != nil {
@@ -257,7 +264,7 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 		}
 		step := nextSubscriptionStep(subs, desired.PlanKey, activeVersion)
 		if step.kind == stepNone {
-			return SubscriptionState{Current: *step.current, Pending: step.pending, PlanVersion: activeVersion}, nil
+			return SubscriptionState{Current: *step.current, Pending: step.pending, PlanVersion: activeVersion, Changed: changed}, nil
 		}
 		if step.kind == stepChange && desired.ChangeAtPeriodEnd {
 			period, err := c.currentBillingPeriod(ctx, step.target.Id)
@@ -266,13 +273,14 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 			}
 			at, wait := periodChangeTime(step.target, period, now, desired.ChangeDue)
 			if wait != nil {
-				return SubscriptionState{Current: step.target, PlanVersion: activeVersion, ChangeAt: wait}, nil
+				return SubscriptionState{Current: step.target, PlanVersion: activeVersion, ChangeAt: wait, Changed: changed}, nil
 			}
 			step.at = at
 		}
 		if err := c.applySubscriptionStep(ctx, desired, step, *active); err != nil {
 			return SubscriptionState{}, fmt.Errorf("%s subscription: %w", step.kind, err)
 		}
+		changed = true
 	}
 	return SubscriptionState{}, &TransientError{Err: fmt.Errorf(
 		"subscription for customer %s did not converge after %d steps", desired.CustomerKey, maxSubscriptionSteps)}

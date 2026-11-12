@@ -686,3 +686,38 @@ func TestBillingEntitlement_WatchMappers(t *testing.T) {
 		t.Errorf("siblingEntitlements = %v, want %v", got, want)
 	}
 }
+
+// A subscription the provider creates or changes is recorded on the
+// entitlement, so the account picks up the invoice OpenMeter issues for it
+// within seconds; a pass that changed nothing records nothing.
+func TestBillingEntitlement_RecordsSubscriptionChange(t *testing.T) {
+	now := time.Date(2026, time.November, 12, 18, 47, 50, 0, time.UTC)
+	r, omc, _ := newEntitlementReconciler(t, testEntitlement(testBEName, "test-offer"), testAccount(), cpuOffer())
+	r.Now = func() time.Time { return now }
+	changed := true
+	omc.ensureFn = func(d openmeter.DesiredSubscription) (openmeter.SubscriptionState, error) {
+		return openmeter.SubscriptionState{
+			Current: om.Subscription{
+				Id:     "sub-1",
+				Status: om.SubscriptionStatusActive,
+				Plan:   &om.PlanReference{Key: d.PlanKey, Version: 1},
+			},
+			PlanVersion: 1,
+			Changed:     changed,
+		}, nil
+	}
+
+	reconcileEntitlement(t, r, testBEName)
+	be, _ := getEntitlement(t, r, testBEName)
+	if got, want := be.Annotations[SubscriptionChangedAnnotation], "2026-11-12T18:47:50Z"; got != want {
+		t.Fatalf("%s = %q, want %q", SubscriptionChangedAnnotation, got, want)
+	}
+
+	changed = false
+	r.Now = func() time.Time { return now.Add(time.Hour) }
+	reconcileEntitlement(t, r, testBEName)
+	be, _ = getEntitlement(t, r, testBEName)
+	if got, want := be.Annotations[SubscriptionChangedAnnotation], "2026-11-12T18:47:50Z"; got != want {
+		t.Errorf("%s = %q after a pass that changed nothing, want it left at %q", SubscriptionChangedAnnotation, got, want)
+	}
+}

@@ -653,13 +653,20 @@ func TestEnsureSubscription_CreatesThenConverges(t *testing.T) {
 	if state.Current.Metadata == nil || (*state.Current.Metadata)["miloapis.com/billing-entitlement"] != "ns/be" {
 		t.Errorf("metadata not attached: %+v", state.Current.Metadata)
 	}
+	if !state.Changed {
+		t.Error("Changed = false after creating the subscription")
+	}
 
 	writes := f.subscriptionWrites
-	if _, err := c.EnsureSubscription(context.Background(), desiredSub("p")); err != nil {
+	again, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
+	if err != nil {
 		t.Fatalf("second EnsureSubscription: %v", err)
 	}
 	if f.subscriptionWrites != writes {
 		t.Errorf("converged subscription issued %d more writes", f.subscriptionWrites-writes)
+	}
+	if again.Changed {
+		t.Error("Changed = true for a subscription already converged")
 	}
 }
 
@@ -739,7 +746,7 @@ func TestEnsureSubscription_ChangesPlanImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("switch to q: %v", err)
 	}
-	if state.Current.Plan.Key != "q" || state.Pending != nil {
+	if state.Current.Plan.Key != "q" || state.Pending != nil || !state.Changed {
 		t.Fatalf("state = %+v", state)
 	}
 	if got, want := f.subsByStatus("cust"), []string{"inactive:p@1", "active:q@1"}; !equalStrings(got, want) {
@@ -980,7 +987,7 @@ func TestEnsureSubscription_ChangeAtPeriodEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("amend mid period: %v", err)
 	}
-	if f.subscriptionWrites != writes || state.Current.Id != sub.Id || state.ChangeAt == nil || !state.ChangeAt.Equal(periodEnd) {
+	if f.subscriptionWrites != writes || state.Current.Id != sub.Id || state.ChangeAt == nil || !state.ChangeAt.Equal(periodEnd) || state.Changed {
 		t.Fatalf("writes = %d, state = %+v; want none, still %s, changing at %s", f.subscriptionWrites-writes, state, sub.Id, periodEnd)
 	}
 
@@ -992,8 +999,8 @@ func TestEnsureSubscription_ChangeAtPeriodEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("amend at the boundary: %v", err)
 	}
-	if state.Current.Plan.Key != "q" || state.ChangeAt != nil {
-		t.Fatalf("state = %+v, want on q with nothing pending", state)
+	if state.Current.Plan.Key != "q" || state.ChangeAt != nil || !state.Changed {
+		t.Fatalf("state = %+v, want changed to q with nothing pending", state)
 	}
 	if at := f.changesAt[sub.Id]; !at.Equal(boundary) {
 		t.Errorf("change timed at %s, want %s", at, boundary)
