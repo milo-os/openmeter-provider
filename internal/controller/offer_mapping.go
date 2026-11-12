@@ -419,10 +419,22 @@ func unitConversion(sp billingv1alpha1.ServicePricingSnapshot) (*omv3.BillingUni
 
 // addFlatFee maps a OneTime or Recurring pricing to a flat-fee rate card.
 // OneTime cards carry no cadence, so OpenMeter charges them once when the
-// subscription starts (BillingAccountActivation is the only trigger).
+// subscription starts (BillingAccountActivation is the only trigger), in
+// advance. A Recurring card is charged every month, quarter or year, its
+// pricing's interval, in advance or in arrears as its snapshot's
+// billingTiming says (in advance without one: see feeInArrears). The plan bills monthly, which divides both longer cadences, as
+// OpenMeter requires.
 func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) error {
 	if sp.Spec.Amount == "" {
 		return invalidOffer("service pricing %q: %s pricing has no amount", sp.Name, sp.Spec.ChargeType)
+	}
+	// Ending a fee after its periods means removing it from the
+	// subscription with a v3 edit, which the OpenMeter this runs against
+	// (1.0.0-beta.232) doesn't have. Publishing it anyway would charge the
+	// fee after its endsAt, so the Offer isn't published until that lands.
+	if sp.Periods > 0 {
+		return invalidOffer("service pricing %q: periods (%d) aren't supported yet: "+
+			"the fee would keep being charged after its last period", sp.Name, sp.Periods)
 	}
 	discounts, err := resolveDiscount(sp)
 	if err != nil {
@@ -438,8 +450,12 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	if sp.Spec.ServiceRef != "" {
 		description = fmt.Sprintf("ServicePricing %s (%s)", sp.Name, sp.Spec.ServiceRef)
 	}
-	// v1 charged flat fees in advance by default; v3 defaults to arrears.
+	// v1 charged flat fees in advance by default; v3 defaults to arrears,
+	// so the term is always set.
 	paymentTerm := omv3.BillingPricePaymentTermInAdvance
+	if feeInArrears(sp) {
+		paymentTerm = omv3.BillingPricePaymentTermInArrears
+	}
 	card := omv3.BillingRateCard{
 		Key:         key,
 		Name:        name,
@@ -455,10 +471,10 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	}
 	switch sp.Spec.ChargeType {
 	case billingv1alpha1.ChargeTypeRecurring:
-		if sp.Spec.Interval != "" && sp.Spec.Interval != billingv1alpha1.ChargeIntervalMonthly {
+		cadence, ok := feeCadence(sp.Spec.Interval)
+		if !ok {
 			return invalidOffer("service pricing %q: unsupported recurring interval %q", sp.Name, sp.Spec.Interval)
 		}
-		cadence := usageBillingPeriod
 		card.BillingCadence = &cadence
 	case billingv1alpha1.ChargeTypeOneTime:
 		if sp.Spec.Trigger != "" {
@@ -472,6 +488,31 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	}
 	b.rateCards = append(b.rateCards, card)
 	return nil
+}
+
+// feeInArrears reports whether a fee is billed in arrears: a Recurring fee
+// whose snapshot says InArrears. A snapshot without billingTiming, one taken
+// before it existed or whose Offer didn't set it, is billed in advance, as
+// billing's validation.SnapshotBillingTiming reads it; OneTime fees always
+// are.
+func feeInArrears(sp billingv1alpha1.ServicePricingSnapshot) bool {
+	return sp.Spec.ChargeType == billingv1alpha1.ChargeTypeRecurring &&
+		sp.BillingTiming == billingv1alpha1.BillingTimingInArrears
+}
+
+// feeCadence is a Recurring fee's billing cadence, from its pricing's
+// interval: monthly (or unset, from before intervals had a choice),
+// quarterly or annual. ok is false for any other.
+func feeCadence(interval billingv1alpha1.ChargeInterval) (cadence string, ok bool) {
+	switch interval {
+	case "", billingv1alpha1.ChargeIntervalMonthly:
+		return usageBillingPeriod, true
+	case billingv1alpha1.ChargeIntervalQuarterly:
+		return "P3M", true
+	case billingv1alpha1.ChargeIntervalAnnual:
+		return "P1Y", true
+	}
+	return "", false
 }
 
 // feeQuantity is how many of a fee an Offer charges: its snapshot's

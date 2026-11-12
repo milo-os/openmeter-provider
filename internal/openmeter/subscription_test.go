@@ -947,7 +947,7 @@ func TestPeriodChangeTime(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			at, wait := periodChangeTime(sub, tt.period, tt.now, tt.due)
+			at, wait := periodChangeTime(sub, tt.period, tt.now, tt.due, 1)
 			if !at.Equal(tt.wantAt) {
 				t.Errorf("at = %s, want %s", at, tt.wantAt)
 			}
@@ -958,6 +958,99 @@ func TestPeriodChangeTime(t *testing.T) {
 				t.Errorf("wait = %s, want %s", wait, tt.wantWait)
 			}
 		})
+	}
+}
+
+// A plan billing a quarterly or annual fee in advance changes only at the
+// end of that fee's period, counted from the billing anchor, and never late:
+// changing mid-period would charge the rest of the period again.
+func TestPeriodChangeTime_InAdvanceFeePeriod(t *testing.T) {
+	anchor := time.Date(2026, time.April, 18, 0, 0, 0, 0, time.UTC)
+	sub := om.Subscription{ActiveFrom: anchor, BillingAnchor: anchor}
+	month := func(m int) time.Time { return anchor.AddDate(0, m, 0) }
+	period := func(m int) *om.Period { return &om.Period{From: month(m), To: month(m + 1)} }
+
+	tests := []struct {
+		name     string
+		every    int
+		period   *om.Period
+		now      time.Time
+		due      *time.Time
+		wantAt   time.Time
+		wantWait time.Time
+	}{
+		{name: "annual: mid year waits for the anniversary",
+			every: 12, period: period(4), now: month(4).AddDate(0, 0, 3), wantWait: month(12)},
+		{name: "annual: a monthly boundary that isn't the anniversary waits",
+			every: 12, period: period(5), now: month(5).Add(5 * time.Second), wantWait: month(12)},
+		{name: "annual: just after the anniversary is timed at it",
+			every: 12, period: period(12), now: month(12).Add(5 * time.Second), wantAt: month(12)},
+		{name: "annual: a missed anniversary waits a year, even past due",
+			every: 12, period: period(12), now: month(12).Add(10 * time.Minute), due: ptr(month(12)), wantWait: month(24)},
+		{name: "quarterly: waits for the quarter's end",
+			every: 3, period: period(4), now: month(4).AddDate(0, 0, 3), wantWait: month(6)},
+		{name: "quarterly: at a quarter boundary",
+			every: 3, period: period(6), now: month(6).Add(time.Second), wantAt: month(6)},
+		{name: "first period of an annual plan waits for the anniversary",
+			every: 12, period: period(0), now: anchor.Add(time.Hour), wantWait: month(12)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			at, wait := periodChangeTime(sub, tt.period, tt.now, tt.due, tt.every)
+			if !at.Equal(tt.wantAt) {
+				t.Errorf("at = %s, want %s", at, tt.wantAt)
+			}
+			switch {
+			case tt.wantWait.IsZero() && wait != nil:
+				t.Errorf("wait = %s, want none", wait)
+			case !tt.wantWait.IsZero() && (wait == nil || !wait.Equal(tt.wantWait)):
+				t.Errorf("wait = %v, want %s", wait, tt.wantWait)
+			}
+		})
+	}
+}
+
+// Boundaries are counted on the anchor's day, or the month's last day.
+func TestAddMonthsClamped(t *testing.T) {
+	anchor := time.Date(2026, time.January, 31, 0, 0, 0, 0, time.UTC)
+	for months, want := range map[int]time.Time{
+		1:  time.Date(2026, time.February, 28, 0, 0, 0, 0, time.UTC),
+		3:  time.Date(2026, time.April, 30, 0, 0, 0, 0, time.UTC),
+		12: time.Date(2027, time.January, 31, 0, 0, 0, 0, time.UTC),
+	} {
+		if got := addMonthsClamped(anchor, months); !got.Equal(want) {
+			t.Errorf("addMonthsClamped(+%d) = %s, want %s", months, got, want)
+		}
+	}
+}
+
+func TestPlanInAdvanceFeeMonths(t *testing.T) {
+	card := func(cadence string, term omv3.BillingPricePaymentTerm) omv3.BillingRateCard {
+		c := omv3.BillingRateCard{PaymentTerm: &term}
+		if cadence != "" {
+			c.BillingCadence = &cadence
+		}
+		return c
+	}
+	inAdvance, inArrears := omv3.BillingPricePaymentTermInAdvance, omv3.BillingPricePaymentTermInArrears
+	plan := func(cards ...omv3.BillingRateCard) omv3.BillingPlan {
+		return omv3.BillingPlan{Phases: []omv3.BillingPlanPhase{{RateCards: cards}}}
+	}
+	tests := []struct {
+		name string
+		plan omv3.BillingPlan
+		want int
+	}{
+		{"monthly fees", plan(card("P1M", inAdvance), card("P1M", inArrears)), 1},
+		{"one-time fee", plan(card("", inAdvance)), 1},
+		{"annual in arrears", plan(card("P1Y", inArrears)), 1},
+		{"quarterly in advance", plan(card("P1M", inAdvance), card("P3M", inAdvance)), 3},
+		{"annual in advance", plan(card("P3M", inAdvance), card("P1Y", inAdvance)), 12},
+	}
+	for _, tt := range tests {
+		if got := planInAdvanceFeeMonths(tt.plan); got != tt.want {
+			t.Errorf("%s: %d, want %d", tt.name, got, tt.want)
+		}
 	}
 }
 

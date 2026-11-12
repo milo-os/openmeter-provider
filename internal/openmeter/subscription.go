@@ -72,6 +72,13 @@ type DesiredSubscription struct {
 	// made within periodChangeTolerance of it; later than that it waits for
 	// the next one, unless ChangeDue has passed. Migrations to a new version
 	// of the same plan are still immediate.
+	//
+	// When the current plan bills a quarterly or annual fee in advance, the
+	// change waits for the end of that fee's period instead, a boundary
+	// every three or twelve months from the billing anchor: OpenMeter
+	// doesn't credit an issued invoice, so a change mid-period would charge
+	// the rest of the period again on the new plan. Such a boundary is never
+	// made late, even after ChangeDue: a missed one waits for the next.
 	ChangeAtPeriodEnd bool
 	// ChangeDue is when a change deferred by ChangeAtPeriodEnd was due, as
 	// SubscriptionState.ChangeAt reported it. Once it has passed, a change
@@ -271,7 +278,11 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 			if err != nil {
 				return SubscriptionState{}, fmt.Errorf("get billing period: %w", err)
 			}
-			at, wait := periodChangeTime(step.target, period, now, desired.ChangeDue)
+			every, err := c.inAdvanceFeeMonths(ctx, step.target)
+			if err != nil {
+				return SubscriptionState{}, fmt.Errorf("read the current plan's fees: %w", err)
+			}
+			at, wait := periodChangeTime(step.target, period, now, desired.ChangeDue, every)
 			if wait != nil {
 				return SubscriptionState{Current: step.target, PlanVersion: activeVersion, ChangeAt: wait, Changed: changed}, nil
 			}
@@ -422,18 +433,100 @@ func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscr
 // the period to end, since a change at its start would leave it empty. With
 // no aligned period (OpenMeter reports one for active, aligned
 // subscriptions), the change happens immediately.
-func periodChangeTime(sub om.Subscription, period *om.Period, now time.Time, due *time.Time) (at time.Time, wait *time.Time) {
+//
+// everyMonths above 1 is the longest period of a fee the current plan bills
+// in advance (inAdvanceFeeMonths): only a boundary that many months on from
+// the subscription's billing anchor will do, and a missed one, even past
+// due, waits for the next, since changing mid-period would charge the rest
+// of the fee's period again.
+func periodChangeTime(sub om.Subscription, period *om.Period, now time.Time, due *time.Time, everyMonths int) (at time.Time, wait *time.Time) {
 	if period == nil {
 		return time.Time{}, nil
 	}
-	if period.From.After(sub.ActiveFrom) && !now.Before(period.From) && now.Sub(period.From) <= periodChangeTolerance {
+	anchor := sub.BillingAnchor
+	if anchor.IsZero() {
+		anchor = sub.ActiveFrom
+	}
+	aligned := everyMonths <= 1 || monthsFrom(anchor, period.From)%everyMonths == 0
+	if aligned && period.From.After(sub.ActiveFrom) && !now.Before(period.From) && now.Sub(period.From) <= periodChangeTolerance {
 		return period.From, nil
 	}
-	if due != nil && !now.Before(*due) {
-		return time.Time{}, nil
+	if everyMonths <= 1 {
+		if due != nil && !now.Before(*due) {
+			return time.Time{}, nil
+		}
+		end := period.To
+		return time.Time{}, &end
 	}
-	end := period.To
+	months := monthsFrom(anchor, period.To)
+	if r := months % everyMonths; r != 0 {
+		months += everyMonths - r
+	}
+	end := addMonthsClamped(anchor, months)
 	return time.Time{}, &end
+}
+
+// monthsFrom is how many whole months a billing period boundary is from the
+// anchor it's counted from.
+func monthsFrom(anchor, boundary time.Time) int {
+	anchor, boundary = anchor.UTC(), boundary.UTC()
+	return (boundary.Year()-anchor.Year())*12 + int(boundary.Month()-anchor.Month())
+}
+
+// addMonthsClamped is the billing period boundary months after anchor: the
+// anchor's day, or the month's last day when it's shorter, at the anchor's
+// time of day, as OpenMeter aligns periods.
+func addMonthsClamped(anchor time.Time, months int) time.Time {
+	anchor = anchor.UTC()
+	first := time.Date(anchor.Year(), anchor.Month()+time.Month(months), 1, 0, 0, 0, 0, time.UTC)
+	day := anchor.Day()
+	if last := first.AddDate(0, 1, -1).Day(); day > last {
+		day = last
+	}
+	return time.Date(first.Year(), first.Month(), day,
+		anchor.Hour(), anchor.Minute(), anchor.Second(), anchor.Nanosecond(), time.UTC)
+}
+
+// inAdvanceFeeMonths is the longest cadence, in months, of a fee the
+// subscription's plan bills in advance: 3 for a quarterly fee, 12 for an
+// annual one, and 1 when it has neither (monthly fees, fees in arrears and
+// usage are billed for no more than the month). A plan that can't be found
+// counts as 1.
+func (c *client) inAdvanceFeeMonths(ctx context.Context, sub om.Subscription) (int, error) {
+	if sub.Plan == nil || sub.Plan.Key == "" {
+		return 1, nil
+	}
+	versions, err := c.ListPlanVersions(ctx, sub.Plan.Key)
+	if err != nil {
+		return 0, err
+	}
+	for _, plan := range versions {
+		if plan.Version == sub.Plan.Version {
+			return planInAdvanceFeeMonths(plan), nil
+		}
+	}
+	return 1, nil
+}
+
+// planInAdvanceFeeMonths is inAdvanceFeeMonths for a plan already read.
+func planInAdvanceFeeMonths(plan omv3.BillingPlan) int {
+	longest := 1
+	for _, phase := range plan.Phases {
+		for _, card := range phase.RateCards {
+			if card.PaymentTerm == nil || *card.PaymentTerm != omv3.BillingPricePaymentTermInAdvance || card.BillingCadence == nil {
+				continue
+			}
+			months := 1
+			switch *card.BillingCadence {
+			case "P3M":
+				months = 3
+			case "P1Y", "P12M":
+				months = 12
+			}
+			longest = max(longest, months)
+		}
+	}
+	return longest
 }
 
 // currentBillingPeriod returns the subscription's current billing period,
