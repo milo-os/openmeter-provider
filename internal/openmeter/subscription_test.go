@@ -100,6 +100,33 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 		return true
 	}
 
+	// GET /api/v3/openmeter/subscriptions/{id}: the v3 read, with the
+	// current billing period and the current phase's items.
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v3/openmeter/subscriptions/") &&
+		!strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/v3/openmeter/subscriptions/"), "/") {
+		id := strings.TrimPrefix(r.URL.Path, "/api/v3/openmeter/subscriptions/")
+		sub, ok := f.subscriptions[id]
+		if !ok {
+			problem(http.StatusNotFound, "subscription not found")
+			return true
+		}
+		out := omv3.BillingSubscription{Id: sub.Id, ActiveFrom: sub.ActiveFrom, BillingAnchor: sub.BillingAnchor}
+		if period, ok := f.billingPeriods[sub.Id]; ok {
+			out.CurrentPeriod = &omv3.ClosedPeriod{From: period.From, To: period.To}
+		}
+		if items, ok := f.subItems[sub.Id]; ok {
+			phase := omv3.BillingSubscriptionPhase{Key: "default_phase", ActiveFrom: sub.ActiveFrom}
+			for _, item := range items {
+				phase.Items = append(phase.Items, omv3.BillingSubscriptionItem{
+					ActiveTo: item.ActiveTo, RateCard: omv3.BillingRateCard{Key: item.Key},
+				})
+			}
+			out.Phases = []omv3.BillingSubscriptionPhase{phase}
+		}
+		writeJSON(http.StatusOK, out)
+		return true
+	}
+
 	if strings.HasPrefix(r.URL.Path, "/api/v3/openmeter/subscriptions/") && strings.HasSuffix(r.URL.Path, "/edit") {
 		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v3/openmeter/subscriptions/"), "/edit")
 		sub, ok := f.subscriptions[id]
@@ -198,18 +225,11 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 
 	switch {
 	case r.Method == http.MethodGet && action == "":
-		if r.URL.Query().Has("at") {
-			problem(http.StatusNotImplemented, "historical queries are not supported")
-			return true
-		}
-		expanded := om.SubscriptionExpanded{Id: sub.Id, ActiveFrom: sub.ActiveFrom, BillingAnchor: sub.BillingAnchor}
-		if period, ok := f.billingPeriods[sub.Id]; ok {
-			expanded.Alignment = &om.SubscriptionAlignment{CurrentAlignedBillingPeriod: &period}
-		}
-		if items, ok := f.subItems[sub.Id]; ok {
-			expanded.Phases = []om.SubscriptionPhaseExpanded{{Key: "default_phase", ActiveFrom: sub.ActiveFrom, Items: items}}
-		}
-		writeJSON(http.StatusOK, expanded)
+		// OpenMeter refuses the v1 read for any subscription with a
+		// unit-converting item, as a contract with a customer's own
+		// unit-converted rates has; the client reads through v3 instead.
+		problem(http.StatusBadRequest, "unit_config_not_representable: this resource uses unit_config and is only available via the v3 API")
+		return true
 
 	case r.Method == http.MethodDelete && action == "":
 		if sub.Status != om.SubscriptionStatusScheduled {
