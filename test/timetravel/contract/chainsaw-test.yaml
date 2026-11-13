@@ -123,10 +123,7 @@ spec:
         invoices are left open.
       cleanup:
         - script:
-            content: |
-              . ./lib.sh
-              kubectl annotate billingaccount "$ACCOUNT" -n "$NS" --overwrite \
-                openmeter.miloapis.com/force-delete=true >/dev/null 2>&1 || true
+            content: bash ../../e2e/contract/release-account.sh
         - script:
             content: bash ../clock.sh set 0
       try:
