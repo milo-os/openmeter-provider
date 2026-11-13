@@ -50,12 +50,14 @@ clock to "$(plus_seconds "$date" 5)"
 resync
 clock to "$at"
 resync
+echo "Reconciled the entitlement at ${date} and an hour on"
 
 job="tt-sync-${month}-$(date +%s)"
 kubectl create job -n "$NS" "$job" --from=cronjob/openmeter-subscription-sync >/dev/null
 kubectl wait -n "$NS" --for=condition=complete "job/${job}" --timeout=240s >/dev/null ||
   fail "subscription sync job ${job} did not complete" "$(kubectl logs -n "$NS" "job/${job}" --tail=20 2>&1)"
 kubectl delete job -n "$NS" "$job" --wait=false >/dev/null
+echo "Synced the subscription (job ${job})"
 
 id=$(customer_id)
 om POST "/billing/invoices/invoice" "{\"customerId\":\"${id}\"}" >/dev/null ||

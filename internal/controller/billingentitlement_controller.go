@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	om "github.com/openmeterio/openmeter/api/client/go"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -82,6 +83,11 @@ const (
 	// EventReasonFeeEndedLate: a fee was found still charging after its
 	// last period and removed then; the periods after need crediting.
 	EventReasonFeeEndedLate = "FeeEndedLate"
+	// EventReasonFeeEndedBeforeAmendment: an amended contract's
+	// subscription started with a fee whose last period was already over,
+	// as every amendment's plan has all the contract's fees, and it was
+	// removed at once.
+	EventReasonFeeEndedBeforeAmendment = "FeeEndedBeforeAmendment"
 )
 
 // SubscriptionChangedAnnotation records on a BillingEntitlement when this
@@ -299,32 +305,44 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		reason = conditionReasonMigrationScheduled
 	}
 	// Fees that run for a set number of periods are removed once their last
-	// period ends. Not while an amendment waits: the subscription is still
-	// on the previous Offer's plan, whose fees the new Offer's don't name.
-	if state.ChangeAt == nil {
-		startsAt := state.Current.ActiveFrom
-		if be.Spec.Contract != nil {
-			startsAt = be.Spec.Contract.StartsAt.Time
+	// period ends, by the terms of the Offer the subscription is on: while
+	// an amendment waits, which can be until the contract's anniversary,
+	// that's still the previous Offer, and its fees keep ending on time.
+	startsAt := state.Current.ActiveFrom
+	if be.Spec.Contract != nil {
+		startsAt = be.Spec.Contract.StartsAt.Time
+	}
+	subscribed, err := r.subscribedOffer(ctx, &offer, state.Current)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if ends, names := feeEnds(subscribed, startsAt); len(ends) > 0 {
+		ended, err := r.OpenMeterClient.EndFees(ctx, state.Current.Id, ends, now)
+		if err != nil {
+			return r.openMeterFailed(ctx, &be, fmt.Errorf("end fees after their periods: %w", err))
 		}
-		if ends, names := feeEnds(&offer, startsAt); len(ends) > 0 {
-			ended, err := r.OpenMeterClient.EndFees(ctx, state.Current.Id, ends, now)
-			if err != nil {
-				return r.openMeterFailed(ctx, &be, fmt.Errorf("end fees after their periods: %w", err))
-			}
-			for _, fee := range ended.Scheduled {
-				r.event(&be, "Normal", EventReasonFeeEndScheduled, fmt.Sprintf(
-					"%s's last period ends %s; it's removed from the subscription then",
+		for _, fee := range ended.Scheduled {
+			r.event(&be, "Normal", EventReasonFeeEndScheduled, fmt.Sprintf(
+				"%s's last period ends %s; it's removed from the subscription then",
+				names[fee.ItemKey], fee.EndsAt.UTC().Format(time.RFC3339)))
+		}
+		for _, fee := range ended.RemovedLate {
+			if !fee.EndsAt.After(state.Current.ActiveFrom) {
+				// The fee ended before this subscription started: an
+				// amendment's plan has every fee of the contract, and
+				// OpenMeter can't leave one out when the plan changes.
+				r.event(&be, "Normal", EventReasonFeeEndedBeforeAmendment, fmt.Sprintf(
+					"%s's last period ended %s, before the amended contract took effect; it's been removed from the subscription",
 					names[fee.ItemKey], fee.EndsAt.UTC().Format(time.RFC3339)))
+				continue
 			}
-			for _, fee := range ended.RemovedLate {
-				r.event(&be, "Warning", EventReasonFeeEndedLate, fmt.Sprintf(
-					"%s should have stopped at %s and was still charging; it's been removed now, "+
-						"and any period charged after %s needs crediting",
-					names[fee.ItemKey], fee.EndsAt.UTC().Format(time.RFC3339), fee.EndsAt.UTC().Format(time.RFC3339)))
-			}
-			if ended.NextCheck != nil {
-				requeueAfter = min(requeueAfter, ended.NextCheck.Sub(now)+changeAtPeriodEndDelay)
-			}
+			r.event(&be, "Warning", EventReasonFeeEndedLate, fmt.Sprintf(
+				"%s should have stopped at %s and was still charging; it's been removed now, "+
+					"and any period charged after %s needs crediting",
+				names[fee.ItemKey], fee.EndsAt.UTC().Format(time.RFC3339), fee.EndsAt.UTC().Format(time.RFC3339)))
+		}
+		if ended.NextCheck != nil {
+			requeueAfter = min(requeueAfter, ended.NextCheck.Sub(now)+changeAtPeriodEndDelay)
 		}
 	}
 
@@ -337,6 +355,33 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		r.event(&be, "Normal", EventReasonSynced, msg)
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// subscribedOffer is the Offer whose plan the subscription is on. That's
+// offer, unless the subscription hasn't changed to it yet (an amendment
+// waits for the end of the billing period): then it's the Offer the
+// subscription was made for, which its metadata names. If that Offer is
+// gone, or the name no longer matches the subscription's plan, it's offer,
+// whose terms end the fees both Offers share.
+func (r *BillingEntitlementReconciler) subscribedOffer(ctx context.Context, offer *billingv1alpha1.Offer, current om.Subscription) (*billingv1alpha1.Offer, error) {
+	if current.Plan == nil || current.Plan.Key == planKeyForOffer(offer) || current.Metadata == nil {
+		return offer, nil
+	}
+	name := (*current.Metadata)[subscriptionMetadataOffer]
+	if name == "" {
+		return offer, nil
+	}
+	var previous billingv1alpha1.Offer
+	if err := r.Get(ctx, types.NamespacedName{Name: name}, &previous); err != nil {
+		if apierrors.IsNotFound(err) {
+			return offer, nil
+		}
+		return nil, fmt.Errorf("get the subscribed offer %q: %w", name, err)
+	}
+	if planKeyForOffer(&previous) != current.Plan.Key {
+		return offer, nil
+	}
+	return &previous, nil
 }
 
 // changeAtPeriodEndDelay is how long after a billing period ends the
