@@ -365,7 +365,7 @@ func (r *InvoiceRequestReconciler) now() time.Time {
 	if r.Now != nil {
 		return r.Now()
 	}
-	return time.Now()
+	return systemNow()
 }
 
 // SetupWithManager registers the controller with the manager. Billing

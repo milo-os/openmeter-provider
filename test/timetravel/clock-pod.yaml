@@ -1,0 +1,20 @@
+# Writes the time-travel clock: the node's /var/lib/openmeter-timetravel,
+# which OpenMeter's and the provider's time-travel builds read. See clock.sh.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: timetravel-clock
+spec:
+  restartPolicy: Never
+  containers:
+    - name: clock
+      image: busybox:1.36
+      command: ["sleep", "infinity"]
+      volumeMounts:
+        - name: timetravel
+          mountPath: /timetravel
+  volumes:
+    - name: timetravel
+      hostPath:
+        path: /var/lib/openmeter-timetravel
+        type: DirectoryOrCreate

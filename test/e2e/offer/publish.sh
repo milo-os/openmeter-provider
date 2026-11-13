@@ -8,7 +8,8 @@
 #   2. The client flips spec.launchStage to GA. The snapshot is still empty.
 #   3. Billing's Offer controller (buildSnapshots) resolves each ref and writes
 #      spec.servicePricings as an unmodified copy of each ServicePricing spec,
-#      in ref order. A ref without a namespace defaults to milo-system.
+#      with the ref's discount, quantity, billingTiming and periods, in ref
+#      order. A ref without a namespace defaults to milo-system.
 #
 # Usage:
 #   publish.sh <offer> ga        step 2 only
@@ -45,11 +46,11 @@ if [ "$step" = "snapshot" ] || [ "$step" = "all" ]; then
     # here to match billing's internal/controller/offer_controller.go. Upstream Offer
     # resolution is covered in the billing repository.
     discount=$(echo "$refs" | jq -c --argjson od "$offer_discount" ".[$i].discount // \$od")
-    if [ "$discount" != "null" ]; then
-      snapshot=$(echo "$snapshot" | jq -c --argjson sp "$sp" --argjson disc "$discount" '. + [{name: $sp.metadata.name, spec: $sp.spec, discount: $disc}]')
-    else
-      snapshot=$(echo "$snapshot" | jq -c --argjson sp "$sp" '. + [{name: $sp.metadata.name, spec: $sp.spec}]')
-    fi
+    # The ref's contract terms are copied as they are, as billing's
+    # snapshot does: quantity, billingTiming and periods.
+    terms=$(echo "$refs" | jq -c ".[$i] | {quantity, billingTiming, periods} | with_entries(select(.value != null))")
+    snapshot=$(echo "$snapshot" | jq -c --argjson sp "$sp" --argjson disc "$discount" --argjson terms "$terms" \
+      '. + [{name: $sp.metadata.name, spec: $sp.spec} + (if $disc != null then {discount: $disc} else {} end) + $terms]')
   done
   kubectl patch offer "$offer" --type merge -p "{\"spec\":{\"servicePricings\":${snapshot}}}"
   echo "Snapshotted $(echo "$snapshot" | jq 'length') service pricing(s) into ${offer}."

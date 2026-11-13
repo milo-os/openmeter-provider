@@ -1,0 +1,16 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Configuration
+metadata:
+  name: openmeter-provider-timetravel
+spec:
+  # Each billing date runs an OpenMeter job and invoices, so steps take
+  # minutes, not seconds; each script sets its own timeout.
+  timeouts:
+    apply: 30s
+    assert: 60s
+    cleanup: 120s
+    delete: 60s
+    error: 30s
+    exec: 300s
+  parallel: 1
+  skipDelete: false

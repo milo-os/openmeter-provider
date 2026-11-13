@@ -1,0 +1,153 @@
+# A contract's fees, one of each shape billing offers: a one-time fee;
+# monthly, quarterly and annual fees billed in advance or in arrears; fees
+# charged more than once (quantity) and in a unit; and fees that run for a
+# set number of periods. The Offer (offer.yaml) sets each fee's quantity,
+# billing timing and periods, as a contract does. The usage pricing converts
+# bytes into GiB, which makes the subscription one OpenMeter's v1 API
+# refuses to read.
+#
+# The amounts are made up and round, so totals are easy to check by hand.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-setup
+spec:
+  displayName: "Setup"
+  chargeType: OneTime
+  currency: USD
+  amount: "500.00"
+  trigger: BillingAccountActivation
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-rack
+spec:
+  displayName: "Rack space"
+  chargeType: Recurring
+  currency: USD
+  amount: "300.00"
+  interval: monthly
+  pricingUnit: rack
+  serviceRef: compute.miloapis.com
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-hands
+spec:
+  displayName: "Remote hands"
+  chargeType: Recurring
+  currency: USD
+  amount: "50.00"
+  interval: monthly
+  pricingUnit: hour
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-onboarding
+spec:
+  displayName: "Onboarding"
+  chargeType: Recurring
+  currency: USD
+  amount: "250.00"
+  interval: monthly
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-backups
+spec:
+  displayName: "Managed backups"
+  chargeType: Recurring
+  currency: USD
+  amount: "40.00"
+  interval: monthly
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-reporting
+spec:
+  displayName: "Usage reporting"
+  chargeType: Recurring
+  currency: USD
+  amount: "30.00"
+  interval: monthly
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-ddos
+spec:
+  displayName: "DDoS protection"
+  chargeType: Recurring
+  currency: USD
+  amount: "900.00"
+  interval: quarterly
+  serviceRef: networking.miloapis.com
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-audit
+spec:
+  displayName: "Compliance audit"
+  chargeType: Recurring
+  currency: USD
+  amount: "600.00"
+  interval: quarterly
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-support
+spec:
+  displayName: "Enterprise support"
+  chargeType: Recurring
+  currency: USD
+  amount: "1200.00"
+  interval: annual
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-licences
+spec:
+  displayName: "Software licences"
+  chargeType: Recurring
+  currency: USD
+  amount: "20.00"
+  interval: annual
+  pricingUnit: seat
+---
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-egress
+spec:
+  displayName: "Network egress: GiB"
+  chargeType: Usage
+  currency: USD
+  metric: ct-egress-bytes
+  pricingUnit: GiB
+  unitConversion:
+    meterUnitsPerPricingUnit: "1073741824"
+    description: "Egress is metered in bytes and priced per GiB; 1 GiB = 2^30 bytes"
+  serviceRef: networking.miloapis.com
+  rates:
+    - flat: "0.05"
+---
+# Added by the amendment (offer-amended.yaml).
+apiVersion: billing.miloapis.com/v1alpha1
+kind: ServicePricing
+metadata:
+  name: ct-cross-connect
+spec:
+  displayName: "Cross connect"
+  chargeType: Recurring
+  currency: USD
+  amount: "100.00"
+  interval: monthly
+  pricingUnit: port

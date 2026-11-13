@@ -85,6 +85,15 @@ type DesiredSubscription struct {
 	// that missed its boundary (the provider was down, say) is made
 	// immediately rather than a period late.
 	ChangeDue *time.Time
+	// StartsAt is when a contract's subscription should start: its
+	// startsAt. A subscription created, or changed onto the contract with
+	// MoveAnchor, within periodChangeTolerance of it is timed at it, so its
+	// first billing period is whole and OpenMeter prorates nothing billed in
+	// advance. A change is only timed there when StartsAt is also a billing
+	// boundary of the subscription it changes, as OpenMeter only ends a
+	// subscription early on one. Otherwise, or later, the subscription
+	// starts now and its first period is prorated.
+	StartsAt *time.Time
 	// Now is the current time; time.Now when zero.
 	Now time.Time
 }
@@ -288,6 +297,14 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 			}
 			step.at = at
 		}
+		if step.at.IsZero() && desired.StartsAt != nil &&
+			(step.kind == stepCreate || (step.kind == stepChange && desired.MoveAnchor)) {
+			at, err := c.contractStartTime(ctx, step, *desired.StartsAt, now)
+			if err != nil {
+				return SubscriptionState{}, fmt.Errorf("get billing period: %w", err)
+			}
+			step.at = at
+		}
 		if err := c.applySubscriptionStep(ctx, desired, step, *active); err != nil {
 			return SubscriptionState{}, fmt.Errorf("%s subscription: %w", step.kind, err)
 		}
@@ -305,15 +322,23 @@ func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubsc
 	switch step.kind {
 	case stepCreate:
 		key := string(desired.CustomerKey)
-		var body om.SubscriptionCreate
-		if err := body.FromPlanSubscriptionCreate(om.PlanSubscriptionCreate{
+		create := om.PlanSubscriptionCreate{
 			CustomerKey: &key,
 			// Version omitted: OpenMeter subscribes to the version active
 			// now, which avoids racing a concurrent publish.
 			Plan:          om.PlanReferenceInput{Key: desired.PlanKey},
 			Metadata:      &metadata,
 			BillingAnchor: desired.BillingAnchor,
-		}); err != nil {
+		}
+		if !step.at.IsZero() {
+			var timing om.SubscriptionTiming
+			if err := timing.FromSubscriptionTiming1(step.at); err != nil {
+				return &PermanentError{Err: err}
+			}
+			create.Timing = &timing
+		}
+		var body om.SubscriptionCreate
+		if err := body.FromPlanSubscriptionCreate(create); err != nil {
 			return &PermanentError{Err: err}
 		}
 		rsp, err := c.api.CreateSubscriptionWithResponse(ctx, body)
@@ -420,6 +445,29 @@ func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscr
 	}{Key: &desired.PlanKey, Version: &version}
 	_, err := c.v3.do(ctx, http.MethodPost, "/subscriptions/"+url.PathEscape(target.Id)+"/change", nil, body, nil)
 	return reclassifySubscription(err)
+}
+
+// contractStartTime is when a subscription created, or changed onto a
+// contract, starts: the contract's start, when it was no more than
+// periodChangeTolerance ago (OpenMeter starts a subscription up to two
+// minutes in the past) and, for a change, is a billing boundary of the
+// subscription changed (OpenMeter only ends one early on its boundaries).
+// Otherwise it's zero, for now.
+func (c *client) contractStartTime(ctx context.Context, step subscriptionStep, startsAt, now time.Time) (time.Time, error) {
+	if since := now.Sub(startsAt); since < 0 || since > periodChangeTolerance {
+		return time.Time{}, nil
+	}
+	if step.kind == stepCreate {
+		return startsAt, nil
+	}
+	period, err := c.currentBillingPeriod(ctx, step.target.Id)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if period != nil && period.From.Equal(startsAt) && !step.target.ActiveFrom.After(startsAt) {
+		return startsAt, nil
+	}
+	return time.Time{}, nil
 }
 
 // periodChangeTime decides when a plan change deferred to the end of the

@@ -1,0 +1,17 @@
+# The usage the contract's usage pricing bills, metered in bytes.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: MeterDefinition
+metadata:
+  name: ct-egress-bytes
+spec:
+  meterName: ct-egress-bytes
+  phase: Published
+  displayName: "Contract egress bytes"
+  measurement:
+    aggregation: Sum
+    unit: By
+  billing:
+    consumedUnit: By
+    pricingUnit: By
+  monitoredResourceTypes:
+    - e2e.miloapis.com/Resource

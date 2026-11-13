@@ -1,0 +1,66 @@
+# The contract's Offer, as the staff portal writes one: each fee's quantity,
+# billing timing and periods on its ref. Authored as Draft and published
+# with ../offer/publish.sh (billing's operator does not run in e2e).
+#
+#   Setup               one-time                         $500
+#   Rack space          monthly, in advance, 2 rack      $600 a month
+#   Remote hands        monthly, in arrears, 4 hour      $200 a month
+#   Onboarding          monthly, in advance, 1 period    $250, once
+#   Managed backups     monthly, in advance, 3 periods   $40 a month for 3 months
+#   Usage reporting     monthly, in arrears, 2 periods   $30 a month for 2 months
+#   DDoS protection     quarterly, in advance            $900 a quarter
+#   Compliance audit    quarterly, in arrears, 2 periods $600 a quarter for 2 quarters
+#   Enterprise support  annual, in advance               $1,200 a year
+#   Software licences   annual, in arrears, 5 seat       $100 a year
+#   Network egress      usage, bytes billed per GiB      $0.05 a GiB
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-ct-offer
+  annotations:
+    kubernetes.io/display-name: "E2E Contract"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - OneTime
+    - Recurring
+    - Usage
+  servicePricingRefs:
+    - name: ct-setup
+      namespace: openmeter-system
+    - name: ct-rack
+      namespace: openmeter-system
+      quantity: 2
+      billingTiming: InAdvance
+    - name: ct-hands
+      namespace: openmeter-system
+      quantity: 4
+      billingTiming: InArrears
+    - name: ct-onboarding
+      namespace: openmeter-system
+      billingTiming: InAdvance
+      periods: 1
+    - name: ct-backups
+      namespace: openmeter-system
+      billingTiming: InAdvance
+      periods: 3
+    - name: ct-reporting
+      namespace: openmeter-system
+      billingTiming: InArrears
+      periods: 2
+    - name: ct-ddos
+      namespace: openmeter-system
+      billingTiming: InAdvance
+    - name: ct-audit
+      namespace: openmeter-system
+      billingTiming: InArrears
+      periods: 2
+    - name: ct-support
+      namespace: openmeter-system
+      billingTiming: InAdvance
+    - name: ct-licences
+      namespace: openmeter-system
+      quantity: 5
+      billingTiming: InArrears
+    - name: ct-egress
+      namespace: openmeter-system

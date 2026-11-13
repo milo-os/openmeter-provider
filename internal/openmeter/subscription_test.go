@@ -202,7 +202,18 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 			problem(http.StatusNotFound, "plan not found")
 			return true
 		}
-		sub := f.newSubscription(cust.Id, plan, om.SubscriptionStatusActive, time.Now(), body.Metadata)
+		from := time.Now()
+		if body.Timing != nil {
+			at, err := v1ChangeTime(*body.Timing)
+			if err != nil {
+				problem(http.StatusBadRequest, err.Error())
+				return true
+			}
+			if !at.IsZero() {
+				from = at
+			}
+		}
+		sub := f.newSubscription(cust.Id, plan, om.SubscriptionStatusActive, from, body.Metadata)
 		if body.BillingAnchor != nil {
 			sub = f.setAnchor(sub.Id, *body.BillingAnchor)
 		}
@@ -272,6 +283,12 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 		at, err := v1ChangeTime(body.Timing)
 		if err != nil {
 			problem(http.StatusBadRequest, err.Error())
+			return true
+		}
+		// OpenMeter only ends a subscription at a custom time on one of its
+		// billing boundaries.
+		if period, ok := f.billingPeriods[sub.Id]; !at.IsZero() && (!ok || (!at.Equal(period.From) && !at.Equal(period.To))) {
+			problem(http.StatusBadRequest, "invalid cancelation timing: cannot cancel aligned subscription with custom misaligned timing")
 			return true
 		}
 		anchor := sub.BillingAnchor
@@ -982,6 +999,102 @@ func TestEnsureSubscription_MoveAnchor(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A contract's subscription starts at the contract's start when the
+// provider gets to it within periodChangeTolerance, so OpenMeter prorates
+// nothing in its first period: created at it, or changed onto at it when
+// it's a billing boundary of the subscription changed. Otherwise it starts
+// now.
+func TestEnsureSubscription_StartsAtTheContractStart(t *testing.T) {
+	startsAt := time.Now().Add(-30 * time.Second).Truncate(time.Second)
+	starting := func(planKey string, startsAt time.Time) DesiredSubscription {
+		d := desiredSub(planKey)
+		d.BillingAnchor = &startsAt
+		d.MoveAnchor = true
+		d.StartsAt = &startsAt
+		d.Now = time.Now()
+		return d
+	}
+	startedAt := func(sub om.Subscription) time.Time { return sub.ActiveFrom.Truncate(time.Second) }
+
+	t.Run("created at the start", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.seedCustomer("cust")
+		f.seedPlanVersion("q", 1, omv3.BillingPlanStatusActive)
+		state, err := c.EnsureSubscription(context.Background(), starting("q", startsAt))
+		if err != nil {
+			t.Fatalf("EnsureSubscription: %v", err)
+		}
+		if !startedAt(state.Current).Equal(startsAt) {
+			t.Errorf("started %s, want the contract's start %s", state.Current.ActiveFrom, startsAt)
+		}
+	})
+
+	t.Run("created now when the start is past the tolerance", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.seedCustomer("cust")
+		f.seedPlanVersion("q", 1, omv3.BillingPlanStatusActive)
+		early := startsAt.Add(-time.Hour)
+		state, err := c.EnsureSubscription(context.Background(), starting("q", early))
+		if err != nil {
+			t.Fatalf("EnsureSubscription: %v", err)
+		}
+		if !state.Current.ActiveFrom.After(startsAt) {
+			t.Errorf("started %s, want now", state.Current.ActiveFrom)
+		}
+	})
+
+	for _, tc := range []struct{ name, planKey string }{{"v1 change", "q"}, {"v3 change", "r"}} {
+		t.Run(tc.name+" at the start, a billing boundary", func(t *testing.T) {
+			c, f := newTestClient(t)
+			f.seedCustomer("cust")
+			f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+			f.seedPlanVersion(tc.planKey, 1, omv3.BillingPlanStatusActive)
+			if tc.planKey == "r" {
+				f.convertUsage("r")
+			}
+			before, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
+			if err != nil {
+				t.Fatalf("subscribe: %v", err)
+			}
+			old := before.Current
+			old.ActiveFrom = startsAt.AddDate(0, -1, 0)
+			f.subscriptions[old.Id] = old
+			f.billingPeriods[old.Id] = om.Period{From: startsAt, To: startsAt.AddDate(0, 1, 0)}
+
+			state, err := c.EnsureSubscription(context.Background(), starting(tc.planKey, startsAt))
+			if err != nil {
+				t.Fatalf("move onto %s: %v", tc.planKey, err)
+			}
+			if at, ok := f.changesAt[old.Id]; !ok || !at.Equal(startsAt) || !startedAt(state.Current).Equal(startsAt) {
+				t.Errorf("changed at %s (timed %v), started %s; want both at %s", at, ok, state.Current.ActiveFrom, startsAt)
+			}
+		})
+	}
+
+	t.Run("changed now when the start isn't a billing boundary", func(t *testing.T) {
+		c, f := newTestClient(t)
+		f.seedCustomer("cust")
+		f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+		f.seedPlanVersion("q", 1, omv3.BillingPlanStatusActive)
+		before, err := c.EnsureSubscription(context.Background(), desiredSub("p"))
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		old := before.Current
+		old.ActiveFrom = startsAt.AddDate(0, 0, -10)
+		f.subscriptions[old.Id] = old
+		f.billingPeriods[old.Id] = om.Period{From: startsAt.AddDate(0, 0, -10), To: startsAt.AddDate(0, 0, 20)}
+
+		state, err := c.EnsureSubscription(context.Background(), starting("q", startsAt))
+		if err != nil {
+			t.Fatalf("move onto q: %v", err)
+		}
+		if _, timed := f.changesAt[old.Id]; timed || state.Current.Plan.Key != "q" {
+			t.Errorf("plan %s, timed change %v; want an immediate change onto q", state.Current.Plan.Key, timed)
+		}
+	})
 }
 
 func TestPeriodChangeTime(t *testing.T) {

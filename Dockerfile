@@ -6,6 +6,8 @@ ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG GIT_TREE_STATE=unknown
 ARG BUILD_DATE=unknown
+# Go build tags: test/timetravel builds with timetravel. Releases build with none.
+ARG GO_BUILD_TAGS=""
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
@@ -23,14 +25,14 @@ ENV GOCACHE=/root/.cache/go-build
 ENV GOTMPDIR=/root/.cache/go-build
 RUN --mount=type=cache,target=/go/pkg/mod/ \
   --mount=type=cache,target="/root/.cache/go-build" \
-  CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+  CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -tags "${GO_BUILD_TAGS}" \
     -ldflags "-s -w \
       -X main.version=${VERSION} \
       -X main.gitCommit=${GIT_COMMIT} \
       -X main.gitTreeState=${GIT_TREE_STATE} \
       -X main.buildDate=${BUILD_DATE}" \
     -o openmeter-provider ./cmd/openmeter && \
-  CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+  CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -tags "${GO_BUILD_TAGS}" \
     -ldflags "-s -w \
       -X main.version=${VERSION} \
       -X main.gitCommit=${GIT_COMMIT} \

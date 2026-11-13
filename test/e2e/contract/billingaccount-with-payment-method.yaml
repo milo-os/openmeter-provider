@@ -1,0 +1,10 @@
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingAccount
+metadata:
+  name: e2e-ct-account
+spec:
+  currencyCode: USD
+  contactInfo:
+    email: contract@example.com
+  defaultPaymentMethodRef:
+    name: e2e-ct-payment-method
