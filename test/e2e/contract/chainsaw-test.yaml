@@ -1,0 +1,169 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: contract
+spec:
+  description: |
+    A contract from its start, against a real OpenMeter: what is billed at
+    once, what waits, and an amendment. The contract's Offer (offer.yaml) has
+    one fee of every shape billing offers (one-time; monthly, quarterly and
+    annual; in advance and in arrears; quantities, units and set numbers of
+    periods) and a usage pricing that converts bytes into GiB, which makes
+    the subscription one only OpenMeter's v3 API can read.
+
+    What each fee should do is worked out from the Offer by schedule.py,
+    which applies billing's rules independently of the provider:
+
+      - the subscription bills on the contract's day, with every fee as an
+        item of the right cadence, payment term and total;
+      - the fee whose single period ends with the first billing period has
+        its removal scheduled for then;
+      - the first invoice has the one-time fee and every fee billed in
+        advance, at their full totals, and nothing billed in arrears;
+      - each fee billed in arrears waits to be invoiced at the end of its
+        first period: a month, a quarter or a year on;
+      - an amendment waits for the end of the billing period.
+
+    Later invoices need time to pass, which ../../timetravel covers.
+
+    Billing's operator and webhooks do not run in e2e: the Offers are
+    published with ../offer/publish.sh and the payment method chain is
+    fabricated, as in the billingentitlement suite.
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      try:
+        - apply:
+            file: query-pod.yaml
+        - assert:
+            timeout: 120s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-ct
+              status:
+                phase: Running
+
+    - name: publish the contract's Offer and its amendment
+      try:
+        - apply:
+            file: meter.yaml
+        - apply:
+            file: servicepricings.yaml
+        - apply:
+            file: offer.yaml
+        - apply:
+            file: offer-amended.yaml
+        - script:
+            timeout: 30s
+            content: |
+              bash ../offer/publish.sh e2e-ct-offer
+              bash ../offer/publish.sh e2e-ct-offer-amended
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-ct-offer
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-ct-offer-amended
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+
+    - name: create a BillingAccount that can be invoiced
+      try:
+        - apply:
+            file: billingaccount.yaml
+        - script:
+            content: QUERY_POD=openmeter-query-ct sh ../billingaccount/resolve-stripe-customer.sh "$NAMESPACE" customerId
+            outputs:
+              - name: stripeCustomerId
+                value: ($stdout)
+        - script:
+            content: QUERY_POD=openmeter-query-ct sh ../billingaccount/resolve-stripe-customer.sh "$NAMESPACE" paymentMethodId
+            outputs:
+              - name: stripePaymentMethodId
+                value: ($stdout)
+        - apply:
+            file: paymentmethod.yaml
+        - patch:
+            file: paymentmethod-active.yaml
+            subresource: status
+        - patch:
+            file: stripepaymentmethod-active.yaml
+            subresource: status
+        - apply:
+            file: billingaccount-with-payment-method.yaml
+        - patch:
+            file: billingaccount-payment-method-ready.yaml
+            subresource: status
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-ct-account
+                (finalizers[?@ == 'openmeter.miloapis.com/customer-link']): ['openmeter.miloapis.com/customer-link']
+
+    - name: the contract starts today
+      description: |
+        The account moves onto the contract at once, billing on its day,
+        and the subscription has every fee. The first invoice is left open
+        when the suite ends, so the cleanup releases the account with the
+        force-delete annotation.
+      cleanup:
+        - script:
+            content: |
+              . ./lib.sh
+              kubectl annotate billingaccount "$ACCOUNT" -n "$NS" --overwrite \
+                openmeter.miloapis.com/force-delete=true >/dev/null 2>&1 || true
+      try:
+        - script:
+            content: bash start.sh
+            outputs:
+              - name: startsAt
+                value: (trim_space($stdout))
+        - apply:
+            file: entitlement.yaml
+        - script:
+            timeout: 120s
+            content: bash expect-condition.sh Synced "version 1 is active"
+        - script:
+            timeout: 90s
+            content: bash expect-started.sh
+        - script:
+            timeout: 90s
+            content: bash expect-subscription.sh e2e-ct-offer
+
+    - name: the first invoice charges the one-time fee and the fees billed in advance
+      try:
+        - script:
+            timeout: 90s
+            content: bash expect-first-invoice.sh
+
+    - name: the fees billed in arrears wait for the end of their first period
+      try:
+        - script:
+            timeout: 90s
+            content: bash expect-upcoming.sh
+
+    - name: an amendment waits for the end of the billing period
+      try:
+        - script:
+            timeout: 10s
+            content: kubectl patch billingentitlement e2e-ct-entitlement -n "$NAMESPACE" --type merge -p '{"spec":{"offerRef":{"name":"e2e-ct-offer-amended"}}}'
+        - script:
+            timeout: 150s
+            content: bash expect-amendment.sh

@@ -494,7 +494,7 @@ func (r *BillingAccountReconciler) now() time.Time {
 	if r.Now != nil {
 		return r.Now()
 	}
-	return time.Now()
+	return systemNow()
 }
 
 // noticePrefix is the per-account key prefix for BillingAccountReconciler's

@@ -1,0 +1,57 @@
+# The contract after an amendment adds a Cross connect fee (2 port, monthly,
+# in advance). The entitlement moves to it at the end of the billing period.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: Offer
+metadata:
+  name: e2e-ct-offer-amended
+  annotations:
+    kubernetes.io/display-name: "E2E Contract, amended"
+spec:
+  launchStage: Draft
+  chargeTypes:
+    - OneTime
+    - Recurring
+    - Usage
+  servicePricingRefs:
+    - name: ct-setup
+      namespace: openmeter-system
+    - name: ct-rack
+      namespace: openmeter-system
+      quantity: 2
+      billingTiming: InAdvance
+    - name: ct-hands
+      namespace: openmeter-system
+      quantity: 4
+      billingTiming: InArrears
+    - name: ct-onboarding
+      namespace: openmeter-system
+      billingTiming: InAdvance
+      periods: 1
+    - name: ct-backups
+      namespace: openmeter-system
+      billingTiming: InAdvance
+      periods: 3
+    - name: ct-reporting
+      namespace: openmeter-system
+      billingTiming: InArrears
+      periods: 2
+    - name: ct-ddos
+      namespace: openmeter-system
+      billingTiming: InAdvance
+    - name: ct-audit
+      namespace: openmeter-system
+      billingTiming: InArrears
+      periods: 2
+    - name: ct-support
+      namespace: openmeter-system
+      billingTiming: InAdvance
+    - name: ct-licences
+      namespace: openmeter-system
+      quantity: 5
+      billingTiming: InArrears
+    - name: ct-egress
+      namespace: openmeter-system
+    - name: ct-cross-connect
+      namespace: openmeter-system
+      quantity: 2
+      billingTiming: InAdvance

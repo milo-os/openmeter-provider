@@ -10,6 +10,9 @@ vars:
   IMAGE_NAME: "ghcr.io/milo-os/openmeter-provider"
   IMAGE_TAG: "dev"
   TEST_INFRA_CLUSTER_NAME: "test-infra"
+  # The kind cluster's own kubeconfig (test-infra writes it), so the
+  # time-travel tasks never reach whatever cluster the shell points at.
+  TEST_INFRA_KUBECONFIG: "{{.USER_WORKING_DIR}}/.test-infra/kubeconfig"
   TEST_INFRA_REPO_REF: 'v0.6.0'
   WAIT_TIMEOUT: "10m"
   CONTROLLER_TOOLS_VERSION: "v0.18.0"
@@ -747,3 +750,21 @@ tasks:
     cmds:
       - "{{.TOOL_DIR}}/chainsaw test --config test/e2e/.chainsaw.yaml {{if .CLI_ARGS}}test/e2e/{{.CLI_ARGS}}{{else}}test/e2e/{{end}}"
     silent: false
+
+  timetravel:setup:
+    desc: 'Move a dev:setup kind cluster onto clocks the time-travel suites can move: OpenMeter rebuilt with test/timetravel/openmeter/patch.py and the provider built with the timetravel tag. The cluster is then for test/timetravel only. SKIP_OPENMETER_BUILD=1 reuses an OpenMeter image already built.'
+    cmds:
+      - KUBECONFIG={{.TEST_INFRA_KUBECONFIG}} TEST_INFRA_CLUSTER_NAME={{.TEST_INFRA_CLUSTER_NAME}} bash test/timetravel/setup.sh
+
+  timetravel:e2e:
+    desc: 'Run the time-travel chainsaw suites (test/timetravel) on a cluster set up with timetravel:setup, e.g. `task timetravel:e2e -- contract`.'
+    deps:
+      - task: install-go-tool
+        vars:
+          NAME: chainsaw
+          PACKAGE: github.com/kyverno/chainsaw
+          VERSION: "{{.CHAINSAW_VERSION}}"
+    env:
+      KUBECONFIG: "{{.TEST_INFRA_KUBECONFIG}}"
+    cmds:
+      - "{{.TOOL_DIR}}/chainsaw test --config test/timetravel/.chainsaw.yaml {{if .CLI_ARGS}}test/timetravel/{{.CLI_ARGS}}{{else}}test/timetravel/{{end}}"

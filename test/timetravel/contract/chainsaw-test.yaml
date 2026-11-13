@@ -1,0 +1,221 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: timetravel-contract
+spec:
+  description: |
+    A contract's first year of invoices, in minutes: OpenMeter and the
+    provider run on a clock the suite moves (../setup.sh), and each step
+    moves it to an hour after the next billing date, lets OpenMeter and the
+    provider catch up, and checks what was invoiced (bill.sh) against what
+    schedule.py says the contract bills.
+
+    The contract is the contract suite's (../../e2e/contract): one fee of
+    every shape billing offers. It starts at midnight on the next 31st, so
+    its billing dates fall on the last day of every shorter month. Over the
+    year:
+
+      - month 0: the one-time fee and every fee billed in advance;
+      - every month: the monthly fees, in advance for the month starting
+        and in arrears for the month ending;
+      - months 3, 6, 9 and 12: the quarterly fees; month 12: the annual
+        ones, Software licences in arrears for the year just ended;
+      - Onboarding (1 period), Managed backups (3) and Usage reporting (2,
+        in arrears) stop after their last period; Compliance audit (2
+        quarters, in arrears) after month 6;
+      - an amendment in month 4 waits for the contract's anniversary (it
+        bills Enterprise support a year in advance), then adds a Cross
+        connect from month 12 without charging any other fee again.
+
+    Needs a cluster set up with task timetravel:setup, which is for these
+    suites only: afterwards OpenMeter's clock has moved a year on.
+  namespace: openmeter-system
+  steps:
+    - name: start the OpenMeter query pod
+      try:
+        - apply:
+            file: ../../e2e/contract/query-pod.yaml
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: openmeter-query-ct
+              status:
+                phase: Running
+
+    - name: publish the contract's Offer and its amendment
+      try:
+        - apply:
+            file: ../../e2e/contract/meter.yaml
+        - apply:
+            file: ../../e2e/contract/servicepricings.yaml
+        - apply:
+            file: ../../e2e/contract/offer.yaml
+        - apply:
+            file: ../../e2e/contract/offer-amended.yaml
+        - script:
+            timeout: 30s
+            content: |
+              bash ../../e2e/offer/publish.sh e2e-ct-offer
+              bash ../../e2e/offer/publish.sh e2e-ct-offer-amended
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-ct-offer
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+        - assert:
+            timeout: 90s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: Offer
+              metadata:
+                name: e2e-ct-offer-amended
+              status:
+                (conditions[?type == 'OpenMeterPlanSynced']):
+                  - status: "True"
+
+    - name: create a BillingAccount that can be invoiced
+      try:
+        - apply:
+            file: ../../e2e/contract/billingaccount.yaml
+        - script:
+            content: QUERY_POD=openmeter-query-ct sh ../../e2e/billingaccount/resolve-stripe-customer.sh "$NAMESPACE" customerId
+            outputs:
+              - name: stripeCustomerId
+                value: ($stdout)
+        - script:
+            content: QUERY_POD=openmeter-query-ct sh ../../e2e/billingaccount/resolve-stripe-customer.sh "$NAMESPACE" paymentMethodId
+            outputs:
+              - name: stripePaymentMethodId
+                value: ($stdout)
+        - apply:
+            file: ../../e2e/contract/paymentmethod.yaml
+        - patch:
+            file: ../../e2e/contract/paymentmethod-active.yaml
+            subresource: status
+        - patch:
+            file: ../../e2e/contract/stripepaymentmethod-active.yaml
+            subresource: status
+        - apply:
+            file: ../../e2e/contract/billingaccount-with-payment-method.yaml
+        - patch:
+            file: ../../e2e/contract/billingaccount-payment-method-ready.yaml
+            subresource: status
+        - assert:
+            timeout: 30s
+            resource:
+              apiVersion: billing.miloapis.com/v1alpha1
+              kind: BillingAccount
+              metadata:
+                name: e2e-ct-account
+                (finalizers[?@ == 'openmeter.miloapis.com/customer-link']): ['openmeter.miloapis.com/customer-link']
+
+    - name: the contract starts on the 31st
+      description: |
+        The cleanup puts the clock back and releases the account, whose
+        invoices are left open.
+      cleanup:
+        - script:
+            content: |
+              . ./lib.sh
+              kubectl annotate billingaccount "$ACCOUNT" -n "$NS" --overwrite \
+                openmeter.miloapis.com/force-delete=true >/dev/null 2>&1 || true
+        - script:
+            content: bash ../clock.sh set 0
+      try:
+        - script:
+            timeout: 30s
+            content: bash begin.sh
+            outputs:
+              - name: startsAt
+                value: (trim_space($stdout))
+        - apply:
+            file: ../../e2e/contract/entitlement.yaml
+        - script:
+            timeout: 120s
+            content: bash ../../e2e/contract/expect-condition.sh Synced "version 1 is active"
+        - script:
+            timeout: 90s
+            content: bash ../../e2e/contract/expect-subscription.sh e2e-ct-offer
+
+    - name: "month 0: the one-time fee and every fee billed in advance"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 0
+    - name: "month 1: Onboarding has stopped; the first fees billed in arrears"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 1
+    - name: "month 2"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 2
+    - name: "month 3: the quarterly fees; Managed backups has stopped"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 3
+    - name: "month 4: monthly fees only"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 4
+    - name: "month 4: an amendment adding a Cross connect waits for the anniversary"
+      try:
+        - script:
+            timeout: 10s
+            content: kubectl patch billingentitlement e2e-ct-entitlement -n "$NAMESPACE" --type merge -p '{"spec":{"offerRef":{"name":"e2e-ct-offer-amended"}}}'
+        - script:
+            timeout: 150s
+            content: |
+              bash ../../e2e/contract/expect-amendment.sh 4
+    - name: "month 5"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 5
+    - name: "month 6: the second quarter's fees; Compliance audit's last"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 6
+    - name: "month 7"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 7
+    - name: "month 8"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 8
+    - name: "month 9: the third quarter's DDoS protection only"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 9
+    - name: "month 10"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 10
+    - name: "month 11"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 11
+    - name: "month 12: the annual fees, Software licences in arrears, and the amendment's Cross connect; nothing charged twice"
+      try:
+        - script:
+            timeout: 300s
+            content: bash bill.sh 12 12

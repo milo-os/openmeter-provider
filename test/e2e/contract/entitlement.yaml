@@ -1,0 +1,14 @@
+# The account's contract, starting at midnight UTC today, as billing
+# requires (its webhook, which does not run in e2e, refuses a start in the
+# past). startsAt comes from the suite's "contract start" step.
+apiVersion: billing.miloapis.com/v1alpha1
+kind: BillingEntitlement
+metadata:
+  name: e2e-ct-entitlement
+spec:
+  billingAccountRef:
+    name: e2e-ct-account
+  offerRef:
+    name: e2e-ct-offer
+  contract:
+    startsAt: ($startsAt)

@@ -681,5 +681,5 @@ func (r *BillingEntitlementReconciler) now() time.Time {
 	if r.Now != nil {
 		return r.Now()
 	}
-	return time.Now()
+	return systemNow()
 }
