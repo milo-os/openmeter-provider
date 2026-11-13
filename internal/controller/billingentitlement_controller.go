@@ -90,6 +90,12 @@ const (
 	EventReasonFeeEndedBeforeAmendment = "FeeEndedBeforeAmendment"
 )
 
+// EventReasonContractStartedLate: an account was moved onto its contract
+// after the contract's start, so OpenMeter prorates the first billing
+// period's fees billed in advance.
+const EventReasonContractStartedLate = "ContractStartedLate"
+
+
 // SubscriptionChangedAnnotation records on a BillingEntitlement when this
 // provider last created or changed its OpenMeter subscription (RFC 3339).
 // OpenMeter invoices one-time fees and other charges billed in advance as
@@ -252,6 +258,9 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		_, contractStarted = be.Annotations[ContractStartedAnnotation]
 		desired.MoveAnchor = !contractStarted
 		desired.ChangeAtPeriodEnd = contractStarted
+		if !contractStarted {
+			desired.StartsAt = &startsAt
+		}
 		if due, err := time.Parse(time.RFC3339, be.Annotations[OfferChangeAtAnnotation]); err == nil {
 			desired.ChangeDue = &due
 		}
@@ -279,6 +288,12 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 	if be.Spec.Contract != nil {
 		if err := r.recordContractState(ctx, &be, state.ChangeAt); err != nil {
 			return ctrl.Result{}, err
+		}
+		if startsAt := be.Spec.Contract.StartsAt.UTC(); !contractStarted && state.Changed && state.Current.ActiveFrom.After(startsAt) {
+			r.event(&be, "Warning", EventReasonContractStartedLate, fmt.Sprintf(
+				"the account moved onto the contract at %s, %s after it started at %s, so its first invoice prorates the fees billed in advance",
+				state.Current.ActiveFrom.UTC().Format(time.RFC3339), state.Current.ActiveFrom.Sub(startsAt).Round(time.Second),
+				startsAt.Format(time.RFC3339)))
 		}
 	}
 	if state.Changed {

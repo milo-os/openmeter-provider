@@ -324,6 +324,9 @@ func TestBillingEntitlement_ContractMoveAndAmend(t *testing.T) {
 		t.Fatalf("moving onto the contract: MoveAnchor %v, ChangeAtPeriodEnd %v, anchor %v; want a move to %s now",
 			d.MoveAnchor, d.ChangeAtPeriodEnd, d.BillingAnchor, startsAt)
 	}
+	if d.StartsAt == nil || !d.StartsAt.Equal(startsAt) {
+		t.Errorf("moving onto the contract: StartsAt %v, want the contract's start %s", d.StartsAt, startsAt)
+	}
 	got, _ := getEntitlement(t, r, testBEName)
 	if v := got.Annotations[ContractStartedAnnotation]; v != "2026-03-18T00:00:00Z" {
 		t.Fatalf("%s = %q, want the contract's start", ContractStartedAnnotation, v)
@@ -872,6 +875,39 @@ func TestBillingEntitlement_EndsFeesAfterTheirPeriods(t *testing.T) {
 			t.Fatalf("EndFees calls = %v, want the promo fee ending %s, by the new Offer", omc.endCalls, want)
 		}
 	})
+}
+
+// A subscription that starts after the contract's start bills a prorated
+// first period, and the provider warns about it; one on time doesn't.
+func TestBillingEntitlement_ContractStartedLate(t *testing.T) {
+	startsAt := time.Date(2026, time.March, 18, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		started time.Time
+		warn    bool
+	}{
+		{name: "on time", started: startsAt},
+		{name: "late", started: startsAt.Add(3 * time.Hour), warn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := testEntitlement(testBEName, "test-offer")
+			be.Spec.Contract = &billingv1alpha1.BillingContract{StartsAt: metav1.NewTime(startsAt)}
+			r, omc, rec := newEntitlementReconciler(t, be, testAccount(), cpuOffer())
+			r.Now = func() time.Time { return tc.started.Add(time.Second) }
+			omc.ensureFn = func(d openmeter.DesiredSubscription) (openmeter.SubscriptionState, error) {
+				return openmeter.SubscriptionState{
+					Current: om.Subscription{Id: "sub-1", Status: om.SubscriptionStatusActive, ActiveFrom: tc.started,
+						Plan: &om.PlanReference{Key: d.PlanKey, Version: 1}},
+					PlanVersion: 1,
+					Changed:     true,
+				}, nil
+			}
+			reconcileEntitlement(t, r, testBEName)
+			if got := hasEventPrefix(rec, "Warning "+EventReasonContractStartedLate+" the account moved onto the contract at 2026-03-18T03:00:00Z, 3h0m0s after"); got != tc.warn {
+				t.Errorf("ContractStartedLate warning = %v, want %v", got, tc.warn)
+			}
+		})
+	}
 }
 
 // hasEventPrefix reports whether the recorder holds an event starting with want.

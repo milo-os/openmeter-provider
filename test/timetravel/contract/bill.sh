@@ -59,7 +59,13 @@ kubectl wait -n "$NS" --for=condition=complete "job/${job}" --timeout=240s >/dev
 kubectl delete job -n "$NS" "$job" --wait=false >/dev/null
 echo "Synced the subscription (job ${job})"
 
-id=$(customer_id)
+# OpenMeter can be slow to answer while it catches up on a billing date.
+id=""
+for _ in $(seq 1 10); do
+  id=$(customer_id 2>/dev/null) && [ -n "$id" ] && break
+  sleep 3
+done
+[ -n "$id" ] || fail "no OpenMeter customer for the account"
 om POST "/billing/invoices/invoice" "{\"customerId\":\"${id}\"}" >/dev/null ||
   echo "invoicing pending lines: HTTP $(om_status)"
 
