@@ -49,27 +49,18 @@ type subscriptionView struct {
 }
 
 func (c *client) viewSubscription(ctx context.Context, subscriptionID string, now time.Time) (subscriptionView, error) {
-	rsp, err := c.api.GetSubscriptionWithResponse(ctx, subscriptionID, nil)
+	sub, err := c.getSubscriptionV3(ctx, subscriptionID)
 	if err != nil {
-		return subscriptionView{}, classify(nil, nil, err)
-	}
-	if err := classifySubscription(rsp.HTTPResponse, rsp.Body); err != nil {
 		return subscriptionView{}, err
 	}
-	view := subscriptionView{items: map[string]*time.Time{}}
-	if rsp.JSON200 == nil {
-		return view, nil
-	}
-	if rsp.JSON200.Alignment != nil {
-		view.period = rsp.JSON200.Alignment.CurrentAlignedBillingPeriod
-	}
-	for _, phase := range rsp.JSON200.Phases {
+	view := subscriptionView{items: map[string]*time.Time{}, period: periodOf(sub)}
+	for _, phase := range sub.Phases {
 		if phase.ActiveFrom.After(now) || (phase.ActiveTo != nil && !phase.ActiveTo.After(now)) {
 			continue
 		}
 		view.phaseKey = phase.Key
 		for _, item := range phase.Items {
-			view.items[item.Key] = item.ActiveTo
+			view.items[item.RateCard.Key] = item.ActiveTo
 		}
 	}
 	return view, nil

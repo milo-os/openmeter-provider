@@ -530,21 +530,36 @@ func planInAdvanceFeeMonths(plan omv3.BillingPlan) int {
 }
 
 // currentBillingPeriod returns the subscription's current billing period,
-// or nil when OpenMeter reports none. It's always read as of now: OpenMeter
-// (v1.0.0-beta.232) answers a query at another time with 501 "historical
-// queries are not supported".
+// or nil when OpenMeter reports none.
 func (c *client) currentBillingPeriod(ctx context.Context, subscriptionID string) (*om.Period, error) {
-	rsp, err := c.api.GetSubscriptionWithResponse(ctx, subscriptionID, nil)
+	sub, err := c.getSubscriptionV3(ctx, subscriptionID)
 	if err != nil {
-		return nil, classify(nil, nil, err)
-	}
-	if err := classifySubscription(rsp.HTTPResponse, rsp.Body); err != nil {
 		return nil, err
 	}
-	if rsp.JSON200 == nil || rsp.JSON200.Alignment == nil {
-		return nil, nil
+	return periodOf(sub), nil
+}
+
+// getSubscriptionV3 reads a subscription through the v3 API. The v1 read
+// refuses any subscription with an item that converts usage into its
+// pricing unit (400 unit_config_not_representable: "only available via the
+// v3 API"), which a contract billing a customer's own unit-converted usage
+// rates has, so every read of a subscription's period or items goes through
+// v3.
+func (c *client) getSubscriptionV3(ctx context.Context, subscriptionID string) (omv3.BillingSubscription, error) {
+	var sub omv3.BillingSubscription
+	if _, err := c.v3.do(ctx, http.MethodGet, "/subscriptions/"+url.PathEscape(subscriptionID), nil, nil, &sub); err != nil {
+		return omv3.BillingSubscription{}, reclassifySubscription(err)
 	}
-	return rsp.JSON200.Alignment.CurrentAlignedBillingPeriod, nil
+	return sub, nil
+}
+
+// periodOf is a v3 subscription's current billing period, or nil when it
+// has none.
+func periodOf(sub omv3.BillingSubscription) *om.Period {
+	if sub.CurrentPeriod == nil {
+		return nil
+	}
+	return &om.Period{From: sub.CurrentPeriod.From, To: sub.CurrentPeriod.To}
 }
 
 // CancelSubscriptions ends every live subscription of the customer now:
