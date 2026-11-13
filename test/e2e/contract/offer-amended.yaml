@@ -1,5 +1,8 @@
 # The contract after an amendment adds a Cross connect fee (2 port, monthly,
 # in advance). The entitlement moves to it at the end of the billing period.
+# It leaves out the setup fee, charged when the contract started: billing
+# refuses a one-time fee in a started contract's amendment, as the provider
+# would charge it again when the amendment's subscription starts.
 apiVersion: billing.miloapis.com/v1alpha1
 kind: Offer
 metadata:
@@ -9,12 +12,9 @@ metadata:
 spec:
   launchStage: Draft
   chargeTypes:
-    - OneTime
     - Recurring
     - Usage
   servicePricingRefs:
-    - name: ct-setup
-      namespace: openmeter-system
     - name: ct-rack
       namespace: openmeter-system
       quantity: 2
