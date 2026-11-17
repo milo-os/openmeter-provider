@@ -429,6 +429,64 @@ tests:
         eval_time: 30h
         exp_samples: []
 
+  - name: CNPG backup stale alert fires when the newest Barman Cloud plugin backup is over 26h old
+    interval: 1m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-1"}'
+        values: '1+0x1700'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
+        eval_time: 26h
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
+        eval_time: 27h
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
+  - name: CNPG backup stale alert stays quiet while a plugin-only cluster has a fresh backup
+    interval: 1m
+    input_series:
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-1"}'
+        values: '1+60x1900'
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-2"}'
+        values: '1+60x1900'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
+        eval_time: 30h
+        exp_samples: []
+
+  - name: CNPG backup stale alert stays quiet after a cluster moves to the plugin and the built-in metric freezes
+    interval: 1m
+    input_series:
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-1"}'
+        values: '1+0x1900'
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-1"}'
+        values: '1+60x1900'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
+        eval_time: 30h
+        exp_samples: []
+
+  - name: CNPG backup stale alert fires when both the built-in and the plugin backup are over 26h old
+    interval: 1m
+    input_series:
+      - series: 'cnpg_collector_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-1"}'
+        values: '1+0x1700'
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-1"}'
+        values: '0+0x1700'
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="openmeter-system",pod="openmeter-postgres-2"}'
+        values: '61+0x1700'
+    promql_expr_test:
+      - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
+        eval_time: 26h
+        exp_samples: []
+      - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
+        eval_time: 27h
+        exp_samples:
+          - labels: 'ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="warning"}'
+            value: 1
+
   # ---------------------------------------------------------------------------
   # Group 6: Usage API server (UsageQuery)
   # ---------------------------------------------------------------------------

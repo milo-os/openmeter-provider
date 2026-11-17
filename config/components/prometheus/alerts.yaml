@@ -370,7 +370,10 @@ spec:
           expr: |
             (
               time() - max by (namespace) (
-                cnpg_collector_last_available_backup_timestamp{namespace="openmeter-system"} > 0
+                {
+                  __name__=~"cnpg_collector_last_available_backup_timestamp|barman_cloud_cloudnative_pg_io_last_available_backup_timestamp",
+                  namespace="openmeter-system"
+                } > 0
               )
             ) > 26 * 3600
           for: 15m
@@ -383,4 +386,6 @@ spec:
             summary: "OpenMeter CNPG Postgres base backup is stale"
             description: |
               The newest completed base backup of Postgres in {{ $labels.namespace }} is
-              over 26 hours old. Check CNPG ScheduledBackup resources and backup jobs.
+              over 26 hours old, whether it backs up through CloudNativePG's built-in
+              barman or the Barman Cloud plugin. Check CNPG ScheduledBackup resources,
+              Backup objects and, for the plugin, the ObjectStore status.
