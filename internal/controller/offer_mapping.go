@@ -304,10 +304,7 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 			return err
 		}
 
-		name := sp.Spec.DisplayName
-		if name == "" {
-			name = sp.Name
-		}
+		name := lineName(sp)
 		if label != "" {
 			name = fmt.Sprintf("%s (%s)", name, label)
 		}
@@ -575,16 +572,29 @@ func feeQuantity(sp billingv1alpha1.ServicePricingSnapshot) int32 {
 	return 1
 }
 
-// feeName is a fee's rate card name, which OpenMeter uses for its invoice
-// lines: its display name, with its quantity in its pricingUnit when it has
-// one ("Cross connect: 4 port × $300.00"), or as a count when it's charged
-// more than once ("Dedicated server × 3"). The amount on the rate card is
-// the fee's total, so the name is where the unit price shows.
-func feeName(sp billingv1alpha1.ServicePricingSnapshot) string {
+// lineName is what a pricing's invoice lines are called: its display name,
+// or its name without one, after its SKU in brackets when it has one
+// ("[DC-CAB-01] Structured cabling"). OpenMeter names invoice lines after
+// rate cards and puts nothing else of ours on Stripe's lines, so the name is
+// the only place a SKU can show.
+func lineName(sp billingv1alpha1.ServicePricingSnapshot) string {
 	name := sp.Spec.DisplayName
 	if name == "" {
 		name = sp.Name
 	}
+	if sp.Spec.SKU != "" {
+		name = fmt.Sprintf("[%s] %s", sp.Spec.SKU, name)
+	}
+	return name
+}
+
+// feeName is a fee's rate card name, which OpenMeter uses for its invoice
+// lines: its lineName, with its quantity in its pricingUnit when it has
+// one ("Cross connect: 4 port × $300.00"), or as a count when it's charged
+// more than once ("Dedicated server × 3"). The amount on the rate card is
+// the fee's total, so the name is where the unit price shows.
+func feeName(sp billingv1alpha1.ServicePricingSnapshot) string {
+	name := lineName(sp)
 	quantity := feeQuantity(sp)
 	switch {
 	case sp.Spec.PricingUnit != "":
