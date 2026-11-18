@@ -245,6 +245,53 @@ func TestReconcile_GAConverges(t *testing.T) {
 
 // TestReconcile_SteadyStateIsQuiet: once synced, further reconciles neither
 // rewrite the status nor emit events.
+
+// A pricing with its own tax gets an OpenMeter tax code before the plan
+// that refers to it, and its rate card names the tax code's id.
+func TestReconcile_GATaxCodes(t *testing.T) {
+	offer := cpuOffer()
+	offer.Spec.ServicePricings[1].Spec.Tax = &billingv1alpha1.PricingTax{Code: "txcd_10103001"}
+	r, omc, _ := newOfferReconciler(t, cpuMeter(), withFinalizer(offer))
+
+	if res := reconcileOnce(t, r); res.RequeueAfter != 0 {
+		t.Errorf("unexpected requeue on success: %+v", res)
+	}
+	want := []string{
+		"GetMeter " + cpuSlug,
+		"EnsureFeature", "EnsureFeature", "EnsureFeature",
+		"EnsureTaxCode txcd_10103001",
+		"EnsurePlan test_uid",
+	}
+	if got := omc.callNames(); !slices.Equal(got, want) {
+		t.Fatalf("calls = %v, want %v", got, want)
+	}
+	for _, rc := range omc.ensurePlanCalls[0].Phases[0].RateCards {
+		taxed := rc.TaxConfig != nil && rc.TaxConfig.Code != nil && rc.TaxConfig.Code.Id == "id-txcd_10103001"
+		if wantTaxed := rc.Key == flatFeeKey(offer.Spec.ServicePricings[1]); taxed != wantTaxed {
+			t.Errorf("rate card %s tax = %+v, want taxed %v", rc.Key, rc.TaxConfig, wantTaxed)
+		}
+	}
+}
+
+// A tax code OpenMeter won't create stops the plan, which would otherwise
+// be published without it.
+func TestReconcile_GATaxCodeFailure(t *testing.T) {
+	offer := cpuOffer()
+	offer.Spec.ServicePricings[1].Spec.Tax = &billingv1alpha1.PricingTax{Code: "txcd_10103001"}
+	r, omc, _ := newOfferReconciler(t, cpuMeter(), withFinalizer(offer))
+	omc.ensureTaxCodeFn = func(context.Context, string) (string, error) {
+		return "", &openmeter.TransientError{Err: errors.New("unavailable")}
+	}
+
+	_ = reconcileFails(t, r)
+	if len(omc.ensurePlanCalls) != 0 {
+		t.Errorf("plan ensured without its tax code: %+v", omc.ensurePlanCalls)
+	}
+	if cond := syncedCondition(t, r); cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Errorf("condition = %+v, want False", cond)
+	}
+}
+
 func TestReconcile_SteadyStateIsQuiet(t *testing.T) {
 	r, _, rec := newOfferReconciler(t, cpuMeter(), withFinalizer(cpuOffer()))
 	reconcileOnce(t, r)
@@ -657,6 +704,8 @@ type fakeOpenMeterClient struct {
 	ensurePlanCalls []openmeter.DesiredPlan
 	ensurePlanFn    func(context.Context, openmeter.DesiredPlan) (omv3.BillingPlan, error)
 
+	ensureTaxCodeFn func(context.Context, string) (string, error)
+
 	listPlanVersionsFn func(context.Context, string) ([]omv3.BillingPlan, error)
 
 	deletePlanCalls []string
@@ -687,6 +736,14 @@ func (f *fakeOpenMeterClient) GetMeter(ctx context.Context, slug string) (om.Met
 		return f.getMeterFn(ctx, slug)
 	}
 	return om.Meter{Slug: slug}, nil
+}
+
+func (f *fakeOpenMeterClient) EnsureTaxCode(ctx context.Context, code string) (string, error) {
+	f.calls = append(f.calls, "EnsureTaxCode "+code)
+	if f.ensureTaxCodeFn != nil {
+		return f.ensureTaxCodeFn(ctx, code)
+	}
+	return "id-" + code, nil
 }
 
 func (f *fakeOpenMeterClient) EnsureFeature(ctx context.Context, d openmeter.DesiredFeature) (om.Feature, error) {

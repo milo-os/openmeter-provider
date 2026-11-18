@@ -80,6 +80,47 @@ type offerMapping struct {
 	MeterSlugs []string
 	// CardFeatures maps each usage rate card key to its feature key.
 	CardFeatures map[string]string
+	// TaxCodes are the distinct Stripe tax codes the rate cards are taxed
+	// by, in rate card order. Each needs an OpenMeter tax code: see
+	// setTaxCodeIDs.
+	TaxCodes []string
+	// CardTaxCodes maps each rate card key with its own tax to its Stripe
+	// tax code.
+	CardTaxCodes map[string]string
+}
+
+// setTaxCodeIDs points each taxed rate card at its OpenMeter tax code, given
+// the ids of the tax codes by Stripe tax code.
+func (m offerMapping) setTaxCodeIDs(idsByCode map[string]string) error {
+	for _, phase := range m.Plan.Phases {
+		for i := range phase.RateCards {
+			card := &phase.RateCards[i]
+			code, ok := m.CardTaxCodes[card.Key]
+			if !ok {
+				continue
+			}
+			id, ok := idsByCode[code]
+			if !ok {
+				return fmt.Errorf("rate card %q: tax code %q was not created", card.Key, code)
+			}
+			card.TaxConfig = &omv3.TaxCodeConfig{Code: &omv3.TaxCodeReference{Id: id}}
+		}
+	}
+	return nil
+}
+
+// stripeTaxCode is the Stripe tax code a pricing's charges are taxed by:
+// its own code, Stripe's nontaxable code when it isn't taxable, or "" for
+// the billing profile's default.
+func stripeTaxCode(sp billingv1alpha1.ServicePricingSnapshot) string {
+	tax := sp.Spec.Tax
+	switch {
+	case !tax.IsTaxable():
+		return openmeter.StripeNontaxableTaxCode
+	case tax != nil:
+		return tax.Code
+	}
+	return ""
 }
 
 // setFeatureIDs points each usage rate card at its feature, given the ids of
@@ -124,6 +165,7 @@ func buildOfferMapping(offer *billingv1alpha1.Offer, meters map[string]meterInfo
 		featureByKey:  map[string]int{},
 		pricedMetrics: map[string]string{},
 		cardFeatures:  map[string]string{},
+		cardTaxCodes:  map[string]string{},
 	}
 	for _, sp := range offer.Spec.ServicePricings {
 		var err error
@@ -160,6 +202,8 @@ func buildOfferMapping(offer *billingv1alpha1.Offer, meters map[string]meterInfo
 		Features:     b.features,
 		MeterSlugs:   b.meterSlugs,
 		CardFeatures: b.cardFeatures,
+		TaxCodes:     b.taxCodes,
+		CardTaxCodes: b.cardTaxCodes,
 	}, nil
 }
 
@@ -171,6 +215,10 @@ type mappingBuilder struct {
 	rateCards []omv3.BillingRateCard
 	// cardFeatures maps each usage rate card key to its feature key.
 	cardFeatures map[string]string
+	// cardTaxCodes maps each rate card key with its own tax to its Stripe
+	// tax code, and taxCodes lists the distinct codes in order.
+	cardTaxCodes map[string]string
+	taxCodes     []string
 	// rateCardKeys maps each used rate card key to the pricing that
 	// produced it. OpenMeter rejects duplicate keys within a phase.
 	rateCardKeys map[string]string
@@ -314,6 +362,7 @@ func (b *mappingBuilder) addUsage(sp billingv1alpha1.ServicePricingSnapshot) err
 			return err
 		}
 		b.cardFeatures[feature.Key] = feature.Key
+		b.taxRateCard(feature.Key, sp)
 		b.rateCards = append(b.rateCards, omv3.BillingRateCard{
 			Key:            feature.Key,
 			Name:           name,
@@ -479,8 +528,22 @@ func (b *mappingBuilder) addFlatFee(sp billingv1alpha1.ServicePricingSnapshot) e
 	if err := b.claimRateCardKey(key, sp.Name); err != nil {
 		return err
 	}
+	b.taxRateCard(key, sp)
 	b.rateCards = append(b.rateCards, card)
 	return nil
+}
+
+// taxRateCard records the Stripe tax code of the rate card key, from sp's
+// tax. A pricing without tax is left to the billing profile's default.
+func (b *mappingBuilder) taxRateCard(key string, sp billingv1alpha1.ServicePricingSnapshot) {
+	code := stripeTaxCode(sp)
+	if code == "" {
+		return
+	}
+	b.cardTaxCodes[key] = code
+	if !slices.Contains(b.taxCodes, code) {
+		b.taxCodes = append(b.taxCodes, code)
+	}
 }
 
 // flatFeeKey is a fee's rate card key, which is also its subscription

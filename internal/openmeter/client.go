@@ -191,6 +191,12 @@ type Client interface {
 	// deleting a meter with active features).
 	ArchiveUnreferencedMeterFeatures(ctx context.Context, meterSlug string) error
 
+	// Tax codes (see taxcode.go).
+
+	// EnsureTaxCode returns the id of the OpenMeter tax code that maps to
+	// stripeCode in the Stripe app, creating it if there's none.
+	EnsureTaxCode(ctx context.Context, stripeCode string) (string, error)
+
 	// Plans (see plan.go). They go through OpenMeter's v3 API, the only one
 	// that can carry unit conversions.
 
