@@ -739,12 +739,6 @@ func (r *BillingEntitlementReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Complete(r)
 }
 
-// subscriptionBillingAnchor is the date the account's subscriptions bill
-// from, unless a contract sets it: its invoice day of the month, the 1st
-// under the standard terms, in January 2025. OpenMeter moves an anchor
-// back to the nearest cycle boundary before a subscription starts, so only
-// the day counts, and every plan bills monthly (usageBillingPeriod). The billing profile's anchored alignment
-// says the same, but OpenMeter ignores it (see DesiredBillingProfile).
 // contractBillsOnInvoiceDay reports whether a contract bills on the
 // account's invoice day, with a prorated first period, rather than on the
 // day it starts.
@@ -752,6 +746,12 @@ func contractBillsOnInvoiceDay(contract *billingv1alpha1.BillingContract) bool {
 	return contract != nil && contract.BillingDay == billingv1alpha1.ContractBillingDayInvoiceDay
 }
 
+// subscriptionBillingAnchor is the date the account's subscriptions bill
+// from, unless a contract sets it: its invoice day of the month, the 1st
+// under the standard terms, in January 2025. OpenMeter moves an anchor
+// back to the nearest cycle boundary before a subscription starts, so only
+// the day counts, and every plan bills monthly (usageBillingPeriod). The billing profile's anchored alignment
+// says the same, but OpenMeter ignores it (see DesiredBillingProfile).
 func subscriptionBillingAnchor(account *billingv1alpha1.BillingAccount) time.Time {
 	day := billingv1alpha1.StandardPaymentTermsInvoiceDayOfMonth
 	if terms := account.Spec.PaymentTerms; terms != nil && terms.InvoiceDayOfMonth > 0 {
