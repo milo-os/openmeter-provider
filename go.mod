@@ -13,7 +13,7 @@ require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/spf13/cobra v1.10.2
-	go.miloapis.com/billing v0.10.1-0.20261118201237-76c0f460e12e
+	go.miloapis.com/billing v0.10.1-0.20261118204103-c7aef85ba0cb
 	go.miloapis.com/instrumentation v0.6.0
 	go.miloapis.com/stripe-provider v0.0.0-00010101000000-000000000000
 	go.uber.org/zap v1.28.0
