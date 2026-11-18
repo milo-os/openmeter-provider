@@ -580,6 +580,41 @@ func TestBuildOfferMapping_FeeQuantities(t *testing.T) {
 	}
 }
 
+// TestBuildOfferMapping_SKUs: a pricing's SKU starts its rate card's name,
+// which OpenMeter names invoice lines after, for usage and fees alike. A
+// pricing without one keeps its name.
+func TestBuildOfferMapping_SKUs(t *testing.T) {
+	usage := usagePricing("cpu", matchRate("region", "us-east", "0.10"))
+	usage.Spec.SKU = "CMP-CPU"
+	offer := baseOffer()
+	offer.Spec.ServicePricings = append(offer.Spec.ServicePricings, usage,
+		billingv1alpha1.ServicePricingSnapshot{Name: "ports", Quantity: 4, Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeRecurring, DisplayName: "Cross connect", SKU: "DC-XC-01",
+			Amount: "300.00", PricingUnit: "port", Interval: billingv1alpha1.ChargeIntervalMonthly}},
+		billingv1alpha1.ServicePricingSnapshot{Name: "cabling", Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeOneTime, SKU: "DC-CAB-01", Amount: "1500.00",
+			Trigger: billingv1alpha1.ChargeTriggerBillingAccountActivation}},
+		billingv1alpha1.ServicePricingSnapshot{Name: "setup", Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeOneTime, DisplayName: "Setup fee", Amount: "500.00",
+			Trigger: billingv1alpha1.ChargeTriggerBillingAccountActivation}},
+	)
+	m := mustMapping(t, offer)
+	phase := m.Plan.Phases[0]
+
+	if rc := mustUsageRateCard(t, phase, 0); rc.Name != "[CMP-CPU] Compute Usage (region=us-east)" {
+		t.Errorf("usage rate card name = %q", rc.Name)
+	}
+	for i, want := range []string{
+		"[DC-XC-01] Cross connect: 4 port × $300.00",
+		"[DC-CAB-01] cabling",
+		"Setup fee",
+	} {
+		if rc, _ := mustFlatRateCard(t, phase, i+1); rc.Name != want {
+			t.Errorf("rate card %d name = %q, want %q", i+1, rc.Name, want)
+		}
+	}
+}
+
 // Each Recurring fee is charged on its pricing's own interval and billed as
 // its snapshot's billingTiming says: in advance without one, as every fee
 // was before billing had the field. One-time fees are always in advance.
