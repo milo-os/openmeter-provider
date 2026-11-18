@@ -148,7 +148,11 @@ func (r *InvoiceRequestReconciler) previewFirstInvoice(
 	}
 	starts := startsAt.Format(time.DateOnly)
 
-	lines, total, err := firstInvoiceLines(&offer, startsAt)
+	invoiceDay := 0
+	if contractBillsOnInvoiceDay(be.Spec.Contract) {
+		invoiceDay = subscriptionBillingAnchor(account).Day()
+	}
+	lines, total, err := firstInvoiceLines(&offer, startsAt, invoiceDay)
 	if err != nil {
 		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
 	}
@@ -224,20 +228,31 @@ func (r *InvoiceRequestReconciler) entitlementFor(ctx context.Context, account *
 
 // firstInvoiceLines are the charges a contract starting at startsAt is
 // first invoiced for, with their total: each OneTime pricing, and the
-// first month of each Recurring one, each times its quantity and after
-// the Offer's discounts. Names match the Offer's plan (see addFlatFee).
-// Usage isn't included.
-func firstInvoiceLines(offer *billingv1alpha1.Offer, startsAt time.Time) ([]billingv1alpha1.InvoiceRequestLine, string, error) {
+// first period of each Recurring one, each times its quantity and after
+// the Offer's discounts. A contract billed on the invoice day (invoiceDay
+// above 0) has a first period that ends on each fee's first billing date,
+// prorated as OpenMeter prorates it. Names match the Offer's plan (see
+// addFlatFee). Usage isn't included.
+func firstInvoiceLines(offer *billingv1alpha1.Offer, startsAt time.Time, invoiceDay int) ([]billingv1alpha1.InvoiceRequestLine, string, error) {
 	var lines []billingv1alpha1.InvoiceRequestLine
 	var amounts []string
 	for _, sp := range offer.Spec.ServicePricings {
 		var period *billingv1alpha1.InvoicePeriod
+		var part, whole time.Duration
 		switch sp.Spec.ChargeType {
 		case billingv1alpha1.ChargeTypeOneTime:
 		case billingv1alpha1.ChargeTypeRecurring:
+			months := intervalMonths(sp.Spec.Interval)
+			end := startsAt.AddDate(0, months, 0)
+			if invoiceDay > 0 {
+				if next := nextBillingDate(startsAt, invoiceDay, sp.Spec.Interval); next.After(startsAt) {
+					end = next
+				}
+			}
+			part, whole = end.Sub(startsAt), end.Sub(end.AddDate(0, -months, 0))
 			period = &billingv1alpha1.InvoicePeriod{
 				Start: metav1.NewTime(startsAt),
-				End:   metav1.NewTime(startsAt.AddDate(0, 1, 0).Add(-time.Second)),
+				End:   metav1.NewTime(end.Add(-time.Second)),
 			}
 		default:
 			continue
@@ -249,6 +264,11 @@ func firstInvoiceLines(offer *billingv1alpha1.Offer, startsAt time.Time) ([]bill
 		charged, err := openmeter.MultiplyAmount(sp.Spec.Amount, feeQuantity(sp))
 		if err != nil {
 			return nil, "", fmt.Errorf("service pricing %q: %w", sp.Name, err)
+		}
+		if part < whole {
+			if charged, err = openmeter.ProrateAmount(charged, part, whole); err != nil {
+				return nil, "", fmt.Errorf("service pricing %q: %w", sp.Name, err)
+			}
 		}
 		amount, err := openmeter.DiscountedAmount(charged, percentage)
 		if err != nil {

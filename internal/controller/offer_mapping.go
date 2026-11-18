@@ -512,11 +512,43 @@ func feeEndsAt(startsAt time.Time, interval billingv1alpha1.ChargeInterval, peri
 		start.Hour(), start.Minute(), start.Second(), start.Nanosecond(), time.UTC)
 }
 
+// intervalMonths is how many months a Recurring fee's period is.
+func intervalMonths(interval billingv1alpha1.ChargeInterval) int {
+	switch interval {
+	case billingv1alpha1.ChargeIntervalQuarterly:
+		return 3
+	case billingv1alpha1.ChargeIntervalAnnual:
+		return 12
+	default:
+		return 1
+	}
+}
+
+// nextBillingDate is the first date on or after t that a fee charged every
+// interval bills on, for a subscription anchored on invoiceDay (1 to 28):
+// that day of every month, of January, April, July and October, or of
+// January, as OpenMeter counts periods from the January 2025 anchor
+// (subscriptionBillingAnchor). Billing's validation.NextBillingDate is the
+// same.
+func nextBillingDate(t time.Time, invoiceDay int, interval billingv1alpha1.ChargeInterval) time.Time {
+	t = t.UTC()
+	date := time.Date(t.Year(), time.January, invoiceDay, 0, 0, 0, 0, time.UTC)
+	for date.After(t) {
+		date = date.AddDate(-1, 0, 0)
+	}
+	for date.Before(t) {
+		date = date.AddDate(0, intervalMonths(interval), 0)
+	}
+	return date
+}
+
 // feeEnds are the Offer's Recurring fees that run for a set number of
 // periods, with when each ends, counted from startsAt: the contract's start,
-// or the subscription's for an account without a contract. Keyed by item
+// or the subscription's for an account without a contract. A contract
+// billed on the invoice day (invoiceDay above 0) counts them from each fee's
+// first billing date instead, after the prorated first period. Keyed by item
 // key, with each fee's name for events.
-func feeEnds(offer *billingv1alpha1.Offer, startsAt time.Time) ([]openmeter.FeeEnd, map[string]string) {
+func feeEnds(offer *billingv1alpha1.Offer, startsAt time.Time, invoiceDay int) ([]openmeter.FeeEnd, map[string]string) {
 	var ends []openmeter.FeeEnd
 	names := map[string]string{}
 	for _, sp := range offer.Spec.ServicePricings {
@@ -524,7 +556,11 @@ func feeEnds(offer *billingv1alpha1.Offer, startsAt time.Time) ([]openmeter.FeeE
 			continue
 		}
 		key := flatFeeKey(sp)
-		ends = append(ends, openmeter.FeeEnd{ItemKey: key, EndsAt: feeEndsAt(startsAt, sp.Spec.Interval, sp.Periods)})
+		from := startsAt
+		if invoiceDay > 0 {
+			from = nextBillingDate(startsAt, invoiceDay, sp.Spec.Interval)
+		}
+		ends = append(ends, openmeter.FeeEnd{ItemKey: key, EndsAt: feeEndsAt(from, sp.Spec.Interval, sp.Periods)})
 		names[key] = feeDisplayName(sp)
 	}
 	return ends, names

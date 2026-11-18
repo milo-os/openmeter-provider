@@ -191,6 +191,31 @@ func TestInvoiceRequest_PreviewBeforeTheContractStarts(t *testing.T) {
 	}
 }
 
+// A contract billed on the invoice day previews its first period up to the
+// next invoice day, prorated before the discount.
+func TestInvoiceRequest_PreviewProratesAContractBilledOnTheInvoiceDay(t *testing.T) {
+	be := contractEntitlementFor(contractStart)
+	be.Spec.Contract.BillingDay = billingv1alpha1.ContractBillingDayInvoiceDay
+	omc := &fakeInvoicingClient{}
+	r := newInvoiceRequestReconciler(t, omc, usdAccount(), contractOffer(), be,
+		invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+	ir, err := reconcileInvoiceRequest(r)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// 18 November to 1 December is 13 of November's 30 days: 1000.00 ×
+	// 13/30 = 433.33, less 10%.
+	st := ir.Status
+	if st.Total != "1890.00" || len(st.Lines) != 2 {
+		t.Fatalf("status = %+v, want two lines totalling 1890.00", st)
+	}
+	if l := st.Lines[1]; l.Amount != "390.00" || l.Period == nil || !l.Period.Start.Time.Equal(contractStart) ||
+		!l.Period.End.Time.Equal(time.Date(2026, time.November, 30, 23, 59, 59, 0, time.UTC)) {
+		t.Errorf("monthly line = %+v, want 390.00 for 18 to 30 November", l)
+	}
+}
+
 // TestInvoiceRequest_PreviewChargesFeeQuantities: a fee charged more than
 // once is previewed as its amount times its quantity, before its discount,
 // named as the plan names it.

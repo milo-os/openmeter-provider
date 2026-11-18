@@ -92,9 +92,10 @@ const (
 
 // EventReasonContractStartedLate: an account was moved onto its contract
 // after the contract's start, so OpenMeter prorates the first billing
-// period's fees billed in advance.
+// period's fees billed in advance. A contract billed on the invoice day
+// prorates its first period anyway, so it's only late beyond
+// openmeter.ContractStartTolerance.
 const EventReasonContractStartedLate = "ContractStartedLate"
-
 
 // SubscriptionChangedAnnotation records on a BillingEntitlement when this
 // provider last created or changed its OpenMeter subscription (RFC 3339).
@@ -251,7 +252,11 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 			return r.syncWaiting(ctx, &be, conditionReasonContractNotStarted,
 				fmt.Errorf("the contract starts at %s, when the account is subscribed to its Offer", startsAt.Format(time.RFC3339)), wait)
 		}
-		anchor = startsAt
+		// A contract bills on its own day, unless it bills on the account's
+		// invoice day, with a prorated first period.
+		if !contractBillsOnInvoiceDay(contract) {
+			anchor = startsAt
+		}
 		// Moving onto the contract changes plan at once and bills on the
 		// contract's day; once moved, a change amends the contract and waits
 		// for the end of the billing period.
@@ -289,11 +294,19 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		if err := r.recordContractState(ctx, &be, state.ChangeAt); err != nil {
 			return ctrl.Result{}, err
 		}
-		if startsAt := be.Spec.Contract.StartsAt.UTC(); !contractStarted && state.Changed && state.Current.ActiveFrom.After(startsAt) {
+		startsAt := be.Spec.Contract.StartsAt.UTC()
+		late := state.Current.ActiveFrom.Sub(startsAt)
+		onInvoiceDay := contractBillsOnInvoiceDay(be.Spec.Contract)
+		switch {
+		case contractStarted || !state.Changed || late <= 0:
+		case onInvoiceDay && late > openmeter.ContractStartTolerance:
+			r.event(&be, "Warning", EventReasonContractStartedLate, fmt.Sprintf(
+				"the account moved onto the contract at %s, %s after it started at %s, so its first invoice charges the fees billed in advance from then",
+				state.Current.ActiveFrom.UTC().Format(time.RFC3339), late.Round(time.Second), startsAt.Format(time.RFC3339)))
+		case !onInvoiceDay:
 			r.event(&be, "Warning", EventReasonContractStartedLate, fmt.Sprintf(
 				"the account moved onto the contract at %s, %s after it started at %s, so its first invoice prorates the fees billed in advance",
-				state.Current.ActiveFrom.UTC().Format(time.RFC3339), state.Current.ActiveFrom.Sub(startsAt).Round(time.Second),
-				startsAt.Format(time.RFC3339)))
+				state.Current.ActiveFrom.UTC().Format(time.RFC3339), late.Round(time.Second), startsAt.Format(time.RFC3339)))
 		}
 	}
 	if state.Changed {
@@ -323,15 +336,18 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 	// period ends, by the terms of the Offer the subscription is on: while
 	// an amendment waits, which can be until the contract's anniversary,
 	// that's still the previous Offer, and its fees keep ending on time.
-	startsAt := state.Current.ActiveFrom
+	startsAt, invoiceDay := state.Current.ActiveFrom, 0
 	if be.Spec.Contract != nil {
 		startsAt = be.Spec.Contract.StartsAt.Time
+		if contractBillsOnInvoiceDay(be.Spec.Contract) {
+			invoiceDay = anchor.Day()
+		}
 	}
 	subscribed, err := r.subscribedOffer(ctx, &offer, state.Current)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if ends, names := feeEnds(subscribed, startsAt); len(ends) > 0 {
+	if ends, names := feeEnds(subscribed, startsAt, invoiceDay); len(ends) > 0 {
 		ended, err := r.OpenMeterClient.EndFees(ctx, state.Current.Id, ends, now)
 		if err != nil {
 			return r.openMeterFailed(ctx, &be, fmt.Errorf("end fees after their periods: %w", err))
@@ -729,6 +745,13 @@ func (r *BillingEntitlementReconciler) SetupWithManager(mgr ctrl.Manager) error 
 // back to the nearest cycle boundary before a subscription starts, so only
 // the day counts, and every plan bills monthly (usageBillingPeriod). The billing profile's anchored alignment
 // says the same, but OpenMeter ignores it (see DesiredBillingProfile).
+// contractBillsOnInvoiceDay reports whether a contract bills on the
+// account's invoice day, with a prorated first period, rather than on the
+// day it starts.
+func contractBillsOnInvoiceDay(contract *billingv1alpha1.BillingContract) bool {
+	return contract != nil && contract.BillingDay == billingv1alpha1.ContractBillingDayInvoiceDay
+}
+
 func subscriptionBillingAnchor(account *billingv1alpha1.BillingAccount) time.Time {
 	day := billingv1alpha1.StandardPaymentTermsInvoiceDayOfMonth
 	if terms := account.Spec.PaymentTerms; terms != nil && terms.InvoiceDayOfMonth > 0 {

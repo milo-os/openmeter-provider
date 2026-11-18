@@ -42,6 +42,11 @@ const maxSubscriptionSteps = 4
 // any earlier); this leaves room for the two clocks to differ.
 const periodChangeTolerance = 90 * time.Second
 
+// ContractStartTolerance is how long after a contract's start a
+// subscription may start on it and still count as on time: the same
+// window a contract start is timed within (see contractStartTime).
+const ContractStartTolerance = periodChangeTolerance
+
 // DesiredSubscription is the subscription a reconciler wants a customer to
 // have: exactly one live subscription on the active version of PlanKey.
 type DesiredSubscription struct {

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"testing"
+	"time"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
 )
@@ -187,5 +188,28 @@ func TestDecimals(t *testing.T) {
 	}
 	if _, err := AmountBeforeTax(om.InvoiceTotals{Total: "lots"}); err == nil {
 		t.Error("an invalid total: want an error")
+	}
+}
+
+func TestProrateAmount(t *testing.T) {
+	day := 24 * time.Hour
+	for _, tc := range []struct {
+		amount      string
+		part, whole time.Duration
+		want        string
+	}{
+		{"300.00", 16 * day, 30 * day, "160.00"},
+		{"1000.00", 13 * day, 30 * day, "433.33"},
+		{"1000.00", 2 * day, 3 * day, "666.67"},
+		{"300.00", 30 * day, 30 * day, "300.00"},
+		{"300.00", 31 * day, 30 * day, "300.00"},
+	} {
+		got, err := ProrateAmount(tc.amount, tc.part, tc.whole)
+		if err != nil || got != tc.want {
+			t.Errorf("ProrateAmount(%s, %s, %s) = %q, %v; want %q", tc.amount, tc.part, tc.whole, got, err, tc.want)
+		}
+	}
+	if _, err := ProrateAmount("1.00", day, 0); err == nil {
+		t.Error("a zero whole period: no error")
 	}
 }
