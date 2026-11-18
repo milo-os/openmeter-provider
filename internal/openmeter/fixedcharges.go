@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
 )
@@ -134,7 +135,29 @@ func DiscountedAmount(amount string, percentage int32) (string, error) {
 		return "", fmt.Errorf("discount percentage %d must be between 0 and 100", percentage)
 	}
 	r.Mul(r, big.NewRat(int64(100-percentage), 100))
-	// Round to cents, half away from zero.
+	return roundCents(r), nil
+}
+
+// ProrateAmount returns the part of amount a period of part charges, when
+// the whole period of whole charges all of it, rounded to cents as
+// DiscountedAmount rounds. A part as long as the whole, or longer, charges
+// all of it.
+func ProrateAmount(amount string, part, whole time.Duration) (string, error) {
+	r, _, err := parseDecimal(amount)
+	if err != nil {
+		return "", err
+	}
+	if whole <= 0 {
+		return "", fmt.Errorf("period of %s must be positive", whole)
+	}
+	if part < whole {
+		r.Mul(r, big.NewRat(int64(max(part, 0)), int64(whole)))
+	}
+	return roundCents(r), nil
+}
+
+// roundCents rounds r to cents, half away from zero.
+func roundCents(r *big.Rat) string {
 	cents := new(big.Rat).Mul(r, big.NewRat(100, 1))
 	n, d := cents.Num(), cents.Denom()
 	q, m := new(big.Int).QuoRem(n, d, new(big.Int))
@@ -145,7 +168,7 @@ func DiscountedAmount(amount string, percentage int32) (string, error) {
 			q.Add(q, big.NewInt(1))
 		}
 	}
-	return new(big.Rat).SetFrac(q, big.NewInt(100)).FloatString(2), nil
+	return new(big.Rat).SetFrac(q, big.NewInt(100)).FloatString(2)
 }
 
 // MultiplyAmount returns a fee's amount times its quantity, with as many

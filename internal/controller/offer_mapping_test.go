@@ -999,6 +999,52 @@ func TestBuildOfferMapping_FeeWithPeriods(t *testing.T) {
 	}
 }
 
+func TestNextBillingDate(t *testing.T) {
+	day := func(y int, m time.Month, d int) time.Time { return time.Date(y, m, d, 0, 0, 0, 0, time.UTC) }
+	for _, tc := range []struct {
+		name       string
+		t          time.Time
+		invoiceDay int
+		interval   billingv1alpha1.ChargeInterval
+		want       time.Time
+	}{
+		{"monthly, mid-month", day(2026, time.November, 15), 1, billingv1alpha1.ChargeIntervalMonthly, day(2026, time.December, 1)},
+		{"monthly, on the day", day(2026, time.November, 1), 1, billingv1alpha1.ChargeIntervalMonthly, day(2026, time.November, 1)},
+		{"monthly, before a later day", day(2026, time.November, 3), 10, "", day(2026, time.November, 10)},
+		{"quarterly", day(2026, time.November, 15), 1, billingv1alpha1.ChargeIntervalQuarterly, day(2027, time.January, 1)},
+		{"annual", day(2026, time.February, 15), 5, billingv1alpha1.ChargeIntervalAnnual, day(2027, time.January, 5)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nextBillingDate(tc.t, tc.invoiceDay, tc.interval); !got.Equal(tc.want) {
+				t.Errorf("nextBillingDate() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A contract billed on the invoice day counts a fee's periods from its first
+// billing date, after the prorated first period.
+func TestFeeEnds_InvoiceDay(t *testing.T) {
+	offer := baseOffer()
+	offer.Spec.ServicePricings = []billingv1alpha1.ServicePricingSnapshot{
+		{Name: "ports", Periods: 12, Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeRecurring, Amount: "300.00", Interval: billingv1alpha1.ChargeIntervalMonthly}},
+	}
+	startsAt := time.Date(2026, time.November, 15, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		invoiceDay int
+		want       time.Time
+	}{
+		{0, time.Date(2027, time.November, 15, 0, 0, 0, 0, time.UTC)},
+		{1, time.Date(2027, time.December, 1, 0, 0, 0, 0, time.UTC)},
+	} {
+		ends, _ := feeEnds(offer, startsAt, tc.invoiceDay)
+		if len(ends) != 1 || !ends[0].EndsAt.Equal(tc.want) {
+			t.Errorf("invoice day %d: ends = %v, want %s", tc.invoiceDay, ends, tc.want)
+		}
+	}
+}
+
 func TestFeeEndsAt(t *testing.T) {
 	start := time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {

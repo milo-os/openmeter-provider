@@ -910,6 +910,51 @@ func TestBillingEntitlement_ContractStartedLate(t *testing.T) {
 	}
 }
 
+// A contract billed on the invoice day keeps the account's anchor, so its
+// first period is prorated by design: starting seconds after the contract's
+// start isn't late, and only a start beyond the tolerance warns.
+func TestBillingEntitlement_ContractBilledOnTheInvoiceDay(t *testing.T) {
+	startsAt := time.Date(2026, time.March, 18, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		started time.Time
+		warn    bool
+	}{
+		{name: "on time", started: startsAt.Add(20 * time.Second)},
+		{name: "late", started: startsAt.Add(3 * time.Hour), warn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := testEntitlement(testBEName, "test-offer")
+			be.Spec.Contract = &billingv1alpha1.BillingContract{StartsAt: metav1.NewTime(startsAt),
+				BillingDay: billingv1alpha1.ContractBillingDayInvoiceDay}
+			account := testAccount()
+			account.Spec.PaymentTerms = &billingv1alpha1.PaymentTerms{InvoiceDayOfMonth: 5}
+			r, omc, rec := newEntitlementReconciler(t, be, account, cpuOffer())
+			r.Now = func() time.Time { return tc.started.Add(time.Second) }
+			var desired openmeter.DesiredSubscription
+			omc.ensureFn = func(d openmeter.DesiredSubscription) (openmeter.SubscriptionState, error) {
+				desired = d
+				return openmeter.SubscriptionState{
+					Current: om.Subscription{Id: "sub-1", Status: om.SubscriptionStatusActive, ActiveFrom: tc.started,
+						Plan: &om.PlanReference{Key: d.PlanKey, Version: 1}},
+					PlanVersion: 1,
+					Changed:     true,
+				}, nil
+			}
+			reconcileEntitlement(t, r, testBEName)
+			if desired.BillingAnchor == nil || desired.BillingAnchor.Day() != 5 {
+				t.Errorf("billing anchor = %v, want the account's invoice day, the 5th", desired.BillingAnchor)
+			}
+			if desired.StartsAt == nil || !desired.StartsAt.Equal(startsAt) {
+				t.Errorf("starts at = %v, want the contract's start", desired.StartsAt)
+			}
+			if got := hasEventPrefix(rec, "Warning "+EventReasonContractStartedLate+" the account moved onto the contract at 2026-03-18T03:00:00Z, 3h0m0s after"); got != tc.warn {
+				t.Errorf("ContractStartedLate warning = %v, want %v", got, tc.warn)
+			}
+		})
+	}
+}
+
 // hasEventPrefix reports whether the recorder holds an event starting with want.
 func hasEventPrefix(rec *record.FakeRecorder, want string) bool {
 	for {
