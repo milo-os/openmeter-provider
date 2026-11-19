@@ -672,19 +672,14 @@ func feeQuantity(sp billingv1alpha1.ServicePricingSnapshot) int32 {
 }
 
 // lineName is what a pricing's invoice lines are called: its display name,
-// or its name without one, after its SKU in brackets when it has one
-// ("[DC-CAB-01] Structured cabling"). OpenMeter names invoice lines after
-// rate cards and puts nothing else of ours on Stripe's lines, so the name is
-// the only place a SKU can show.
+// or its name without one. OpenMeter names invoice lines after rate cards,
+// and the name is printed on the customer's invoice, so it never carries the
+// pricing's SKU: that's internal, for tracking and reporting.
 func lineName(sp billingv1alpha1.ServicePricingSnapshot) string {
-	name := sp.Spec.DisplayName
-	if name == "" {
-		name = sp.Name
+	if sp.Spec.DisplayName != "" {
+		return sp.Spec.DisplayName
 	}
-	if sp.Spec.SKU != "" {
-		name = fmt.Sprintf("[%s] %s", sp.Spec.SKU, name)
-	}
-	return name
+	return sp.Name
 }
 
 // feeName is a fee's rate card name, which OpenMeter uses for its invoice
