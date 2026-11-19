@@ -39,6 +39,7 @@ spec:
             severity: critical
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "UsageQuery requests are failing"
             description: |
@@ -66,6 +67,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "UsageQuery p99 latency is above 10s"
             description: |
@@ -99,6 +101,7 @@ spec:
             severity: critical
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Milo cannot route UsageQuery requests to the usage API server"
             description: |
@@ -120,6 +123,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Prometheus cannot scrape the usage API server"
             description: |
@@ -136,6 +140,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "No scrape target for the usage API server"
             description: |
