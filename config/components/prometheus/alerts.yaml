@@ -24,6 +24,7 @@ spec:
             severity: critical
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Pod {{ $labels.pod }} is crash-looping"
             description: |
@@ -56,6 +57,7 @@ spec:
             severity: critical
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Deployment {{ $labels.deployment }} has unavailable replicas"
             description: |
@@ -74,6 +76,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Prometheus cannot scrape {{ $labels.job }}"
             description: |
@@ -93,6 +96,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "No scrape target for {{ $labels.job }}"
             description: |
@@ -113,6 +117,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Submission consumer pipeline has stalled"
             description: |
@@ -136,6 +141,7 @@ spec:
             severity: critical
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Submission consumer gave up on usage events"
             description: |
@@ -165,6 +171,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Submission consumer error rate above 10%"
             description: |
@@ -185,6 +192,7 @@ spec:
             severity: critical
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Submission consumer dropping invalid events"
             description: |
@@ -205,6 +213,7 @@ spec:
             severity: critical
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Submission consumer OpenMeter configuration error"
             description: |
@@ -232,6 +241,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Controller {{ $labels.controller }} has been failing reconciles for 30 minutes"
             description: |
@@ -256,6 +266,7 @@ spec:
             severity: critical
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "BillingAccount sync to OpenMeter has been failing for 30 minutes"
             description: |
@@ -280,6 +291,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Controller {{ $labels.controller }} panicked during a reconcile"
             description: |
@@ -303,6 +315,7 @@ spec:
             severity: critical
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "OpenMeter CronJob {{ $labels.cronjob }} has not succeeded recently"
             description: |
@@ -336,6 +349,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
           annotations:
             summary: "Latest run of OpenMeter CronJob {{ $labels.cronjob }} has not succeeded"
             description: |
@@ -358,6 +372,7 @@ spec:
             severity: critical
             namespace: openmeter-system
             service: billing
+            team: billing
             component: openmeter-database
           annotations:
             summary: "OpenMeter CNPG Postgres WAL archiving is failing"
@@ -381,6 +396,7 @@ spec:
             severity: warning
             namespace: openmeter-system
             service: billing
+            team: billing
             component: openmeter-database
           annotations:
             summary: "OpenMeter CNPG Postgres base backup is stale"
