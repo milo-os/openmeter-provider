@@ -14,7 +14,7 @@ require (
 	github.com/prometheus/client_model v0.6.3
 	github.com/shopspring/decimal v1.4.0
 	github.com/spf13/cobra v1.10.2
-	go.miloapis.com/billing v0.10.1-0.20261119173759-412482750754
+	go.miloapis.com/billing v0.10.1-0.20261119213159-fb2077976e98
 	go.miloapis.com/instrumentation v0.6.0
 	go.miloapis.com/stripe-provider v0.0.0-00010101000000-000000000000
 	go.uber.org/zap v1.28.0
@@ -169,4 +169,4 @@ require (
 
 // go.miloapis.com/stripe-provider is not yet published to the Go module
 // proxy — mirrors the same replace amberflo-provider uses.
-replace go.miloapis.com/stripe-provider => github.com/milo-os/stripe-provider v0.1.16-0.20261119171600-56ba95883a84
+replace go.miloapis.com/stripe-provider => github.com/milo-os/stripe-provider v0.1.16-0.20261119212902-23a71d8d8343

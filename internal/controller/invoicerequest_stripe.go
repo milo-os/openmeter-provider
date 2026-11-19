@@ -187,6 +187,9 @@ func (r *InvoiceRequestReconciler) succeedFromStripe(
 	ir.Status.Total = total
 	ir.Status.Tax = invoice.Status.Tax
 	ir.Status.TotalWithTax = invoice.Status.Total
+	ir.Status.StartingBalance = invoice.Status.StartingBalance
+	ir.Status.AmountDue = invoice.Status.AmountDue
+	msg += carriedBalance(invoice.Status.StartingBalance)
 	if ir.Spec.Draft && invoice.Status.DashboardURL != "" {
 		ir.Status.Draft = &billingv1alpha1.InvoiceRequestDraft{URL: invoice.Status.DashboardURL, ExpiresAt: invoice.Status.ExpiresAt}
 	}
@@ -249,4 +252,18 @@ func subtract(a, b string) (string, error) {
 		return "", err
 	}
 	return x.Sub(y).StringFixed(2), nil
+}
+
+// carriedBalance is what the request's message says about a starting
+// balance Stripe carries onto the invoice, or nothing without one.
+func carriedBalance(balance string) string {
+	b, err := decimal.NewFromString(balance)
+	switch {
+	case err != nil || b.IsZero():
+		return ""
+	case b.IsPositive():
+		return fmt.Sprintf(". The account already owes %s, which Stripe adds to this invoice", b.StringFixed(2))
+	default:
+		return fmt.Sprintf(". The account has %s in credit, which Stripe takes off this invoice", b.Neg().StringFixed(2))
+	}
 }
