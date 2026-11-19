@@ -580,9 +580,8 @@ func TestBuildOfferMapping_FeeQuantities(t *testing.T) {
 	}
 }
 
-// TestBuildOfferMapping_SKUs: a pricing's SKU starts its rate card's name,
-// which OpenMeter names invoice lines after, for usage and fees alike. A
-// pricing without one keeps its name.
+// TestBuildOfferMapping_SKUs: a pricing's SKU is internal, so it's never in
+// a rate card's name, which OpenMeter prints on invoice lines.
 func TestBuildOfferMapping_SKUs(t *testing.T) {
 	usage := usagePricing("cpu", matchRate("region", "us-east", "0.10"))
 	usage.Spec.SKU = "CMP-CPU"
@@ -601,12 +600,12 @@ func TestBuildOfferMapping_SKUs(t *testing.T) {
 	m := mustMapping(t, offer)
 	phase := m.Plan.Phases[0]
 
-	if rc := mustUsageRateCard(t, phase, 0); rc.Name != "[CMP-CPU] Compute Usage (region=us-east)" {
+	if rc := mustUsageRateCard(t, phase, 0); rc.Name != "Compute Usage (region=us-east)" {
 		t.Errorf("usage rate card name = %q", rc.Name)
 	}
 	for i, want := range []string{
-		"[DC-XC-01] Cross connect: 4 port × $300.00",
-		"[DC-CAB-01] cabling",
+		"Cross connect: 4 port × $300.00",
+		"cabling",
 		"Setup fee",
 	} {
 		if rc, _ := mustFlatRateCard(t, phase, i+1); rc.Name != want {
