@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	billingv1alpha1 "go.miloapis.com/billing/api/v1alpha1"
+	stripev1alpha1 "go.miloapis.com/stripe-provider/api/v1alpha1"
 
 	"go.miloapis.com/openmeter-provider/internal/openmeter"
 )
@@ -61,6 +62,10 @@ type InvoiceRequestReconciler struct {
 	Recorder        record.EventRecorder
 	// Now returns the current time; time.Now when unset.
 	Now func() time.Time
+	// StripeInvoices is true when stripe-provider's StripeInvoice API is
+	// served, so first-invoice previews are worked out by Stripe, with tax.
+	// SetupWithManager sets it.
+	StripeInvoices bool
 }
 
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoicerequests,verbs=get;list;watch
@@ -68,6 +73,8 @@ type InvoiceRequestReconciler struct {
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingentitlements,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=offers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeinvoices,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers,verbs=get;list;watch
 
 // Reconcile fulfils a single InvoiceRequest.
 func (r *InvoiceRequestReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
@@ -152,15 +159,15 @@ func (r *InvoiceRequestReconciler) previewFirstInvoice(
 	if contractBillsOnInvoiceDay(be.Spec.Contract) {
 		invoiceDay = subscriptionBillingAnchor(account).Day()
 	}
-	lines, total, err := firstInvoiceLines(&offer, startsAt, invoiceDay)
+	charges, total, err := firstInvoiceCharges(&offer, startsAt, invoiceDay)
 	if err != nil {
 		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
 	}
-	if len(lines) == 0 {
+	if len(charges) == 0 {
 		return ctrl.Result{}, r.succeed(ctx, ir, account.Spec.CurrencyCode, nil, "0",
 			fmt.Sprintf("Offer %q has no one-time or recurring charges to invoice when the contract starts on %s", offer.Name, starts))
 	}
-	return ctrl.Result{}, r.succeed(ctx, ir, account.Spec.CurrencyCode, lines, total,
+	return r.previewFirstInvoiceResult(ctx, ir, account, charges, total,
 		fmt.Sprintf("The first invoice, sent when the contract starts on %s", starts))
 }
 
@@ -226,24 +233,42 @@ func (r *InvoiceRequestReconciler) entitlementFor(ctx context.Context, account *
 	return nil, nil
 }
 
-// firstInvoiceLines are the charges a contract starting at startsAt is
+// firstCharge is one charge on a contract's first invoice, with what a
+// Stripe preview of it needs.
+type firstCharge struct {
+	line billingv1alpha1.InvoiceRequestLine
+	// pricing is the ServicePricing charged.
+	pricing string
+	// name is the charge's name without its quantity, which Stripe shows
+	// itself.
+	name string
+	// quantity and unitAmount come to amountBeforeDiscount: the fee's
+	// quantity and amount, or, for a prorated first period, 1 and the
+	// prorated amount.
+	quantity, unitAmount, amountBeforeDiscount string
+	discountPercent                          int32
+	start, end                               time.Time
+}
+
+// firstInvoiceCharges are the charges a contract starting at startsAt is
 // first invoiced for, with their total: each OneTime pricing, and the
 // first period of each Recurring one, each times its quantity and after
 // the Offer's discounts. A contract billed on the invoice day (invoiceDay
 // above 0) has a first period that ends on each fee's first billing date,
 // prorated as OpenMeter prorates it. Names match the Offer's plan (see
 // addFlatFee). Usage isn't included.
-func firstInvoiceLines(offer *billingv1alpha1.Offer, startsAt time.Time, invoiceDay int) ([]billingv1alpha1.InvoiceRequestLine, string, error) {
-	var lines []billingv1alpha1.InvoiceRequestLine
+func firstInvoiceCharges(offer *billingv1alpha1.Offer, startsAt time.Time, invoiceDay int) ([]firstCharge, string, error) {
+	var charges []firstCharge
 	var amounts []string
 	for _, sp := range offer.Spec.ServicePricings {
 		var period *billingv1alpha1.InvoicePeriod
 		var part, whole time.Duration
+		end := startsAt
 		switch sp.Spec.ChargeType {
 		case billingv1alpha1.ChargeTypeOneTime:
 		case billingv1alpha1.ChargeTypeRecurring:
 			months := intervalMonths(sp.Spec.Interval)
-			end := startsAt.AddDate(0, months, 0)
+			end = startsAt.AddDate(0, months, 0)
 			if invoiceDay > 0 {
 				if next := nextBillingDate(startsAt, invoiceDay, sp.Spec.Interval); next.After(startsAt) {
 					end = next
@@ -261,28 +286,41 @@ func firstInvoiceLines(offer *billingv1alpha1.Offer, startsAt time.Time, invoice
 		if sp.Discount != nil {
 			percentage = sp.Discount.Percentage
 		}
-		charged, err := openmeter.MultiplyAmount(sp.Spec.Amount, feeQuantity(sp))
+		quantity := feeQuantity(sp)
+		charged, err := openmeter.MultiplyAmount(sp.Spec.Amount, quantity)
 		if err != nil {
 			return nil, "", fmt.Errorf("service pricing %q: %w", sp.Name, err)
+		}
+		c := firstCharge{
+			pricing: sp.Name, name: lineName(sp),
+			quantity: fmt.Sprint(quantity), unitAmount: sp.Spec.Amount,
+			discountPercent: percentage, start: startsAt, end: startsAt,
+		}
+		if period != nil {
+			c.end = period.End.Time
 		}
 		if part < whole {
 			if charged, err = openmeter.ProrateAmount(charged, part, whole); err != nil {
 				return nil, "", fmt.Errorf("service pricing %q: %w", sp.Name, err)
 			}
+			// A prorated period is one of its whole, so its unit price is the
+			// prorated amount: quantity × unit price must come to it.
+			c.quantity, c.unitAmount = "1", charged
 		}
+		c.amountBeforeDiscount = charged
 		amount, err := openmeter.DiscountedAmount(charged, percentage)
 		if err != nil {
 			return nil, "", fmt.Errorf("service pricing %q: %w", sp.Name, err)
 		}
-		name := feeName(sp)
-		lines = append(lines, billingv1alpha1.InvoiceRequestLine{Description: name, Period: period, Amount: amount})
+		c.line = billingv1alpha1.InvoiceRequestLine{Description: feeName(sp), Period: period, Amount: amount}
+		charges = append(charges, c)
 		amounts = append(amounts, amount)
 	}
 	total, err := openmeter.AddDecimals(amounts...)
 	if err != nil {
 		return nil, "", fmt.Errorf("total: %w", err)
 	}
-	return lines, total, nil
+	return charges, total, nil
 }
 
 // requestLines maps OpenMeter invoice lines to an InvoiceRequest's, with
@@ -408,8 +446,19 @@ func (r *InvoiceRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Recorder == nil {
 		r.Recorder = mgr.GetEventRecorderFor("openmeter-provider") //nolint:staticcheck // SA1019: GetEventRecorder (events/v1) is a larger migration.
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		Named(invoiceRequestControllerName).
-		For(&billingv1alpha1.InvoiceRequest{}).
-		Complete(r)
+		For(&billingv1alpha1.InvoiceRequest{})
+	// Previews go through Stripe only where stripe-provider serves
+	// StripeInvoice; elsewhere they're the provider's own, without tax.
+	sigvk := stripev1alpha1.GroupVersion.WithKind("StripeInvoice")
+	if _, err := mgr.GetRESTMapper().RESTMapping(sigvk.GroupKind(), sigvk.Version); err == nil {
+		r.StripeInvoices = true
+		b = b.Owns(&stripev1alpha1.StripeInvoice{})
+	} else if !apimeta.IsNoMatchError(err) {
+		return fmt.Errorf("look up %s: %w", sigvk, err)
+	} else {
+		mgr.GetLogger().Info("stripe-provider's StripeInvoice API isn't served, so invoice previews don't include tax", "kind", sigvk.String())
+	}
+	return b.Complete(r)
 }

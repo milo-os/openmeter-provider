@@ -168,7 +168,7 @@ func TestInvoiceRequest_PreviewBeforeTheContractStarts(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	c := assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
-	if c.Message != "The first invoice, sent when the contract starts on 2026-11-18" {
+	if c.Message != "The first invoice, sent when the contract starts on 2026-11-18. Tax isn't included: stripe-provider isn't installed" {
 		t.Errorf("message = %q", c.Message)
 	}
 	if omc.calls != 0 {
