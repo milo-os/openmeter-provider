@@ -73,3 +73,12 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - stripe.billing.miloapis.com
+  resources:
+  - stripeinvoices
+  verbs:
+  - create
+  - get
+  - list
+  - watch
