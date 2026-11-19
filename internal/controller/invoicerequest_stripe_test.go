@@ -192,6 +192,31 @@ func TestInvoiceRequest_PreviewFallsBackWithoutStripe(t *testing.T) {
 		}
 	})
 
+	t.Run("account not billed in USD", func(t *testing.T) {
+		account := usdAccount()
+		account.Spec.CurrencyCode = "EUR"
+		r := newStripePreviewReconciler(t, account, contractEntitlementFor(contractStart), contractOffer(),
+			readyStripeCustomer(), stripePreviewRequest(false))
+		ir, err := reconcileInvoiceRequest(r)
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		c := assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
+		if !strings.Contains(c.Message, "Tax isn't included: Stripe previews are only in USD and the account is billed in EUR") {
+			t.Errorf("message = %q", c.Message)
+		}
+		if ir.Status.CurrencyCode != "EUR" || ir.Status.Total != "2400.00" || ir.Status.Tax != "" {
+			t.Errorf("status = %+v", ir.Status)
+		}
+		var invoices stripev1alpha1.StripeInvoiceList
+		if err := r.List(context.Background(), &invoices); err != nil {
+			t.Fatal(err)
+		}
+		if len(invoices.Items) != 0 {
+			t.Errorf("made %d StripeInvoices, want none", len(invoices.Items))
+		}
+	})
+
 	t.Run("Stripe fails", func(t *testing.T) {
 		r := newStripePreviewReconciler(t, usdAccount(), contractEntitlementFor(contractStart), contractOffer(),
 			readyStripeCustomer(), stripePreviewRequest(false))

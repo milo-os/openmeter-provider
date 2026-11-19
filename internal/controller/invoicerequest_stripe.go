@@ -26,6 +26,10 @@ const (
 	stripePreviewWait = time.Minute
 	// stripePreviewRequeue is how often a preview checks on Stripe's.
 	stripePreviewRequeue = 5 * time.Second
+	// stripePreviewCurrency is the only currency Stripe previews are worked
+	// out in. Accounts billed in any other currency get the provider's own
+	// preview.
+	stripePreviewCurrency = "USD"
 )
 
 // stripePreview is what came of asking Stripe for a preview.
@@ -40,8 +44,9 @@ type stripePreview struct {
 
 // previewThroughStripe asks stripe-provider to work out the first invoice
 // with a StripeInvoice, owned by the request, and reports what came of it.
-// Without a Stripe customer for the account, or when Stripe can't answer
-// within stripePreviewWait, the request falls back to the provider's own
+// For an account not billed in stripePreviewCurrency, without a Stripe
+// customer for the account, or when Stripe can't answer within
+// stripePreviewWait, the request falls back to the provider's own
 // arithmetic.
 func (r *InvoiceRequestReconciler) previewThroughStripe(
 	ctx context.Context,
@@ -51,6 +56,10 @@ func (r *InvoiceRequestReconciler) previewThroughStripe(
 ) (stripePreview, error) {
 	if !r.StripeInvoices {
 		return stripePreview{done: true, fallback: "stripe-provider isn't installed"}, nil
+	}
+	if account.Spec.CurrencyCode != stripePreviewCurrency {
+		return stripePreview{done: true, fallback: fmt.Sprintf(
+			"Stripe previews are only in %s and the account is billed in %s", stripePreviewCurrency, account.Spec.CurrencyCode)}, nil
 	}
 	var customer stripev1alpha1.StripeCustomer
 	if err := r.Get(ctx, types.NamespacedName{Namespace: account.Namespace, Name: account.Name}, &customer); err != nil {
@@ -110,7 +119,7 @@ func (r *InvoiceRequestReconciler) stripeInvoiceFor(
 		Spec: stripev1alpha1.StripeInvoiceSpec{
 			BillingAccountRef: stripev1alpha1.BillingAccountLocalRef{Name: account.Name},
 			Purpose:           purpose,
-			Currency:          "USD",
+			Currency:          stripePreviewCurrency,
 		},
 	}
 	for i, c := range charges {
@@ -173,7 +182,7 @@ func (r *InvoiceRequestReconciler) succeedFromStripe(
 		cond := apimeta.FindStatusCondition(invoice.Status.Conditions, stripev1alpha1.StripeInvoiceConditionAmountsMatch)
 		msg += ". Stripe's amounts differ from the Offer's: " + cond.Message
 	}
-	ir.Status.CurrencyCode = "USD"
+	ir.Status.CurrencyCode = stripePreviewCurrency
 	ir.Status.Lines = lines
 	ir.Status.Total = total
 	ir.Status.Tax = invoice.Status.Tax
