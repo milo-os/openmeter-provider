@@ -174,6 +174,18 @@ func (r *OfferReconciler) reconcileSync(
 		return r.openMeterFailed(ctx, offer, err)
 	}
 
+	taxCodeIDs := make(map[string]string, len(mapping.TaxCodes))
+	for _, code := range mapping.TaxCodes {
+		id, err := r.OpenMeterClient.EnsureTaxCode(ctx, code)
+		if err != nil {
+			return r.openMeterFailed(ctx, offer, fmt.Errorf("ensure tax code %q: %w", code, err))
+		}
+		taxCodeIDs[code] = id
+	}
+	if err := mapping.setTaxCodeIDs(taxCodeIDs); err != nil {
+		return r.openMeterFailed(ctx, offer, err)
+	}
+
 	plan, err := r.OpenMeterClient.EnsurePlan(ctx, mapping.Plan)
 	if err != nil {
 		return r.openMeterFailed(ctx, offer, fmt.Errorf("ensure plan: %w", err))

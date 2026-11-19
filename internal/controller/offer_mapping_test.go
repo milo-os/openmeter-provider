@@ -615,6 +615,54 @@ func TestBuildOfferMapping_SKUs(t *testing.T) {
 	}
 }
 
+// A pricing's tax becomes its rate card's tax code: its own Stripe code, or
+// Stripe's nontaxable code when it isn't taxable. A pricing without tax is
+// left to the billing profile's default, as every rate card was before.
+func TestBuildOfferMapping_TaxCodes(t *testing.T) {
+	notTaxable := false
+	usage := usagePricing("cpu", matchRate("region", "us-east", "0.10"))
+	usage.Spec.Tax = &billingv1alpha1.PricingTax{Code: "txcd_10103001"}
+	fee := func(name string, tax *billingv1alpha1.PricingTax) billingv1alpha1.ServicePricingSnapshot {
+		return billingv1alpha1.ServicePricingSnapshot{Name: name, Spec: billingv1alpha1.ServicePricingSpec{
+			ChargeType: billingv1alpha1.ChargeTypeRecurring, Amount: "300.00",
+			Interval: billingv1alpha1.ChargeIntervalMonthly, Tax: tax}}
+	}
+	offer := baseOffer()
+	offer.Spec.ServicePricings = append(offer.Spec.ServicePricings, usage,
+		fee("rack", &billingv1alpha1.PricingTax{Code: "txcd_20030000"}),
+		fee("power", &billingv1alpha1.PricingTax{Code: "txcd_20030000"}),
+		fee("deposit", &billingv1alpha1.PricingTax{Taxable: &notTaxable}),
+		fee("support", nil),
+	)
+	m := mustMapping(t, offer)
+
+	if want := []string{"txcd_10103001", "txcd_20030000", "txcd_00000000"}; !slices.Equal(m.TaxCodes, want) {
+		t.Errorf("TaxCodes = %v, want %v", m.TaxCodes, want)
+	}
+	if err := m.setTaxCodeIDs(map[string]string{
+		"txcd_10103001": "id-saas", "txcd_20030000": "id-space", "txcd_00000000": "id-none",
+	}); err != nil {
+		t.Fatalf("setTaxCodeIDs: %v", err)
+	}
+	phase := m.Plan.Phases[0]
+	if rc := mustUsageRateCard(t, phase, 0); rc.TaxConfig == nil || rc.TaxConfig.Code.Id != "id-saas" {
+		t.Errorf("usage rate card tax = %+v, want id-saas", rc.TaxConfig)
+	}
+	for i, want := range []string{"id-space", "id-space", "id-none", ""} {
+		rc, _ := mustFlatRateCard(t, phase, i+1)
+		switch {
+		case want == "" && rc.TaxConfig != nil:
+			t.Errorf("rate card %s tax = %+v, want none", rc.Key, rc.TaxConfig)
+		case want != "" && (rc.TaxConfig == nil || rc.TaxConfig.Code == nil || rc.TaxConfig.Code.Id != want):
+			t.Errorf("rate card %s tax = %+v, want %s", rc.Key, rc.TaxConfig, want)
+		}
+	}
+
+	if err := m.setTaxCodeIDs(map[string]string{}); err == nil {
+		t.Error("setTaxCodeIDs without the ids: want an error")
+	}
+}
+
 // Each Recurring fee is charged on its pricing's own interval and billed as
 // its snapshot's billingTiming says: in advance without one, as every fee
 // was before billing had the field. One-time fees are always in advance.
