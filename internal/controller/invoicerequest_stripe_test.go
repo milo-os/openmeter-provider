@@ -80,6 +80,7 @@ func markStripeReady(t *testing.T, r *InvoiceRequestReconciler, dashboardURL str
 			{Key: "charge-1", Amount: "1000.00", Discount: "100.00", Tax: "72.00"},
 		},
 		Subtotal: "2500.00", Discount: "100.00", Tax: "72.00", Total: "2472.00",
+		StartingBalance: "0.00", AmountDue: "2472.00",
 	}
 	apimeta.SetStatusCondition(&inv.Status.Conditions, metav1.Condition{
 		Type: stripev1alpha1.StripeInvoiceConditionReady, Status: metav1.ConditionTrue, Reason: "Previewed",
@@ -153,6 +154,43 @@ func TestInvoiceRequest_PreviewThroughStripe(t *testing.T) {
 	}
 	if ir.Status.Draft != nil {
 		t.Errorf("draft = %+v, want none", ir.Status.Draft)
+	}
+	if ir.Status.StartingBalance != "0.00" || ir.Status.AmountDue != "2472.00" || strings.Contains(c.Message, "owes") {
+		t.Errorf("balance = %s, due = %s, message = %q", ir.Status.StartingBalance, ir.Status.AmountDue, c.Message)
+	}
+}
+
+func TestInvoiceRequest_PreviewThroughStripeCarriesTheBalance(t *testing.T) {
+	for _, tc := range []struct {
+		balance, due, says string
+	}{
+		{"0.23", "2472.23", "The account already owes 0.23, which Stripe adds to this invoice"},
+		{"-100.00", "2372.00", "The account has 100.00 in credit, which Stripe takes off this invoice"},
+	} {
+		t.Run(tc.balance, func(t *testing.T) {
+			r := newStripePreviewReconciler(t, usdAccount(), contractEntitlementFor(contractStart), contractOffer(),
+				readyStripeCustomer(), stripePreviewRequest(false))
+			if _, err := reconcileInvoiceRequest(r); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			markStripeReady(t, r, "")
+			inv := getStripeInvoice(t, r)
+			inv.Status.StartingBalance, inv.Status.AmountDue = tc.balance, tc.due
+			if err := r.Status().Update(context.Background(), inv); err != nil {
+				t.Fatal(err)
+			}
+			ir, err := reconcileInvoiceRequest(r)
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			c := assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
+			if ir.Status.StartingBalance != tc.balance || ir.Status.AmountDue != tc.due || ir.Status.TotalWithTax != "2472.00" {
+				t.Errorf("balance = %s, due = %s, total with tax = %s", ir.Status.StartingBalance, ir.Status.AmountDue, ir.Status.TotalWithTax)
+			}
+			if !strings.Contains(c.Message, tc.says) {
+				t.Errorf("message = %q", c.Message)
+			}
+		})
 	}
 }
 
