@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math/big"
 	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -64,6 +65,9 @@ func invoiceEventDetail(obj *billingv1alpha1.Invoice, currency string, extra ...
 	if currency != "" {
 		detail[billingv1alpha1.EventAnnotationCurrency] = currency
 	}
+	if number := obj.Annotations[StripeInvoiceNumberAnnotation]; number != "" {
+		detail[billingv1alpha1.EventAnnotationInvoiceNumber] = number
+	}
 	for i := 0; i+1 < len(extra); i += 2 {
 		if extra[i+1] != "" {
 			detail[extra[i]] = extra[i+1]
@@ -79,7 +83,11 @@ func invoiceEventDetail(obj *billingv1alpha1.Invoice, currency string, extra ...
 // a repeated sync finds nothing changed. Invoices first projected by an
 // earlier version of this provider already have a phase, so nothing is
 // replayed for them.
-func invoiceStatusEvents(obj *billingv1alpha1.Invoice, before billingv1alpha1.InvoiceStatus) []invoiceEvent {
+//
+// uncollectible says the invoice was written off rather than voided. Both
+// are phase Void, so the move to Void records InvoiceMarkedUncollectible
+// for one and InvoiceVoided for the other.
+func invoiceStatusEvents(obj *billingv1alpha1.Invoice, before billingv1alpha1.InvoiceStatus, uncollectible bool) []invoiceEvent {
 	after := obj.Status
 	currency := after.CurrencyCode
 	var events []invoiceEvent
@@ -121,7 +129,16 @@ func invoiceStatusEvents(obj *billingv1alpha1.Invoice, before billingv1alpha1.In
 			})
 		case billingv1alpha1.InvoicePhaseVoid:
 			// An invoice voided before it was ever shown needs no entry.
-			if before.Phase != "" {
+			switch {
+			case before.Phase == "":
+			case uncollectible:
+				events = append(events, invoiceEvent{
+					reason:    billingv1alpha1.EventReasonInvoiceMarkedUncollectible,
+					eventType: corev1.EventTypeWarning,
+					message:   "Invoice marked uncollectible.",
+					detail:    invoiceEventDetail(obj, currency, billingv1alpha1.EventAnnotationAmountDue, after.AmountDue),
+				})
+			default:
 				events = append(events, invoiceEvent{
 					reason:    billingv1alpha1.EventReasonInvoiceVoided,
 					eventType: corev1.EventTypeNormal,
@@ -130,6 +147,17 @@ func invoiceStatusEvents(obj *billingv1alpha1.Invoice, before billingv1alpha1.In
 				})
 			}
 		}
+	}
+
+	if dueDateMoved(before, after) {
+		events = append(events, invoiceEvent{
+			reason:    billingv1alpha1.EventReasonInvoiceDueDateChanged,
+			eventType: corev1.EventTypeNormal,
+			message:   "Invoice due date changed.",
+			detail: invoiceEventDetail(obj, currency,
+				billingv1alpha1.EventAnnotationDueDate, billingv1alpha1.EventTime(after.DueDate.Time),
+				billingv1alpha1.EventAnnotationPreviousDueDate, billingv1alpha1.EventTime(before.DueDate.Time)),
+		})
 	}
 
 	if (after.Phase == billingv1alpha1.InvoicePhaseOpen || after.Phase == billingv1alpha1.InvoicePhasePastDue) &&
@@ -154,6 +182,24 @@ func invoiceStatusEvents(obj *billingv1alpha1.Invoice, before billingv1alpha1.In
 		})
 	}
 	return events
+}
+
+// minDueDateMove is how far a due date has to move to be a change worth a
+// timeline entry. People move due dates by days. Smaller differences come
+// from the same date read from another source: OpenMeter's due date and the
+// Stripe invoice's, computed seconds apart at issue.
+const minDueDateMove = 12 * time.Hour
+
+// dueDateMoved reports whether an invoice that was and still is awaiting
+// payment (Open or PastDue) has a new due date.
+func dueDateMoved(before, after billingv1alpha1.InvoiceStatus) bool {
+	awaiting := func(p billingv1alpha1.InvoicePhase) bool {
+		return p == billingv1alpha1.InvoicePhaseOpen || p == billingv1alpha1.InvoicePhasePastDue
+	}
+	if !awaiting(before.Phase) || !awaiting(after.Phase) || before.DueDate == nil || after.DueDate == nil {
+		return false
+	}
+	return after.DueDate.Sub(before.DueDate.Time).Abs() >= minDueDateMove
 }
 
 func readyReason(status billingv1alpha1.InvoiceStatus) string {

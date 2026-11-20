@@ -110,60 +110,96 @@ func TestInvoiceStatusEvents(t *testing.T) {
 	mismatch := invoiceStatus(open, "0", "482.19")
 	mismatch.Conditions[0].Status, mismatch.Conditions[0].Reason = metav1.ConditionFalse, invoiceReasonCurrencyMismatch
 
+	movedDue := func(status billingv1alpha1.InvoiceStatus, d time.Duration) billingv1alpha1.InvoiceStatus {
+		moved := metav1.NewTime(status.DueDate.Add(d))
+		status.DueDate = &moved
+		return status
+	}
+	withoutDue := func(status billingv1alpha1.InvoiceStatus) billingv1alpha1.InvoiceStatus {
+		status.DueDate = nil
+		return status
+	}
+
 	for name, tc := range map[string]struct {
-		before billingv1alpha1.InvoiceStatus
-		after  billingv1alpha1.InvoiceStatus
-		want   []string
+		before        billingv1alpha1.InvoiceStatus
+		after         billingv1alpha1.InvoiceStatus
+		uncollectible bool
+		want          []string
 	}{
 		"issued": {
-			billingv1alpha1.InvoiceStatus{}, invoiceStatus(open, "0", "482.19"),
+			billingv1alpha1.InvoiceStatus{}, invoiceStatus(open, "0", "482.19"), false,
 			[]string{billingv1alpha1.EventReasonInvoiceIssued},
 		},
 		"issued and paid in one sync": {
-			billingv1alpha1.InvoiceStatus{}, invoiceStatus(paid, "482.19", "0"),
+			billingv1alpha1.InvoiceStatus{}, invoiceStatus(paid, "482.19", "0"), false,
 			[]string{billingv1alpha1.EventReasonInvoiceIssued, billingv1alpha1.EventReasonInvoicePaymentSucceeded},
 		},
 		"unchanged": {
-			invoiceStatus(open, "0", "482.19"), invoiceStatus(open, "0", "482.19"), nil,
+			invoiceStatus(open, "0", "482.19"), invoiceStatus(open, "0", "482.19"), false, nil,
 		},
 		"paid": {
-			invoiceStatus(open, "0", "482.19"), invoiceStatus(paid, "482.19", "0"),
+			invoiceStatus(open, "0", "482.19"), invoiceStatus(paid, "482.19", "0"), false,
 			[]string{billingv1alpha1.EventReasonInvoicePaymentSucceeded},
 		},
 		"past due": {
-			invoiceStatus(open, "0", "482.19"), invoiceStatus(pastDue, "0", "482.19"),
+			invoiceStatus(open, "0", "482.19"), invoiceStatus(pastDue, "0", "482.19"), false,
 			[]string{billingv1alpha1.EventReasonInvoicePastDue},
 		},
 		"partly paid": {
-			invoiceStatus(open, "0", "482.19"), invoiceStatus(open, "200.00", "282.19"),
+			invoiceStatus(open, "0", "482.19"), invoiceStatus(open, "200.00", "282.19"), false,
 			[]string{billingv1alpha1.EventReasonInvoicePartiallyPaid},
 		},
 		"partly paid again while past due": {
-			invoiceStatus(pastDue, "200.00", "282.19"), invoiceStatus(pastDue, "300.00", "182.19"),
+			invoiceStatus(pastDue, "200.00", "282.19"), invoiceStatus(pastDue, "300.00", "182.19"), false,
 			[]string{billingv1alpha1.EventReasonInvoicePartiallyPaid},
 		},
 		"a credit note lowers what's due": {
-			invoiceStatus(open, "200.00", "282.19"), invoiceStatus(open, "200.00", "182.19"), nil,
+			invoiceStatus(open, "200.00", "282.19"), invoiceStatus(open, "200.00", "182.19"), false, nil,
 		},
 		"voided": {
-			invoiceStatus(open, "0", "482.19"), invoiceStatus(void, "0", "0"),
+			invoiceStatus(open, "0", "482.19"), invoiceStatus(void, "0", "0"), false,
 			[]string{billingv1alpha1.EventReasonInvoiceVoided},
 		},
 		"voided before it was shown": {
-			billingv1alpha1.InvoiceStatus{}, invoiceStatus(void, "0", "0"), nil,
+			billingv1alpha1.InvoiceStatus{}, invoiceStatus(void, "0", "0"), false, nil,
 		},
 		"currency mismatch": {
-			invoiceStatus(open, "0", "482.19"), mismatch,
+			invoiceStatus(open, "0", "482.19"), mismatch, false,
 			[]string{billingv1alpha1.EventReasonInvoiceCurrencyMismatch},
 		},
 		"currency mismatch persists": {
-			mismatch, mismatch, nil,
+			mismatch, mismatch, false, nil,
+		},
+		"marked uncollectible": {
+			invoiceStatus(open, "0", "482.19"), invoiceStatus(void, "0", "482.19"), true,
+			[]string{billingv1alpha1.EventReasonInvoiceMarkedUncollectible},
+		},
+		"marked uncollectible before it was shown": {
+			billingv1alpha1.InvoiceStatus{}, invoiceStatus(void, "0", "482.19"), true, nil,
+		},
+		"due date moved": {
+			invoiceStatus(open, "0", "482.19"), movedDue(invoiceStatus(open, "0", "482.19"), 14*24*time.Hour), false,
+			[]string{billingv1alpha1.EventReasonInvoiceDueDateChanged},
+		},
+		"due date moved earlier while past due": {
+			invoiceStatus(pastDue, "0", "482.19"), movedDue(invoiceStatus(pastDue, "0", "482.19"), -24*time.Hour), false,
+			[]string{billingv1alpha1.EventReasonInvoiceDueDateChanged},
+		},
+		"due date read from another source, seconds apart": {
+			invoiceStatus(open, "0", "482.19"), movedDue(invoiceStatus(open, "0", "482.19"), 42*time.Second), false, nil,
+		},
+		"due date set for the first time": {
+			withoutDue(invoiceStatus(open, "0", "482.19")), invoiceStatus(open, "0", "482.19"), false, nil,
+		},
+		"due date moves as the invoice is paid": {
+			invoiceStatus(open, "0", "482.19"), movedDue(invoiceStatus(paid, "482.19", "0"), 24*time.Hour), false,
+			[]string{billingv1alpha1.EventReasonInvoicePaymentSucceeded},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			obj := eventInvoice("", "", "")
 			obj.Status = tc.after
-			got := reasonsOf(invoiceStatusEvents(obj, tc.before))
+			got := reasonsOf(invoiceStatusEvents(obj, tc.before, tc.uncollectible))
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("events = %v, want %v", got, tc.want)
 			}
@@ -173,7 +209,7 @@ func TestInvoiceStatusEvents(t *testing.T) {
 
 func TestInvoiceStatusEventDetail(t *testing.T) {
 	obj := eventInvoice(billingv1alpha1.InvoicePhaseOpen, "0", "482.19")
-	events := invoiceStatusEvents(obj, billingv1alpha1.InvoiceStatus{})
+	events := invoiceStatusEvents(obj, billingv1alpha1.InvoiceStatus{}, false)
 	if len(events) != 1 {
 		t.Fatalf("events = %v", reasonsOf(events))
 	}
@@ -186,6 +222,45 @@ func TestInvoiceStatusEventDetail(t *testing.T) {
 	}
 	if fmt.Sprint(events[0].detail) != fmt.Sprint(want) {
 		t.Errorf("detail = %v, want %v", events[0].detail, want)
+	}
+}
+
+func TestInvoiceStatusEventDetailForNewReasons(t *testing.T) {
+	open := invoiceStatus(billingv1alpha1.InvoicePhaseOpen, "0", "482.19")
+
+	obj := eventInvoice(billingv1alpha1.InvoicePhaseVoid, "0", "482.19")
+	obj.Annotations = map[string]string{StripeInvoiceNumberAnnotation: "ACME-0042"}
+	events := invoiceStatusEvents(obj, open, true)
+	if len(events) != 1 {
+		t.Fatalf("uncollectible: events = %v", reasonsOf(events))
+	}
+	want := map[string]string{
+		billingv1alpha1.EventAnnotationBillingAccount: "acme",
+		billingv1alpha1.EventAnnotationPeriodStart:    "2026-10-01T00:00:00Z",
+		billingv1alpha1.EventAnnotationCurrency:       "USD",
+		billingv1alpha1.EventAnnotationAmountDue:      "482.19",
+		billingv1alpha1.EventAnnotationInvoiceNumber:  "ACME-0042",
+	}
+	if fmt.Sprint(events[0].detail) != fmt.Sprint(want) {
+		t.Errorf("uncollectible detail = %v, want %v", events[0].detail, want)
+	}
+
+	obj = eventInvoice(billingv1alpha1.InvoicePhaseOpen, "0", "482.19")
+	moved := metav1.NewTime(time.Date(2026, 12, 15, 0, 0, 0, 0, time.UTC))
+	obj.Status.DueDate = &moved
+	events = invoiceStatusEvents(obj, open, false)
+	if len(events) != 1 {
+		t.Fatalf("due date: events = %v", reasonsOf(events))
+	}
+	want = map[string]string{
+		billingv1alpha1.EventAnnotationBillingAccount:  "acme",
+		billingv1alpha1.EventAnnotationPeriodStart:     "2026-10-01T00:00:00Z",
+		billingv1alpha1.EventAnnotationCurrency:        "USD",
+		billingv1alpha1.EventAnnotationDueDate:         "2026-12-15T00:00:00Z",
+		billingv1alpha1.EventAnnotationPreviousDueDate: "2026-11-30T00:00:00Z",
+	}
+	if fmt.Sprint(events[0].detail) != fmt.Sprint(want) {
+		t.Errorf("due date detail = %v, want %v", events[0].detail, want)
 	}
 }
 
