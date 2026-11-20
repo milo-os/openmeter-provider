@@ -354,3 +354,45 @@ func TestReconcileInvoices_StripeFailingKeepsStripesAmounts(t *testing.T) {
 		t.Errorf("amountDue = %s while Stripe is down, want Stripe's last 5.00", obj.Status.AmountDue)
 	}
 }
+
+func TestStripeInvoiceDueDate(t *testing.T) {
+	omDue := time.Date(2026, 11, 30, 0, 0, 0, 0, time.UTC)
+	stripeDue := time.Date(2026, 12, 15, 0, 0, 0, 0, time.UTC)
+	lastFromStripe := metav1.NewTime(time.Date(2026, 12, 10, 0, 0, 0, 0, time.UTC))
+	inStripe := stripeInvoice("in_1", stripe.InvoiceStatusOpen, 1000)
+	inStripe.DueDate = &stripeDue
+	noDue := stripeInvoice("in_1", stripe.InvoiceStatusOpen, 1000)
+
+	for _, tc := range []struct {
+		name      string
+		phase     billingv1alpha1.InvoicePhase
+		inStripe  *stripe.Invoice
+		stripeKey bool
+		want      *time.Time
+	}{
+		{name: "Stripe's due date wins", phase: billingv1alpha1.InvoicePhaseOpen, inStripe: &inStripe, stripeKey: true, want: &stripeDue},
+		{name: "Stripe has no due date", phase: billingv1alpha1.InvoicePhaseOpen, inStripe: &noDue, stripeKey: true},
+		{name: "Stripe unreadable keeps the last one", phase: billingv1alpha1.InvoicePhaseOpen, stripeKey: true, want: &lastFromStripe.Time},
+		{name: "never in Stripe", phase: billingv1alpha1.InvoicePhaseOpen},
+		{name: "void keeps OpenMeter's", phase: billingv1alpha1.InvoicePhaseVoid, inStripe: &inStripe, stripeKey: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := eventInvoice(billingv1alpha1.InvoicePhaseOpen, "0", "10.00")
+			before.Status.DueDate = &lastFromStripe
+			if tc.stripeKey {
+				before.Annotations = map[string]string{StripeInvoiceKeyAnnotation: "in_1"}
+			}
+			obj := before.DeepCopy()
+			obj.Status.Phase = tc.phase
+			obj.Status.DueDate = &metav1.Time{Time: omDue}
+
+			got, ok := stripeInvoiceDueDate(om.Invoice{Status: om.InvoiceStatusIssued}, tc.inStripe, obj, before)
+			switch {
+			case tc.want == nil && ok:
+				t.Errorf("got %v, want OpenMeter's", got)
+			case tc.want != nil && (!ok || got == nil || !got.Time.Equal(*tc.want)):
+				t.Errorf("got %v (%v), want %v", got, ok, tc.want)
+			}
+		})
+	}
+}

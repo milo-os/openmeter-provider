@@ -265,7 +265,8 @@ func (r *BillingAccountReconciler) patchStripeInvoiceStatus(
 	if err := r.Status().Patch(ctx, obj, client.MergeFrom(statusBase)); err != nil {
 		return fmt.Errorf("patch Invoice status %s/%s: %w", obj.Namespace, obj.Name, err)
 	}
-	recordInvoiceEvents(r.Recorder, obj, invoiceStatusEvents(obj, statusBase.Status)...)
+	recordInvoiceEvents(r.Recorder, obj, invoiceStatusEvents(obj, statusBase.Status,
+		inv.Status == stripe.InvoiceStatusUncollectible)...)
 	return nil
 }
 

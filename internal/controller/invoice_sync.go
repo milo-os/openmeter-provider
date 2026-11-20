@@ -467,14 +467,41 @@ func (r *BillingAccountReconciler) patchInvoiceStatus(
 		// rather than fall back to OpenMeter's until the next sync.
 		obj.Status.AmountPaid, obj.Status.AmountDue = statusBase.Status.AmountPaid, statusBase.Status.AmountDue
 	}
+	if due, ok := stripeInvoiceDueDate(inv, inStripe, obj, statusBase); ok {
+		obj.Status.DueDate = due
+	}
 	if refreshed {
 		obj.Status.DocumentURI = documentURI
 	}
 	if err := r.Status().Patch(ctx, obj, client.MergeFrom(statusBase)); err != nil {
 		return fmt.Errorf("patch Invoice status %s/%s: %w", obj.Namespace, obj.Name, err)
 	}
-	recordInvoiceEvents(r.Recorder, obj, invoiceStatusEvents(obj, statusBase.Status)...)
+	recordInvoiceEvents(r.Recorder, obj, invoiceStatusEvents(obj, statusBase.Status,
+		inv.Status == om.InvoiceStatusUncollectible)...)
 	return nil
+}
+
+// stripeInvoiceDueDate returns the due date to project for OpenMeter's inv,
+// and whether to use it instead of OpenMeter's. The Stripe invoice's due
+// date is the one printed on what the customer receives, and the one staff
+// change; OpenMeter keeps the date it issued with. When Stripe couldn't be
+// read this time, the date it last gave is kept rather than falling back to
+// OpenMeter's until the next sync, as for the amounts.
+func stripeInvoiceDueDate(
+	inv om.Invoice,
+	inStripe *stripe.Invoice,
+	obj, before *billingv1alpha1.Invoice,
+) (*metav1.Time, bool) {
+	if openmeter.IsInvoiceDeleted(inv) || obj.Status.Phase == billingv1alpha1.InvoicePhaseVoid {
+		return nil, false
+	}
+	switch {
+	case inStripe != nil && inStripe.DueDate != nil:
+		return &metav1.Time{Time: *inStripe.DueDate}, true
+	case inStripe == nil && obj.Annotations[StripeInvoiceKeyAnnotation] != "" && before.Status.DueDate != nil:
+		return before.Status.DueDate, true
+	}
+	return nil, false
 }
 
 // patchInvoiceAnnotations sets annotations on obj, when any differ.
