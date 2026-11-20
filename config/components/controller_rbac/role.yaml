@@ -49,6 +49,7 @@ rules:
   resources:
   - invoicerequests
   - paymentmethods
+  - servicepricings
   verbs:
   - get
   - list

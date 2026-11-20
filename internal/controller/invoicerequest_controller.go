@@ -73,6 +73,7 @@ type InvoiceRequestReconciler struct {
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingentitlements,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=offers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=billing.miloapis.com,resources=servicepricings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeinvoices,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers,verbs=get;list;watch
 
@@ -112,6 +113,10 @@ func (r *InvoiceRequestReconciler) Reconcile(ctx context.Context, req reconcile.
 		}
 		return ctrl.Result{}, r.fail(ctx, &ir, billingv1alpha1.InvoiceRequestReasonFailed,
 			fmt.Sprintf("BillingAccount %q not found", ir.Spec.BillingAccountRef.Name))
+	}
+
+	if ir.Spec.ContractDraft != nil {
+		return r.previewContractDraft(ctx, &ir, &account)
 	}
 
 	be, err := r.entitlementFor(ctx, &account)
@@ -252,7 +257,8 @@ type firstCharge struct {
 
 // firstInvoiceCharges are the charges a contract starting at startsAt is
 // first invoiced for, with their total: each OneTime pricing, and the
-// first period of each Recurring one, each times its quantity and after
+// first period of each Recurring one billed in advance (one billed in
+// arrears is invoiced when its period ends), each times its quantity and after
 // the Offer's discounts. A contract billed on the invoice day (invoiceDay
 // above 0) has a first period that ends on each fee's first billing date,
 // prorated as OpenMeter prorates it. Names match the Offer's plan (see
@@ -261,6 +267,10 @@ func firstInvoiceCharges(offer *billingv1alpha1.Offer, startsAt time.Time, invoi
 	var charges []firstCharge
 	var amounts []string
 	for _, sp := range offer.Spec.ServicePricings {
+		if feeInArrears(sp) {
+			// Invoiced at the end of its first period, not when it starts.
+			continue
+		}
 		var period *billingv1alpha1.InvoicePeriod
 		var part, whole time.Duration
 		end := startsAt
