@@ -289,6 +289,9 @@ func projectStripeInvoiceStatus(obj *billingv1alpha1.Invoice, account *billingv1
 		obj.Status.AmountDue = "0"
 	}
 	obj.Status.ObservedGeneration = obj.Generation
+	if inv.Number != "" {
+		obj.Status.Number = inv.Number
+	}
 
 	obj.Status.DueDate = nil
 	if inv.DueDate != nil {

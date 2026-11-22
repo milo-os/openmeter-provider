@@ -473,6 +473,11 @@ func (r *BillingAccountReconciler) patchInvoiceStatus(
 	if refreshed {
 		obj.Status.DocumentURI = documentURI
 	}
+	// The number printed on the Stripe invoice, which the customer quotes.
+	// Stripe gives it when the invoice is finalized; a draft has none.
+	if number := obj.Annotations[StripeInvoiceNumberAnnotation]; number != "" {
+		obj.Status.Number = number
+	}
 	if err := r.Status().Patch(ctx, obj, client.MergeFrom(statusBase)); err != nil {
 		return fmt.Errorf("patch Invoice status %s/%s: %w", obj.Namespace, obj.Name, err)
 	}
