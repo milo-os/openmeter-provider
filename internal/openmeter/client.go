@@ -264,6 +264,23 @@ type Client interface {
 	// deleted invoices, so a caller can tell "deleted" from "gone", each
 	// with its lines.
 	ListInvoicesIncludingDeleted(ctx context.Context, customerID CustomerID) ([]om.Invoice, error)
+
+	// Charges staff add (see charges.go).
+
+	// CreateChargeLine adds a billing Charge to the customer's gathering
+	// invoice as a pending line.
+	CreateChargeLine(ctx context.Context, customerID CustomerID, line ChargeLine) (ChargeLineRef, error)
+	// FindChargeLine finds the line for the charge with chargeUID on the
+	// customer's gathering invoice or a recent one, or returns nil.
+	FindChargeLine(ctx context.Context, customerID CustomerID, chargeUID string) (*ChargeLineRef, error)
+	// RemoveChargeLine takes a line off the gathering invoice or a draft;
+	// ErrLineInvoiced when it's on an issued invoice.
+	RemoveChargeLine(ctx context.Context, invoiceID, lineID string) error
+	// InvoiceChargeLineNow invoices one pending line now, on its own.
+	InvoiceChargeLineNow(ctx context.Context, customerID CustomerID, lineID string) error
+	// CurrentBillingPeriodEnd is when the customer's live subscription's
+	// current billing period ends; ok is false without one.
+	CurrentBillingPeriodEnd(ctx context.Context, customerKey CustomerKey) (end time.Time, ok bool, err error)
 }
 
 // client is the concrete implementation of Client. Its methods are spread
