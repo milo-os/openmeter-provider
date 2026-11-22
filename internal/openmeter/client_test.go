@@ -132,6 +132,10 @@ type fakeServer struct {
 	// ignoreInvoiceCustomerFilter makes the invoice list ignore the
 	// customers query param, to exercise ListInvoices' own filter.
 	ignoreInvoiceCustomerFilter bool
+
+	// invoiceListExpands records the expand parameter of each invoice list
+	// request, in order.
+	invoiceListExpands [][]string
 	// billingProfileListCalls counts billing profile list requests;
 	// billingProfileListHook, when set, runs before each one is answered
 	// (tests use it to mutate profiles mid-walk).

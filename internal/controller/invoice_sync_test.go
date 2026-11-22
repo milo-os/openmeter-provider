@@ -153,6 +153,76 @@ func TestInvoicePeriod(t *testing.T) {
 	}
 }
 
+func TestInvoicePeriodLeavesOutCharges(t *testing.T) {
+	day := func(m time.Month, d int) time.Time { return time.Date(2026, m, d, 0, 0, 0, 0, time.UTC) }
+	line := func(by om.InvoiceLineManagedBy, from, to time.Time) om.InvoiceLine {
+		return om.InvoiceLine{ManagedBy: by, Period: om.Period{From: from, To: to}}
+	}
+	issued := day(11, 22).Add(16*time.Hour + 30*time.Minute)
+	deleted := day(11, 1)
+	tests := []struct {
+		name               string
+		inv                om.Invoice
+		wantStart, wantEnd time.Time
+	}{
+		{
+			name: "charges for other dates don't stretch the billing period",
+			inv: om.Invoice{
+				// OpenMeter's own period covers every line: October to next January.
+				Period: &om.Period{From: day(10, 1), To: time.Date(2028, 1, 1, 0, 0, 0, 0, time.UTC)},
+				Lines: &[]om.InvoiceLine{
+					line(om.InvoiceLineManagedBySubscription, day(11, 1), day(12, 1)),
+					line(om.InvoiceLineManagedBySubscription, day(12, 1), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)),
+					line(om.InvoiceLineManagedByManual, day(10, 1), day(11, 1)),
+					line(om.InvoiceLineManagedByManual, time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2028, 1, 1, 0, 0, 0, 0, time.UTC)),
+				},
+			},
+			wantStart: day(11, 1),
+			wantEnd:   time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC),
+		},
+		{
+			name: "an invoice with only charges is for the moment it was issued",
+			inv: om.Invoice{
+				Period:    &om.Period{From: time.Date(2027, 1, 10, 0, 0, 0, 0, time.UTC), To: time.Date(2027, 1, 11, 0, 0, 0, 0, time.UTC)},
+				CreatedAt: issued.Add(-time.Minute),
+				IssuedAt:  &issued,
+				Lines:     &[]om.InvoiceLine{line(om.InvoiceLineManagedByManual, time.Date(2027, 1, 10, 0, 0, 0, 0, time.UTC), time.Date(2027, 1, 11, 0, 0, 0, 0, time.UTC))},
+			},
+			wantStart: issued,
+			wantEnd:   issued,
+		},
+		{
+			name: "deleted lines are left out",
+			inv: om.Invoice{
+				Period: &om.Period{From: day(10, 1), To: day(12, 1)},
+				Lines: &[]om.InvoiceLine{
+					line(om.InvoiceLineManagedBySubscription, day(11, 1), day(12, 1)),
+					{ManagedBy: om.InvoiceLineManagedBySubscription, Period: om.Period{From: day(10, 1), To: day(11, 1)}, DeletedAt: &deleted},
+				},
+			},
+			wantStart: day(11, 1),
+			wantEnd:   time.Date(2026, 11, 30, 23, 59, 59, 0, time.UTC),
+		},
+		{
+			name:      "lines not fetched: OpenMeter's period, as before",
+			inv:       om.Invoice{Period: &om.Period{From: day(10, 1), To: day(12, 1)}},
+			wantStart: day(10, 1),
+			wantEnd:   time.Date(2026, 11, 30, 23, 59, 59, 0, time.UTC),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := invoicePeriod(tt.inv)
+			if !got.Start.Time.Equal(tt.wantStart) || !got.End.Time.Equal(tt.wantEnd) {
+				t.Errorf("invoicePeriod() = %s..%s, want %s..%s", got.Start.Time, got.End.Time, tt.wantStart, tt.wantEnd)
+			}
+			if !invoicePeriodStart(tt.inv).Equal(tt.wantStart) {
+				t.Errorf("invoicePeriodStart() = %s, want %s (it names the Invoice)", invoicePeriodStart(tt.inv), tt.wantStart)
+			}
+		})
+	}
+}
+
 func projectedStatus(t *testing.T, inv om.Invoice) billingv1alpha1.InvoiceStatus {
 	t.Helper()
 	obj := &billingv1alpha1.Invoice{}

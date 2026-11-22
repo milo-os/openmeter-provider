@@ -142,6 +142,7 @@ func (f *fakeServer) serveInvoices(w http.ResponseWriter, r *http.Request) bool 
 
 	q := r.URL.Query()
 	includeDeleted := q.Get("includeDeleted") == "true"
+	f.invoiceListExpands = append(f.invoiceListExpands, q["expand"])
 	customers := q["customers"]
 	var items []om.Invoice
 	for owner, invs := range f.invoices {
@@ -369,6 +370,12 @@ func TestListInvoicesIncludingDeleted(t *testing.T) {
 	}
 	if ids := invoiceIDs(all); len(ids) != 2 {
 		t.Errorf("ListInvoicesIncludingDeleted = %v, want both invoices", ids)
+	}
+	// The projection works out billing periods from lines, so only the
+	// listing it uses asks for them.
+	if n := len(f.invoiceListExpands); n != 2 || len(f.invoiceListExpands[0]) != 0 ||
+		len(f.invoiceListExpands[1]) != 1 || f.invoiceListExpands[1][0] != "lines" {
+		t.Errorf("invoice list expands = %v, want none then [lines]", f.invoiceListExpands)
 	}
 	if !IsInvoiceDeleted(deleted) || IsInvoiceDeleted(live[0]) {
 		t.Error("IsInvoiceDeleted misclassified an invoice")

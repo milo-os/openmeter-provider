@@ -169,16 +169,66 @@ func invoiceObjectName(accountName string, start time.Time, id string) string {
 	return prefix + suffix
 }
 
-// invoicePeriodStart is the start of inv's billing period, or its creation
-// time when it has none (an invoice without line items).
-func invoicePeriodStart(inv om.Invoice) time.Time {
+// invoiceBillingPeriod is the billing period inv is for, as OpenMeter's
+// half-open [from, to).
+//
+// OpenMeter widens an invoice's own period to cover every line's service
+// period, so a staff-added charge for last month or next year would
+// stretch it far past the billing period (a weekly invoice once read 1
+// October 2026 to 1 January 2028). So when inv's lines were fetched, the
+// period is the span of the lines OpenMeter manages (its subscription's
+// and its own), leaving out manual lines, which are charges. An invoice
+// with only manual lines on it, such as a charge invoiced on its own, is
+// for the moment it was issued, as an invoice created in Stripe is. Lines
+// keep their own service periods, which are what Stripe reads.
+//
+// When lines weren't fetched, or inv has none, it's inv.Period. ok is false
+// when there's no period at all.
+func invoiceBillingPeriod(inv om.Invoice) (from, to time.Time, ok bool) {
+	if inv.Lines != nil {
+		lines := openmeter.LineItems(inv)
+		found := false
+		for _, line := range lines {
+			if line.ManagedBy == om.InvoiceLineManagedByManual {
+				continue
+			}
+			if !found || line.Period.From.Before(from) {
+				from = line.Period.From
+			}
+			if !found || line.Period.To.After(to) {
+				to = line.Period.To
+			}
+			found = true
+		}
+		if found {
+			return from, to, true
+		}
+		if len(lines) > 0 {
+			at := inv.CreatedAt
+			if inv.IssuedAt != nil {
+				at = *inv.IssuedAt
+			}
+			return at, at, true
+		}
+	}
 	if inv.Period != nil {
-		return inv.Period.From
+		return inv.Period.From, inv.Period.To, true
+	}
+	return time.Time{}, time.Time{}, false
+}
+
+// invoicePeriodStart is the start of inv's billing period (see
+// invoiceBillingPeriod), or its creation time when it has none (an invoice
+// without line items).
+func invoicePeriodStart(inv om.Invoice) time.Time {
+	if from, _, ok := invoiceBillingPeriod(inv); ok {
+		return from
 	}
 	return inv.CreatedAt
 }
 
-// invoicePeriod converts inv's billing period to Milo's InvoicePeriod.
+// invoicePeriod converts inv's billing period (see invoiceBillingPeriod) to
+// Milo's InvoicePeriod.
 //
 // OpenMeter periods are half-open — Period.To is exclusive (the next
 // period starts at exactly that instant) — while Milo's period.end is
@@ -192,8 +242,8 @@ func invoicePeriodStart(inv om.Invoice) time.Time {
 func invoicePeriod(inv om.Invoice) billingv1alpha1.InvoicePeriod {
 	start := invoicePeriodStart(inv).Truncate(time.Second)
 	end := start
-	if inv.Period != nil {
-		if last := inv.Period.To.Add(-time.Nanosecond).Truncate(time.Second); last.After(start) {
+	if _, to, ok := invoiceBillingPeriod(inv); ok {
+		if last := to.Add(-time.Nanosecond).Truncate(time.Second); last.After(start) {
 			end = last
 		}
 	}

@@ -261,7 +261,8 @@ type Client interface {
 	// soft-deleted, whose external key is exactly key.
 	CustomerIDsByKey(ctx context.Context, key CustomerKey) ([]CustomerID, error)
 	// ListInvoicesIncludingDeleted is ListInvoices plus the customer's
-	// deleted invoices, so a caller can tell "deleted" from "gone".
+	// deleted invoices, so a caller can tell "deleted" from "gone", each
+	// with its lines.
 	ListInvoicesIncludingDeleted(ctx context.Context, customerID CustomerID) ([]om.Invoice, error)
 }
 
