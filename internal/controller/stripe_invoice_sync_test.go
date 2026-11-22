@@ -128,7 +128,8 @@ func TestReconcileInvoices_VoidAndReissueInStripe(t *testing.T) {
 	if obj.Status.Phase != billingv1alpha1.InvoicePhaseOpen || obj.Status.Total != "1800.00" ||
 		obj.Status.AmountDue != "1800.00" || obj.Status.AmountPaid != "0.00" ||
 		obj.Status.DueDate == nil || !obj.Status.DueDate.Time.Equal(due) ||
-		obj.Status.DocumentURI != "https://invoice.stripe.com/i/in_replacement" {
+		obj.Status.DocumentURI != "https://invoice.stripe.com/i/in_replacement" ||
+		obj.Status.Number != "ACME-replacement" {
 		t.Errorf("replacement status = %+v", obj.Status)
 	}
 	if !obj.Spec.Period.Start.Time.Equal(replacement.Created) || !obj.Spec.Period.End.Time.Equal(replacement.Created) {
@@ -171,6 +172,9 @@ func TestReconcileInvoices_StripeAmountsForOpenMetersInvoice(t *testing.T) {
 	}
 	if obj.Annotations[StripeInvoiceKeyAnnotation] != "in_om" || obj.Annotations[StripeInvoiceNumberAnnotation] != "ACME-om" {
 		t.Errorf("annotations = %v, want the Stripe invoice's id and number", obj.Annotations)
+	}
+	if obj.Status.Number != "ACME-om" {
+		t.Errorf("number = %q, want the Stripe invoice's", obj.Status.Number)
 	}
 	if md := fake.metadata["in_om"]; md[StripeMetadataMiloInvoice] != obj.Name || len(fake.metadata) != 1 {
 		t.Errorf("metadata written = %v, want milo_invoice %s on in_om once", fake.metadata, obj.Name)
