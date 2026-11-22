@@ -89,6 +89,10 @@ func (c *client) listInvoices(ctx context.Context, customerID CustomerID, includ
 		}
 		if includeDeleted {
 			params.IncludeDeleted = ptr(true)
+			// The invoice projection works out each invoice's billing
+			// period from its lines (manual lines, which are charges staff
+			// add, don't stretch it), so it needs them.
+			params.Expand = &om.InvoiceListParamsExpand{om.InvoiceExpandLines}
 		}
 
 		resp, err := c.api.ListInvoicesWithResponse(ctx, params)
