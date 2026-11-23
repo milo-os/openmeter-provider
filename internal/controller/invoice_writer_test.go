@@ -472,3 +472,30 @@ func TestInvoiceWriter_RechecksTotalsBeforeFinalizing(t *testing.T) {
 		t.Errorf("held invoices gauge = %v, want 0", got)
 	}
 }
+
+func TestInvoiceWriter_UsesAOneTimeFeesSupplyDate(t *testing.T) {
+	h := newWriterHarness(t)
+	var account billingv1alpha1.BillingAccount
+	_ = h.k8s.Get(context.Background(), client.ObjectKeyFromObject(h.acc), &account)
+	account.Status.Contract = &billingv1alpha1.BillingAccountContract{Fees: []billingv1alpha1.BillingAccountContractFee{
+		{Name: "rack-v1", ChargeType: billingv1alpha1.ChargeTypeOneTime, ServicePeriod: &billingv1alpha1.ServicePeriod{Start: "2027-01-10", End: "2027-01-10"}},
+	}}
+	if err := h.k8s.Status().Update(context.Background(), &account); err != nil {
+		t.Fatal(err)
+	}
+	h.omc.invoices = []om.Invoice{writerInvoice(openmeter.InvoiceExtendedStatusDraftSyncing)}
+	h.run(t)
+
+	for _, l := range h.stripeInvoice(t).Spec.Lines {
+		if l.ServicePricingRef.Name != "rack-v1" {
+			if !l.Period.Start.Time.Equal(writerPeriod.From) {
+				t.Errorf("%s period moved: %v", l.Key, l.Period.Start)
+			}
+			continue
+		}
+		if !l.Period.Start.Time.Equal(time.Date(2027, 1, 10, 0, 0, 0, 0, time.UTC)) ||
+			!l.Period.End.Time.Equal(time.Date(2027, 1, 10, 23, 59, 59, 0, time.UTC)) {
+			t.Errorf("%s period = %v to %v, want the supply date, 10 January", l.Key, l.Period.Start, l.Period.End)
+		}
+	}
+}

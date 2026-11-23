@@ -364,6 +364,14 @@ func firstInvoiceCharges(offer *billingv1alpha1.Offer, startsAt time.Time, invoi
 		if period != nil {
 			c.end = period.End.Time
 		}
+		// A one-time fee's supply date, when the contract gives one, is its
+		// line's period, as on the invoice the writer writes.
+		if sp.Spec.ChargeType == billingv1alpha1.ChargeTypeOneTime && sp.ServicePeriod != nil {
+			if supply, ok := supplyPeriod(*sp.ServicePeriod); ok {
+				c.start, c.end = supply.Start.Time, supply.End.Time
+				period = &billingv1alpha1.InvoicePeriod{Start: supply.Start, End: supply.End}
+			}
+		}
 		if part < whole {
 			if charged, err = openmeter.ProrateAmount(charged, part, whole); err != nil {
 				return nil, "", fmt.Errorf("service pricing %q: %w", sp.Name, err)
