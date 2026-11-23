@@ -10,6 +10,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -146,9 +147,14 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("--stripe-api-key-file: %w", err)
 				}
+				invoiceWriter, err := newInvoiceWriter(serverConfig.InvoiceWriter)
+				if err != nil {
+					return err
+				}
 				if err = (&controller.BillingAccountReconciler{
 					OpenMeterClient: openMeterClient,
 					Stripe:          stripeInvoices,
+					InvoiceWriter:   invoiceWriter,
 				}).SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("creating BillingAccount controller: %w", err)
 				}
@@ -213,4 +219,22 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 	cmd.Flags().AddGoFlagSet(zapFlags)
 
 	return cmd
+}
+
+// newInvoiceWriter is the invoice writer cfg configures, or nil when it's
+// off.
+func newInvoiceWriter(cfg *config.InvoiceWriterConfig) (*controller.InvoiceWriter, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	w := &controller.InvoiceWriter{AppName: cfg.App(), CustomChargePricing: cfg.CustomChargePricing}
+	if cfg.AccountSelector != nil {
+		selector, err := metav1.LabelSelectorAsSelector(cfg.AccountSelector)
+		if err != nil {
+			return nil, fmt.Errorf("invoiceWriter.accountSelector: %w", err)
+		}
+		w.Selector = selector
+	}
+	ctrl.Log.WithName("setup").Info("invoice writer on", "app", w.AppName, "accounts", cfg.AccountSelector)
+	return w, nil
 }

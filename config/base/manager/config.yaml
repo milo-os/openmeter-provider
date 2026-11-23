@@ -12,3 +12,13 @@ openMeter:
 # kubeconfigPath points at the Milo control plane API server.
 # Leave empty to use in-cluster config (default when deployed alongside the API server).
 # kubeconfigPath: /etc/milo/kubeconfig
+# invoiceWriter moves accounts' invoices off OpenMeter's Stripe app and onto
+# stripe-provider's invoice writer (see docs/invoice-writer.md). Unset, every
+# account stays on the default billing profile's apps.
+# invoiceWriter:
+#   # Unset: every account.
+#   accountSelector:
+#     matchLabels:
+#       billing.miloapis.com/invoice-writer: "true"
+#   # The ServicePricing a charge staff add without a catalog item is billed under.
+#   customChargePricing: custom-charge

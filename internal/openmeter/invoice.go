@@ -72,6 +72,20 @@ func (c *client) ListInvoicesIncludingDeleted(ctx context.Context, customerID Cu
 }
 
 func (c *client) listInvoices(ctx context.Context, customerID CustomerID, includeDeleted bool) ([]om.Invoice, error) {
+	return c.listInvoicesWith(ctx, customerID, func(params *om.ListInvoicesParams) {
+		if includeDeleted {
+			params.IncludeDeleted = ptr(true)
+			// The invoice projection works out each invoice's billing
+			// period from its lines (manual lines, which are charges staff
+			// add, don't stretch it), so it needs them.
+			params.Expand = &om.InvoiceListParamsExpand{om.InvoiceExpandLines}
+		}
+	})
+}
+
+// listInvoicesWith lists the customer's invoices, newest first, with
+// filter setting any further query parameters.
+func (c *client) listInvoicesWith(ctx context.Context, customerID CustomerID, filter func(*om.ListInvoicesParams)) ([]om.Invoice, error) {
 	if customerID == "" {
 		return nil, &PermanentError{Err: errors.New("customerID is required")}
 	}
@@ -87,13 +101,7 @@ func (c *client) listInvoices(ctx context.Context, customerID CustomerID, includ
 			Order:     ptr(om.SortOrderDESC),
 			OrderBy:   ptr(om.InvoiceOrderByCreatedAt),
 		}
-		if includeDeleted {
-			params.IncludeDeleted = ptr(true)
-			// The invoice projection works out each invoice's billing
-			// period from its lines (manual lines, which are charges staff
-			// add, don't stretch it), so it needs them.
-			params.Expand = &om.InvoiceListParamsExpand{om.InvoiceExpandLines}
-		}
+		filter(params)
 
 		resp, err := c.api.ListInvoicesWithResponse(ctx, params)
 		if err != nil {

@@ -298,6 +298,10 @@ type BillingAccountReconciler struct {
 	// reconcileStripeInvoices).
 	Stripe StripeInvoices
 
+	// InvoiceWriter, when set, has the accounts it covers invoiced through
+	// stripe-provider's invoice writer (see invoice_writer.go).
+	InvoiceWriter *InvoiceWriter
+
 	// Recorder emits Kubernetes events onto reconciled BillingAccounts.
 	Recorder record.EventRecorder
 
@@ -322,6 +326,8 @@ type BillingAccountReconciler struct {
 
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts/finalizers,verbs=update
+// +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeinvoices,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoices,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=paymentmethods,verbs=get;list;watch
@@ -420,13 +426,27 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	// several.
 	var syncErrs []error
 
-	if err := r.reconcileBillingProfile(ctx, &account, customerKey, customerID); err != nil {
-		syncErrs = append(syncErrs, fmt.Errorf("reconcile billing profile: %w", err))
-	}
-
-	stripeState, err := r.reconcileStripeAppData(ctx, logger, &account, customerID)
+	// The invoice writer's app is resolved first: without it, the profile
+	// sync would move a covered account back to the default profile's apps.
+	invoiceWriterWaiting := false
+	writerApp, err := r.invoiceWriterApp(ctx, &account)
 	if err != nil {
 		syncErrs = append(syncErrs, err)
+	} else if err := r.reconcileBillingProfile(ctx, &account, customerKey, customerID, writerApp); err != nil {
+		syncErrs = append(syncErrs, fmt.Errorf("reconcile billing profile: %w", err))
+	} else if invoiceWriterWaiting, err = r.reconcileInvoiceWriter(ctx, &account, customerID, writerApp); err != nil {
+		syncErrs = append(syncErrs, fmt.Errorf("invoice writer: %w", err))
+	}
+
+	// OpenMeter's Stripe app needs the account's Stripe customer; an
+	// account on the invoice writer doesn't use that app, and
+	// stripe-provider has the customer.
+	stripeState := "invoice-writer"
+	if writerApp == "" {
+		stripeState, err = r.reconcileStripeAppData(ctx, logger, &account, customerID)
+		if err != nil {
+			syncErrs = append(syncErrs, err)
+		}
 	}
 
 	if err := r.reconcileInvoices(ctx, &account, customerID); err != nil {
@@ -463,7 +483,11 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	} else {
 		logger.V(1).Info("billing account already in sync")
 	}
-	return ctrl.Result{RequeueAfter: r.syncedRequeue(ctx, &account)}, nil
+	requeue := r.syncedRequeue(ctx, &account)
+	if invoiceWriterWaiting && invoiceWriterRequeue < requeue {
+		requeue = invoiceWriterRequeue
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
 }
 
 // syncedRequeue is when a synced account is reconciled again:
@@ -686,6 +710,11 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&billingv1alpha1.BillingEntitlement{},
 			handler.EnqueueRequestsFromMapFunc(mapEntitlementToAccount),
 			builder.WithPredicates(subscriptionChangedPredicate()),
+		).
+		// stripe-provider writing, finalizing or being paid for an invoice
+		// moves its OpenMeter invoice on (see invoice_writer.go).
+		Watches(&stripev1alpha1.StripeInvoice{},
+			handler.EnqueueRequestsFromMapFunc(mapStripeInvoiceToAccount),
 		).
 		Complete(r)
 }

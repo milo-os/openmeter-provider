@@ -33,6 +33,15 @@ type DesiredBillingProfile struct {
 	// Name is a human-readable, not-necessarily-unique label. It is not
 	// used to look up the profile — AccountKey is.
 	Name string
+	// AppID, when set, is the app the profile uses for invoicing, payment
+	// and tax, in place of the default profile's (OpenMeter requires the
+	// three to be one app). It's the Custom Invoicing app for an account on
+	// the invoice writer. OpenMeter can't change a profile's apps, so a
+	// profile for AppID is a profile of its own, tagged with
+	// billingProfileInvoicingAppMetadataKey: the account's earlier profile
+	// is left alone, since its invoices still reference it, and is the one
+	// used again if the account is moved back (AppID empty).
+	AppID string
 	// NetDays is the number of days after invoice issuance that payment is
 	// due, mapped onto Workflow.Invoicing.DueAfter as an ISO8601 duration
 	// ("P<NetDays>D").
@@ -117,6 +126,20 @@ var ErrBillingProfileNotFound = errors.New("openmeter: billing profile not found
 // is what proves a profile belongs to an account.
 const billingProfileAccountKeyMetadataKey = "billingAccountKey"
 
+// billingProfileInvoicingAppMetadataKey tags a per-account profile made
+// for DesiredBillingProfile.AppID with that app's id. A profile without it
+// uses the default profile's apps.
+const billingProfileInvoicingAppMetadataKey = "invoicingApp"
+
+// profileInvoicingApp is the app p was made for (see
+// billingProfileInvoicingAppMetadataKey), or "" for the default's apps.
+func profileInvoicingApp(p om.BillingProfile) string {
+	if p.Metadata == nil {
+		return ""
+	}
+	return (*p.Metadata)[billingProfileInvoicingAppMetadataKey]
+}
+
 // BillingProfileOwnershipMismatch returns a non-empty reason when p must
 // not be treated as accountKey's private profile: it is the org default
 // profile (which every customer falls back to and must never be modified
@@ -191,14 +214,16 @@ func (c *client) EnsureBillingProfile(ctx context.Context, existingID string, de
 			if reason := BillingProfileOwnershipMismatch(existing, desired.AccountKey); reason != "" {
 				result.IgnoredExistingID = existingID
 				result.IgnoredExistingReason = reason
-			} else {
+			} else if profileInvoicingApp(existing) == desired.AppID {
 				current = &existing
 			}
+			// Otherwise the account is moving between apps: its profile for
+			// the new app is found or made below.
 		}
 	}
 
 	if current == nil {
-		found, err := c.findBillingProfileByAccountKey(ctx, desired.AccountKey)
+		found, err := c.findBillingProfileByAccountKey(ctx, desired.AccountKey, desired.AppID)
 		if err != nil {
 			return result, err
 		}
@@ -214,7 +239,9 @@ func (c *client) EnsureBillingProfile(ctx context.Context, existingID string, de
 		return result, nil
 	}
 
-	result.AppsDrift = billingProfileAppsDrift(*current, def)
+	if desired.AppID == "" {
+		result.AppsDrift = billingProfileAppsDrift(*current, def)
+	}
 	if !billingProfileNeedsUpdate(*current, def, desired) {
 		result.Profile = *current
 		return result, nil
@@ -316,10 +343,15 @@ func isAccountProfile(accountKey CustomerKey) func(om.BillingProfile) bool {
 }
 
 // findBillingProfileByAccountKey returns the oldest live billing profile
-// tagged with accountKey in Metadata[billingProfileAccountKeyMetadataKey],
-// or (nil, nil) when none matches. The default profile never matches.
-func (c *client) findBillingProfileByAccountKey(ctx context.Context, accountKey CustomerKey) (*om.BillingProfile, error) {
-	found, err := c.listBillingProfiles(ctx, true, isAccountProfile(accountKey))
+// tagged with accountKey in Metadata[billingProfileAccountKeyMetadataKey]
+// and made for appID (see billingProfileInvoicingAppMetadataKey; "" is the
+// default profile's apps), or (nil, nil) when none matches. The default
+// profile never matches.
+func (c *client) findBillingProfileByAccountKey(ctx context.Context, accountKey CustomerKey, appID string) (*om.BillingProfile, error) {
+	isAccount := isAccountProfile(accountKey)
+	found, err := c.listBillingProfiles(ctx, true, func(p om.BillingProfile) bool {
+		return isAccount(p) && profileInvoicingApp(p) == appID
+	})
 	if err != nil || len(found) == 0 {
 		return nil, err
 	}
@@ -555,14 +587,19 @@ func (c *client) createBillingProfile(ctx context.Context, def om.BillingProfile
 		Metadata: &om.Metadata{billingProfileAccountKeyMetadataKey: string(desired.AccountKey)},
 		Workflow: om.BillingWorkflowCreate(workflow),
 	}
-	apps, err := def.Apps.AsBillingProfileAppReferences()
-	if err != nil {
-		return om.BillingProfile{}, &PermanentError{Err: fmt.Errorf("default billing profile %q: apps not expanded to references: %w", def.Id, err)}
-	}
-	body.Apps = om.BillingProfileAppsCreate{
-		Invoicing: apps.Invoicing.Id,
-		Payment:   apps.Payment.Id,
-		Tax:       apps.Tax.Id,
+	if desired.AppID != "" {
+		(*body.Metadata)[billingProfileInvoicingAppMetadataKey] = desired.AppID
+		body.Apps = om.BillingProfileAppsCreate{Invoicing: desired.AppID, Payment: desired.AppID, Tax: desired.AppID}
+	} else {
+		apps, err := def.Apps.AsBillingProfileAppReferences()
+		if err != nil {
+			return om.BillingProfile{}, &PermanentError{Err: fmt.Errorf("default billing profile %q: apps not expanded to references: %w", def.Id, err)}
+		}
+		body.Apps = om.BillingProfileAppsCreate{
+			Invoicing: apps.Invoicing.Id,
+			Payment:   apps.Payment.Id,
+			Tax:       apps.Tax.Id,
+		}
 	}
 
 	resp, err := c.api.CreateBillingProfileWithResponse(ctx, body)

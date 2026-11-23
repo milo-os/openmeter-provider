@@ -779,7 +779,7 @@ func TestFindBillingProfileByAccountKey_WalksBeyondFirstPage(t *testing.T) {
 		CreatedAt: fakeProfileEpoch.Add(time.Hour),
 	}
 
-	found, err := c.(*client).findBillingProfileByAccountKey(context.Background(), "account-on-page-2")
+	found, err := c.(*client).findBillingProfileByAccountKey(context.Background(), "account-on-page-2", "")
 	if err != nil {
 		t.Fatalf("findBillingProfileByAccountKey: %v", err)
 	}

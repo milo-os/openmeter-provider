@@ -105,6 +105,14 @@ type Client interface {
 	// yet paid, voided, or uncollectible.
 	PrepareInvoicesForCustomerDeletion(ctx context.Context, customerID CustomerID) error
 
+	// Custom Invoicing, for the invoice writer (see custominvoicing.go).
+	EnsureCustomInvoicingApp(ctx context.Context, name string) (string, error)
+	ListInvoicesAwaitingSync(ctx context.Context, customerID CustomerID) ([]om.Invoice, error)
+	DraftSynchronized(ctx context.Context, invoiceID, externalID string, lines []LineExternalID) error
+	IssuingSynchronized(ctx context.Context, invoiceID, number, paymentID string, sentAt *time.Time) error
+	UpdatePaymentStatus(ctx context.Context, invoiceID string, trigger PaymentTrigger) error
+	DeleteInvoice(ctx context.Context, invoiceID string) error
+
 	// Fixed charges (see fixedcharges.go): previews of a customer's flat
 	// fees, for InvoiceRequests.
 

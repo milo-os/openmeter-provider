@@ -461,7 +461,7 @@ func TestReconcileBillingProfile_WarnsAndReannotatesOnRefusedProfile(t *testing.
 	if err := k8s.Get(context.Background(), types.NamespacedName{Name: account.Name, Namespace: account.Namespace}, &stored); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if err := r.reconcileBillingProfile(context.Background(), &stored, testAccountKey, testCustomerID); err != nil {
+	if err := r.reconcileBillingProfile(context.Background(), &stored, testAccountKey, testCustomerID, ""); err != nil {
 		t.Fatalf("reconcileBillingProfile: %v", err)
 	}
 

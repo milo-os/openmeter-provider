@@ -169,4 +169,4 @@ require (
 
 // go.miloapis.com/stripe-provider is not yet published to the Go module
 // proxy — mirrors the same replace amberflo-provider uses.
-replace go.miloapis.com/stripe-provider => github.com/milo-os/stripe-provider v0.1.16-0.20261119212902-23a71d8d8343
+replace go.miloapis.com/stripe-provider => github.com/milo-os/stripe-provider v0.2.2-0.20261123102824-7e00d8a69c91

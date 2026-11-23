@@ -218,8 +218,8 @@ github.com/lithammer/shortuuid/v3 v3.0.7 h1:trX0KTHy4Pbwo/6ia8fscyHoGA+mf1jWbPJV
 github.com/lithammer/shortuuid/v3 v3.0.7/go.mod h1:vMk8ke37EmiewwolSO1NLW8vP4ZaKlRuDIi8tWWmAts=
 github.com/magefile/mage v1.17.2 h1:fyXVu1eadI8Ap1HCCNgEhJ5McIWiYhLR8uol64ZZc40=
 github.com/magefile/mage v1.17.2/go.mod h1:Yj51kqllmsgFpvvSzgrZPK9WtluG3kUhFaBUVLo4feA=
-github.com/milo-os/stripe-provider v0.1.16-0.20261119212902-23a71d8d8343 h1:FNAj9E0eEVm5V/MO8oD//XrcC3MyuPeWo2b38KTVoEU=
-github.com/milo-os/stripe-provider v0.1.16-0.20261119212902-23a71d8d8343/go.mod h1:EUWQ4mn7R0QlPZBYM9DN2S0YwWOeLhUsObC3T1EEAh4=
+github.com/milo-os/stripe-provider v0.2.2-0.20261123102824-7e00d8a69c91 h1:hDjQClo/VoEOATkd3Weo/+hM+9PDWryFmPsp0bE1j4s=
+github.com/milo-os/stripe-provider v0.2.2-0.20261123102824-7e00d8a69c91/go.mod h1:qqyxfjxp5kIxAnyRURvQJWgP7UFyYHkS206BAZDGAZ0=
 github.com/mitchellh/go-wordwrap v1.0.1 h1:TLuKupo69TCn6TQSyGxwI1EblZZEsQ0vMlAFQflz0v0=
 github.com/mitchellh/go-wordwrap v1.0.1/go.mod h1:R62XHJLzvMFRBbcrT7m7WgmE1eOyTSsCt+hzestvNj0=
 github.com/modern-go/concurrent v0.0.0-20180228061459-e0a39a4cb421/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=

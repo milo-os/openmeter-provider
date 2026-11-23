@@ -66,6 +66,46 @@ type OpenMeterProviderOperator struct {
 	// Nats configures the NATS JetStream connection for the submission
 	// consumer. Only read by the submission-consumer binary.
 	Nats NATSConfig `json:"nats"`
+
+	// InvoiceWriter moves billing accounts' invoices off OpenMeter's own
+	// Stripe app and onto stripe-provider's invoice writer. When set, the
+	// provider installs OpenMeter's Custom Invoicing app, gives each chosen
+	// account a billing profile on it, and writes each of their OpenMeter
+	// invoices to Stripe as a StripeInvoice. Unset, every account stays on
+	// the default profile's apps. Needs openMeter and stripe-provider.
+	InvoiceWriter *InvoiceWriterConfig `json:"invoiceWriter,omitempty"`
+}
+
+// +k8s:deepcopy-gen=true
+
+// InvoiceWriterConfig chooses the accounts on the invoice writer.
+type InvoiceWriterConfig struct {
+	// AccountSelector picks the BillingAccounts whose invoices the writer
+	// writes, by label. Unset, it's every account. An account that stops
+	// matching goes back to the default profile's apps for invoices cut
+	// from then on.
+	AccountSelector *metav1.LabelSelector `json:"accountSelector,omitempty"`
+
+	// AppName is the name of the Custom Invoicing app the provider installs
+	// in OpenMeter, and finds it by. Defaults to "Datum invoice writer".
+	AppName string `json:"appName,omitempty"`
+
+	// CustomChargePricing names the ServicePricing, in milo-system, that a
+	// charge staff add without a catalog item is invoiced under. Its
+	// Product is the one Stripe reports such charges against. Unset, those
+	// charges' invoices wait.
+	CustomChargePricing string `json:"customChargePricing,omitempty"`
+}
+
+// DefaultInvoiceWriterAppName is InvoiceWriterConfig.AppName's default.
+const DefaultInvoiceWriterAppName = "Datum invoice writer"
+
+// App is the Custom Invoicing app's name.
+func (c *InvoiceWriterConfig) App() string {
+	if c.AppName == "" {
+		return DefaultInvoiceWriterAppName
+	}
+	return c.AppName
 }
 
 // OpenMeterConfig configures the connection to the OpenMeter API.
