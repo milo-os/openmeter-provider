@@ -145,6 +145,7 @@ func (r *BillingAccountReconciler) reconcileInvoiceWriter(
 		return false, err
 	}
 	if appID == "" {
+		forgetInvoiceWriterMetrics(account.Namespace, account.Name)
 		return false, nil
 	}
 
@@ -154,22 +155,41 @@ func (r *BillingAccountReconciler) reconcileInvoiceWriter(
 	}
 	var errs []error
 	waiting := false
+	heldCount, stuckCount := 0, 0
 	for _, inv := range invoices {
 		if openmeter.InvoiceInvoicingApp(inv) != appID {
 			// Cut while the account was on another profile.
 			continue
 		}
 		waiting = true
-		if err := r.syncInvoiceToWriter(ctx, account, inv); err != nil {
+		var h heldError
+		switch err := r.syncInvoiceToWriter(ctx, account, inv); {
+		case errors.As(err, &h):
+			heldCount++
+			r.holdInvoice(account, inv, h.reason)
+		case err != nil:
 			errs = append(errs, fmt.Errorf("invoice %s: %w", inv.Id, err))
 		}
-		r.warnIfStuck(account, inv)
+		if r.warnIfStuck(account, inv) {
+			stuckCount++
+		}
 	}
 	if err := r.reportPayments(ctx, account); err != nil {
 		errs = append(errs, err)
 	}
+	// Events expire and are sent once: the gauges stay, to alert on.
+	invoiceWriterHeldInvoices.WithLabelValues(account.Namespace, account.Name).Set(float64(heldCount))
+	invoiceWriterStuckInvoices.WithLabelValues(account.Namespace, account.Name).Set(float64(stuckCount))
 	return waiting, errors.Join(errs...)
 }
+
+// heldError is an invoice the writer won't move on until someone looks at
+// it; reason says why.
+type heldError struct{ reason string }
+
+func (e heldError) Error() string { return "held: " + e.reason }
+
+func heldInvoice(reason string) error { return heldError{reason: reason} }
 
 // setInvoiceWriterReady sets the account's InvoiceWriterReady condition:
 // True once its invoices are written by the writer, False if it was and
@@ -210,8 +230,7 @@ func (r *BillingAccountReconciler) syncInvoiceToWriter(ctx context.Context, acco
 		return err
 	}
 	if held != "" {
-		r.holdInvoice(account, inv, held)
-		return nil
+		return heldInvoice(held)
 	}
 
 	key := types.NamespacedName{Namespace: account.Namespace, Name: stripeInvoiceNameFor(inv.Id)}
@@ -239,13 +258,11 @@ func (r *BillingAccountReconciler) syncInvoiceToWriter(ctx context.Context, acco
 	// UTC, which reflect.DeepEqual would count as a change every pass.
 	if !equality.Semantic.DeepEqual(si.Spec.Lines, lines) {
 		if si.Spec.Finalize {
-			r.holdInvoice(account, inv, fmt.Sprintf(
+			return heldInvoice(fmt.Sprintf(
 				"its lines changed in OpenMeter after StripeInvoice %s was marked to finalize; Stripe keeps the lines it was written with", si.Name))
-			return nil
 		}
 		if len(lines) == 0 {
-			r.holdInvoice(account, inv, "it has nothing left to bill, but its Stripe draft was already written")
-			return nil
+			return heldInvoice("it has nothing left to bill, but its Stripe draft was already written")
 		}
 		base := si.DeepCopy()
 		si.Spec.Lines = lines
@@ -272,8 +289,7 @@ func (r *BillingAccountReconciler) draftSynchronized(ctx context.Context, accoun
 		return nil
 	}
 	if msg := totalsDiffer(inv, si); msg != "" {
-		r.holdInvoice(account, inv, msg)
-		return nil
+		return heldInvoice(msg)
 	}
 	mapping := make([]openmeter.LineExternalID, 0, len(si.Status.Lines))
 	for _, l := range si.Status.Lines {
@@ -296,6 +312,12 @@ func (r *BillingAccountReconciler) issuingSynchronized(ctx context.Context, acco
 	if !si.Spec.Finalize {
 		if !stripeInvoiceSynced(si) {
 			return nil
+		}
+		// Checked again: the lines may have changed since the draft step,
+		// with late usage for instance, and a difference finalized now is
+		// charged.
+		if msg := totalsDiffer(inv, si); msg != "" {
+			return heldInvoice(msg)
 		}
 		base := si.DeepCopy()
 		si.Spec.Finalize = true
@@ -355,8 +377,7 @@ func orZero(s string) string {
 // needs at least one line, and nothing is owed.
 func (r *BillingAccountReconciler) deleteEmptyInvoice(ctx context.Context, account *billingv1alpha1.BillingAccount, inv om.Invoice) error {
 	if inv.StatusDetails.ExtendedStatus != openmeter.InvoiceExtendedStatusDraftSyncing {
-		r.holdInvoice(account, inv, "it has nothing to bill and is already being issued")
-		return nil
+		return heldInvoice("it has nothing to bill and is already being issued")
 	}
 	if err := r.OpenMeterClient.DeleteInvoice(ctx, inv.Id); err != nil {
 		return fmt.Errorf("delete empty invoice: %w", err)
@@ -406,15 +427,17 @@ func (r *BillingAccountReconciler) holdInvoice(account *billingv1alpha1.BillingA
 }
 
 // warnIfStuck warns, once, about an invoice that has waited on a hook for
-// longer than invoiceWriterStuckAfter.
-func (r *BillingAccountReconciler) warnIfStuck(account *billingv1alpha1.BillingAccount, inv om.Invoice) {
-	if since := r.now().Sub(inv.UpdatedAt); since > invoiceWriterStuckAfter {
+// longer than invoiceWriterStuckAfter, and reports whether it has.
+func (r *BillingAccountReconciler) warnIfStuck(account *billingv1alpha1.BillingAccount, inv om.Invoice) bool {
+	since := r.now().Sub(inv.UpdatedAt)
+	if since > invoiceWriterStuckAfter {
 		key := noticePrefix(client.ObjectKeyFromObject(account)) + "InvoiceWriterStuck/" + inv.Id
 		if r.notices.changed(key, inv.StatusDetails.ExtendedStatus) {
 			r.event(account, "Warning", EventReasonInvoiceWriterHeld,
 				"OpenMeter invoice %s has been in %s since %s", inv.Id, inv.StatusDetails.ExtendedStatus, inv.UpdatedAt.UTC().Format(time.RFC3339))
 		}
 	}
+	return since > invoiceWriterStuckAfter
 }
 
 func (r *BillingAccountReconciler) event(account *billingv1alpha1.BillingAccount, kind, reason, format string, args ...any) {

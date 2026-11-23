@@ -343,6 +343,7 @@ func (r *BillingAccountReconciler) Reconcile(ctx context.Context, req reconcile.
 	if err := r.Get(ctx, req.NamespacedName, &account); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.notices.forgetPrefix(noticePrefix(req.NamespacedName))
+			forgetInvoiceWriterMetrics(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "failed to get BillingAccount")

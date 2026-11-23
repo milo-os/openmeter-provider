@@ -11,6 +11,7 @@ import (
 
 	om "github.com/openmeterio/openmeter/api/client/go"
 	"github.com/openmeterio/openmeter/pkg/models"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/shopspring/decimal"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -436,5 +437,38 @@ func TestDiscountPercent_FromTheDetailedLine(t *testing.T) {
 	_ = json.Unmarshal([]byte(`{"discounts": {"amount": [{"amount": "5", "reason": {"type": "maximum_spend"}}]}}`), &spend)
 	if _, ok := discountPercent(spend, om.InvoiceLine{}); ok {
 		t.Error("a maximum-spend discount isn't a percentage Stripe can take")
+	}
+}
+
+func TestInvoiceWriter_RechecksTotalsBeforeFinalizing(t *testing.T) {
+	h := newWriterHarness(t)
+	h.omc.invoices = []om.Invoice{writerInvoice(openmeter.InvoiceExtendedStatusDraftSyncing)}
+	h.run(t)
+	h.stripeProviderSyncs(t, "430.00", "33.00")
+	h.run(t)
+	if len(h.omc.draft) != 1 {
+		t.Fatal("draft not synchronized")
+	}
+
+	// By issuing, OpenMeter's total has moved and Stripe's hasn't.
+	inv := writerInvoice(openmeter.InvoiceExtendedStatusIssuingSyncing)
+	inv.Totals.Amount = "440"
+	h.omc.invoices = []om.Invoice{inv}
+	h.run(t)
+	if h.stripeInvoice(t).Spec.Finalize {
+		t.Fatal("finalized although Stripe's total no longer matches OpenMeter's")
+	}
+	if got := testutil.ToFloat64(invoiceWriterHeldInvoices.WithLabelValues("org-a", "acme")); got != 1 {
+		t.Errorf("held invoices gauge = %v, want 1", got)
+	}
+
+	// Put right: finalized, and the gauge clears.
+	h.omc.invoices = []om.Invoice{writerInvoice(openmeter.InvoiceExtendedStatusIssuingSyncing)}
+	h.run(t)
+	if !h.stripeInvoice(t).Spec.Finalize {
+		t.Fatal("not finalized once the totals match")
+	}
+	if got := testutil.ToFloat64(invoiceWriterHeldInvoices.WithLabelValues("org-a", "acme")); got != 0 {
+		t.Errorf("held invoices gauge = %v, want 0", got)
 	}
 }

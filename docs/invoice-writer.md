@@ -70,7 +70,7 @@ whenever stripe-provider updates one of the account's `StripeInvoice`s.
 |---|---|---|
 | `draft.syncing` | Builds the lines and creates `StripeInvoice` `openmeter-<invoice id>` with `purpose: Invoice` and `source: {system: OpenMeter, invoiceId}`. | Writes the Stripe draft, then reports `Synced`. |
 | | Once `Synced` is True for the current lines, and Stripe's total before tax agrees with OpenMeter's, calls `draft/synchronized` with the Stripe invoice id and each line's invoice item id. | |
-| `issuing.syncing` | Sets `spec.finalize`. | Finalizes the Stripe invoice. Stripe charges the card or sends the invoice. |
+| `issuing.syncing` | Compares the totals again, since late usage can change the lines after the draft step, then sets `spec.finalize`. | Finalizes the Stripe invoice. Stripe charges the card or sends the invoice. |
 | | Once `Finalized` is True, calls `issuing/synchronized` with Stripe's invoice number. | |
 | `payment_processing` and on | Passes payment changes on (see [Payment](#payment)). | Reads the invoice's state from Stripe. |
 
@@ -139,6 +139,14 @@ again only if the reason changes. Causes:
 - Stripe's total differing from OpenMeter's;
 - more than 250 lines;
 - lines changed after the invoice was marked to finalize.
+
+Events expire, so each account also has two gauges to alert on, set on
+every reconcile:
+- `openmeter_provider_invoice_writer_held_invoices`: invoices held now;
+- `openmeter_provider_invoice_writer_stuck_invoices`: invoices that have
+  waited on a hook for more than an hour.
+
+Both are labelled `resource_namespace` and `resource_name`, the account's.
 
 Nothing in OpenMeter times out a hook. An invoice in `draft.syncing` can
 only be deleted, and one in `issuing.syncing` can't be voided or deleted.
