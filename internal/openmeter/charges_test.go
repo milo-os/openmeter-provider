@@ -160,6 +160,14 @@ func contains(list []string, v string) bool {
 	return false
 }
 
+func keys(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 func newChargeTestClient(t *testing.T) (Client, *chargeServer) {
 	t.Helper()
 	s := newChargeServer()
@@ -283,6 +291,58 @@ func TestRemoveChargeLine(t *testing.T) {
 		// Removing it again is a no-op.
 		if err := c.RemoveChargeLine(ctx, ref.InvoiceID, ref.LineID); err != nil {
 			t.Fatal(err)
+		}
+	})
+
+	// OpenMeter only marks a line it is sent back as hand-managed when one of
+	// its fields differs from what it holds (billing's diffInvoiceLine), so
+	// every other line has to go back exactly as it was read for subscription
+	// sync to keep owning it.
+	t.Run("sends every other line back unchanged", func(t *testing.T) {
+		c, s := newChargeTestClient(t)
+		raw := `{
+			"id": "usage-line", "name": "Egress", "description": "Data out",
+			"featureKey": "egress",
+			"invoiceAt": "2027-01-01T00:00:00Z",
+			"period": {"from": "2026-12-01T00:00:00Z", "to": "2027-01-01T00:00:00Z"},
+			"metadata": {"datum_project": "p-1"},
+			"rateCard": {
+				"featureKey": "egress",
+				"price": {"type": "unit", "amount": "0.05"},
+				"discounts": {"percentage": {"percentage": 100, "correlationId": "01KABC"}},
+				"taxConfig": {"behavior": "exclusive", "stripe": {"code": "txcd_10000000"}}
+			}
+		}`
+		var usage om.InvoiceLine
+		if err := json.Unmarshal([]byte(raw), &usage); err != nil {
+			t.Fatal(err)
+		}
+		usage.ManagedBy = om.InvoiceLineManagedBySubscription
+		s.add(om.Invoice{Id: "gather", Status: om.InvoiceStatusGathering, Lines: &[]om.InvoiceLine{usage}})
+		ref, err := c.CreateChargeLine(ctx, "cust", testChargeLine())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.RemoveChargeLine(ctx, ref.InvoiceID, ref.LineID); err != nil {
+			t.Fatal(err)
+		}
+		lines := s.replaced[len(s.replaced)-1].Lines
+		if len(lines) != 1 {
+			t.Fatalf("replaced lines = %+v; want only the usage line", lines)
+		}
+		var sent, read map[string]any
+		got, _ := json.Marshal(lines[0])
+		_ = json.Unmarshal(got, &sent)
+		_ = json.Unmarshal([]byte(raw), &read)
+		if len(sent) != len(read) {
+			t.Fatalf("sent fields %v; want exactly %v", keys(sent), keys(read))
+		}
+		for k, v := range read {
+			want, _ := json.Marshal(v)
+			have, _ := json.Marshal(sent[k])
+			if string(want) != string(have) {
+				t.Errorf("%s sent back as %s; read as %s", k, have, want)
+			}
 		}
 	})
 
