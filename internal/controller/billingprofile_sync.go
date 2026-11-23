@@ -124,9 +124,15 @@ func (r *BillingAccountReconciler) reconcileBillingProfile(
 	account *billingv1alpha1.BillingAccount,
 	customerKey openmeter.CustomerKey,
 	openMeterCustomerID openmeter.CustomerID,
+	invoiceWriterApp string,
 ) error {
 	logger := log.FromContext(ctx)
 	desired := desiredBillingProfileFromAccount(account, customerKey)
+	// On the invoice writer, the account's profile is on its Custom
+	// Invoicing app. Moving it there, or back, changes the profile, and so
+	// the apps of invoices cut from then on: OpenMeter can't change a
+	// profile's apps.
+	desired.AppID = invoiceWriterApp
 	existingID := account.Annotations[BillingProfileIDAnnotation]
 
 	result, err := r.OpenMeterClient.EnsureBillingProfile(ctx, existingID, desired)

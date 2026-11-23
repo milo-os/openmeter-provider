@@ -520,6 +520,13 @@ func (r *BillingAccountReconciler) patchInvoiceStatus(
 	if due, ok := stripeInvoiceDueDate(inv, inStripe, obj, statusBase); ok {
 		obj.Status.DueDate = due
 	}
+	// OpenMeter works out no tax for an invoice the invoice writer wrote,
+	// so its total leaves tax out: Stripe's, once the invoice is issued
+	// there, is what the customer is billed.
+	if r.InvoiceWriter.wrote(inv) && inStripe != nil && inStripe.Number != "" &&
+		strings.EqualFold(inStripe.Currency, string(inv.Currency)) {
+		obj.Status.Total = stripe.FormatAmount(inStripe.Total, inStripe.Currency)
+	}
 	if refreshed {
 		obj.Status.DocumentURI = documentURI
 	}
