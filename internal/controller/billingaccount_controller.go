@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/record"
@@ -690,7 +691,7 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("registering finalizer: %w", err)
 	}
 
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		Named(billingAccountControllerName).
 		For(&billingv1alpha1.BillingAccount{}).
 		Watches(&billingv1alpha1.PaymentMethod{},
@@ -711,13 +712,22 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&billingv1alpha1.BillingEntitlement{},
 			handler.EnqueueRequestsFromMapFunc(mapEntitlementToAccount),
 			builder.WithPredicates(subscriptionChangedPredicate()),
-		).
-		// stripe-provider writing, finalizing or being paid for an invoice
-		// moves its OpenMeter invoice on (see invoice_writer.go).
-		Watches(&stripev1alpha1.StripeInvoice{},
-			handler.EnqueueRequestsFromMapFunc(mapStripeInvoiceToAccount),
-		).
-		Complete(r)
+		)
+
+	// stripe-provider writing, finalizing or being paid for an invoice moves
+	// its OpenMeter invoice on (see invoice_writer.go). Watched only where
+	// stripe-provider serves StripeInvoice: a watch on a kind that isn't
+	// served stops the controller from starting at all.
+	sigvk := stripev1alpha1.GroupVersion.WithKind("StripeInvoice")
+	switch _, err := mgr.GetRESTMapper().RESTMapping(sigvk.GroupKind(), sigvk.Version); {
+	case err == nil:
+		b = b.Watches(&stripev1alpha1.StripeInvoice{}, handler.EnqueueRequestsFromMapFunc(mapStripeInvoiceToAccount))
+	case !apimeta.IsNoMatchError(err):
+		return fmt.Errorf("look up %s: %w", sigvk, err)
+	case r.InvoiceWriter != nil:
+		return fmt.Errorf("invoiceWriter is set, but stripe-provider's %s API isn't served", sigvk)
+	}
+	return b.Complete(r)
 }
 
 // customerLinkFinalizer tears down the OpenMeter customer for a BillingAccount
