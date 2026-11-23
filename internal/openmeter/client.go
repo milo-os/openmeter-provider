@@ -281,8 +281,9 @@ type Client interface {
 	// FindChargeLine finds the line for the charge with chargeUID on the
 	// customer's gathering invoice or a recent one, or returns nil.
 	FindChargeLine(ctx context.Context, customerID CustomerID, chargeUID string) (*ChargeLineRef, error)
-	// InvoiceChargeLineNow invoices one pending line now, on its own.
-	InvoiceChargeLineNow(ctx context.Context, customerID CustomerID, lineID string) error
+	// InvoiceChargeLinesNow invoices pending lines now, together on an
+	// invoice of their own.
+	InvoiceChargeLinesNow(ctx context.Context, customerID CustomerID, lineIDs ...string) error
 	// CurrentBillingPeriodEnd is when the customer's live subscription's
 	// current billing period ends; ok is false without one.
 	CurrentBillingPeriodEnd(ctx context.Context, customerKey CustomerKey) (end time.Time, ok bool, err error)

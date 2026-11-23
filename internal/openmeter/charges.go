@@ -167,13 +167,18 @@ func (c *client) FindChargeLine(ctx context.Context, customerID CustomerID, char
 	return nil, nil
 }
 
-// InvoiceChargeLineNow invoices the one line now, on an invoice of its own,
-// leaving every other pending line where it is. With progressive billing
-// on, the filter also keeps the customer's usage so far off it.
-func (c *client) InvoiceChargeLineNow(ctx context.Context, customerID CustomerID, lineID string) error {
+// InvoiceChargeLinesNow invoices the lines now, together on an invoice of
+// their own, leaving every other pending line where it is. With
+// progressive billing on, the filter also keeps the customer's usage so
+// far off it.
+func (c *client) InvoiceChargeLinesNow(ctx context.Context, customerID CustomerID, lineIDs ...string) error {
+	if len(lineIDs) == 0 {
+		return &PermanentError{Err: errors.New("InvoiceChargeLinesNow needs at least one line")}
+	}
+	ids := append([]string(nil), lineIDs...)
 	resp, err := c.api.InvoicePendingLinesActionWithResponse(ctx, om.InvoicePendingLinesActionJSONRequestBody{
 		CustomerId: string(customerID),
-		Filters:    &om.InvoicePendingLinesActionFiltersInput{LineIds: &[]string{lineID}},
+		Filters:    &om.InvoicePendingLinesActionFiltersInput{LineIds: &ids},
 	})
 	if err != nil {
 		return classify(nil, nil, err)
