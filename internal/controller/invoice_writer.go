@@ -225,7 +225,7 @@ func (r *BillingAccountReconciler) setInvoiceWriterReady(ctx context.Context, ac
 
 // syncInvoiceToWriter moves one invoice waiting on a hook along.
 func (r *BillingAccountReconciler) syncInvoiceToWriter(ctx context.Context, account *billingv1alpha1.BillingAccount, inv om.Invoice) error {
-	lines, held, err := r.invoiceWriterLines(ctx, inv)
+	lines, held, err := r.invoiceWriterLines(ctx, inv, feeSupplyDates(account))
 	if err != nil {
 		return err
 	}

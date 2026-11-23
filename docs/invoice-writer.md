@@ -90,7 +90,7 @@ per billed tier of usage.
 | `servicePricingRef` | The ServicePricing the rate card's description names (`ServicePricing <name> …`, written by the Offer mapping) |
 | `quantity`, `unitAmount` | OpenMeter's, when they multiply out to its amount to the cent. Otherwise 1 × the amount, as for a prorated fee. |
 | `amount` | OpenMeter's amount before discounts |
-| `period` | OpenMeter's period, its end made inclusive |
+| `period` | OpenMeter's period, its end made inclusive. A one-time contract fee with a supply date (`status.contract`'s `servicePeriod`) has that instead, from the start of its first day to the end of its last. |
 | `tax.code` | The detailed line's Stripe tax code, else its line's |
 | `discountPercent` | The rate card's percentage discount. OpenMeter records it on each detailed line as an amount discount with reason `ratecard_percentage`. A maximum-spend discount, or two different percentages on one line, holds the invoice. |
 

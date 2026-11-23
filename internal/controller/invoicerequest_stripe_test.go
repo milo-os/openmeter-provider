@@ -304,3 +304,22 @@ func TestInvoiceRequest_PreviewFallsBackWithoutStripe(t *testing.T) {
 		}
 	})
 }
+
+func TestInvoiceRequest_PreviewUsesTheSetupFeesSupplyDate(t *testing.T) {
+	offer := contractOffer()
+	for i := range offer.Spec.ServicePricings {
+		if offer.Spec.ServicePricings[i].Name == "setup-fee" {
+			offer.Spec.ServicePricings[i].ServicePeriod = &billingv1alpha1.ServicePeriod{Start: "2027-01-10", End: "2027-01-11"}
+		}
+	}
+	r := newStripePreviewReconciler(t, usdAccount(), contractEntitlementFor(contractStart), offer,
+		readyStripeCustomer(), stripePreviewRequest(false))
+	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testInvoiceRequest}}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	setup := getStripeInvoice(t, r).Spec.Lines[0]
+	if !setup.Period.Start.Time.Equal(time.Date(2027, 1, 10, 0, 0, 0, 0, time.UTC)) ||
+		!setup.Period.End.Time.Equal(time.Date(2027, 1, 11, 23, 59, 59, 0, time.UTC)) {
+		t.Errorf("setup period = %v to %v, want the supply date, 10 to 11 January", setup.Period.Start, setup.Period.End)
+	}
+}

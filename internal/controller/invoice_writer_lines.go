@@ -36,7 +36,7 @@ const maxStripeInvoiceLines = 250
 //
 // A detailed line with nothing to bill is left off. When a line can't be
 // built, held says why: the invoice waits until someone looks.
-func (r *BillingAccountReconciler) invoiceWriterLines(ctx context.Context, inv om.Invoice) ([]stripev1alpha1.StripeInvoiceLine, string, error) {
+func (r *BillingAccountReconciler) invoiceWriterLines(ctx context.Context, inv om.Invoice, supplyDates map[string]billingv1alpha1.ServicePeriod) ([]stripev1alpha1.StripeInvoiceLine, string, error) {
 	if inv.Lines == nil {
 		return nil, "OpenMeter returned it without its lines", nil
 	}
@@ -53,7 +53,7 @@ func (r *BillingAccountReconciler) invoiceWriterLines(ctx context.Context, inv o
 			out = append(out, l)
 			continue
 		}
-		lines, held := usageWriterLines(line)
+		lines, held := usageWriterLines(line, supplyDates)
 		if held != "" {
 			return nil, held, nil
 		}
@@ -67,7 +67,7 @@ func (r *BillingAccountReconciler) invoiceWriterLines(ctx context.Context, inv o
 
 // usageWriterLines builds the Stripe lines for one of the account's
 // contract or usage lines: one per detailed line with something to bill.
-func usageWriterLines(line om.InvoiceLine) ([]stripev1alpha1.StripeInvoiceLine, string) {
+func usageWriterLines(line om.InvoiceLine, supplyDates map[string]billingv1alpha1.ServicePeriod) ([]stripev1alpha1.StripeInvoiceLine, string) {
 	var details []om.InvoiceDetailedLine
 	if line.Children != nil {
 		for _, d := range *line.Children {
@@ -106,6 +106,13 @@ func usageWriterLines(line om.InvoiceLine) ([]stripev1alpha1.StripeInvoiceLine, 
 				lineMetadataServicePricing: pricing,
 				lineMetadataOpenMeterLine:  line.Id,
 			},
+		}
+		// A one-time contract fee's supply date, when the contract gives
+		// one, is its line's period, whatever OpenMeter's is.
+		if supply, ok := supplyDates[pricing]; ok {
+			if period, ok := supplyPeriod(supply); ok {
+				l.Period = period
+			}
 		}
 		percent, ok := discountPercent(d, line)
 		if !ok {
@@ -183,6 +190,36 @@ func (r *BillingAccountReconciler) chargeWriterLine(ctx context.Context, line om
 		}
 	}
 	return l, "", nil
+}
+
+// feeSupplyDates are the supply dates of the account's one-time contract
+// fees, by pricing name, from billing's status.contract.
+func feeSupplyDates(account *billingv1alpha1.BillingAccount) map[string]billingv1alpha1.ServicePeriod {
+	if account.Status.Contract == nil {
+		return nil
+	}
+	out := map[string]billingv1alpha1.ServicePeriod{}
+	for _, fee := range account.Status.Contract.Fees {
+		if fee.ChargeType == billingv1alpha1.ChargeTypeOneTime && fee.ServicePeriod != nil {
+			out[fee.Name] = *fee.ServicePeriod
+		}
+	}
+	return out
+}
+
+// supplyPeriod is a supply date as a Stripe line's period: from the start
+// of its first day to the last second of its last, in UTC. ok is false for
+// dates that don't parse, which billing refuses.
+func supplyPeriod(p billingv1alpha1.ServicePeriod) (stripev1alpha1.StripeInvoiceLinePeriod, bool) {
+	start, err1 := time.Parse(time.DateOnly, p.Start)
+	end, err2 := time.Parse(time.DateOnly, p.End)
+	if err1 != nil || err2 != nil || end.Before(start) {
+		return stripev1alpha1.StripeInvoiceLinePeriod{}, false
+	}
+	return stripev1alpha1.StripeInvoiceLinePeriod{
+		Start: metav1.NewTime(start),
+		End:   metav1.NewTime(end.AddDate(0, 0, 1).Add(-time.Second)),
+	}, true
 }
 
 // pricingFromDescription is the ServicePricing a rate card's description
