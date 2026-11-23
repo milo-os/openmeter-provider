@@ -16,6 +16,7 @@ rules:
   resources:
   - billingaccounts
   - billingentitlements
+  - charges
   - meterdefinitions
   - offers
   verbs:
@@ -29,6 +30,7 @@ rules:
   resources:
   - billingaccounts/finalizers
   - billingentitlements/finalizers
+  - charges/finalizers
   - meterdefinitions/finalizers
   - offers/finalizers
   verbs:
@@ -37,6 +39,7 @@ rules:
   - billing.miloapis.com
   resources:
   - billingentitlements/status
+  - charges/status
   - invoicerequests/status
   - invoices/status
   - offers/status

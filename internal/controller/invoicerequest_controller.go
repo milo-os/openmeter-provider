@@ -74,6 +74,7 @@ type InvoiceRequestReconciler struct {
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingentitlements,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=offers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=servicepricings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=billing.miloapis.com,resources=charges,verbs=get;list;watch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeinvoices,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers,verbs=get;list;watch
 
@@ -210,7 +211,11 @@ func (r *InvoiceRequestReconciler) previewNextInvoice(
 	if err != nil {
 		return r.openMeterFailed(ctx, ir, fmt.Errorf("list upcoming fixed charges: %w", err))
 	}
-	if len(upcoming) == 0 {
+	held, heldTotal, err := r.heldCharges(ctx, account)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(upcoming) == 0 && len(held) == 0 {
 		return ctrl.Result{}, r.succeed(ctx, ir, account.Spec.CurrencyCode, nil, "0",
 			"No one-time or recurring charges are waiting to be invoiced")
 	}
@@ -218,8 +223,58 @@ func (r *InvoiceRequestReconciler) previewNextInvoice(
 	if err != nil {
 		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
 	}
-	return ctrl.Result{}, r.succeed(ctx, ir, upcoming[0].Currency, lines, total,
+	if total, err = openmeter.AddDecimals(total, heldTotal); err != nil {
+		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
+	}
+	currency := account.Spec.CurrencyCode
+	if len(upcoming) > 0 {
+		currency = upcoming[0].Currency
+	}
+	return ctrl.Result{}, r.succeed(ctx, ir, currency, append(lines, held...), total,
 		"One-time and recurring charges waiting for later billing periods")
+}
+
+// heldCharges are the account's next-invoice Charges that the Charge
+// controller is still holding in billing (see DefaultChargeHold), as
+// preview lines with their total. They aren't on OpenMeter's invoice yet,
+// so its upcoming charges don't include them. None where billing doesn't
+// serve the Charge API.
+func (r *InvoiceRequestReconciler) heldCharges(ctx context.Context, account *billingv1alpha1.BillingAccount) ([]billingv1alpha1.InvoiceRequestLine, string, error) {
+	var charges billingv1alpha1.ChargeList
+	if err := r.List(ctx, &charges, client.InNamespace(account.Namespace)); err != nil {
+		if apimeta.IsNoMatchError(err) {
+			return nil, "0", nil
+		}
+		return nil, "", fmt.Errorf("list charges: %w", err)
+	}
+	var lines []billingv1alpha1.InvoiceRequestLine
+	amounts := []string{"0"}
+	for _, c := range charges.Items {
+		if c.Spec.BillingAccountRef.Name != account.Name || !c.DeletionTimestamp.IsZero() ||
+			c.Spec.Invoice == billingv1alpha1.ChargeInvoiceNow ||
+			c.Status.Phase != billingv1alpha1.ChargePhaseScheduled || c.Status.AmountDue == "" ||
+			apimeta.IsStatusConditionTrue(c.Status.Conditions, billingv1alpha1.ChargeConditionOnInvoice) {
+			continue
+		}
+		line := billingv1alpha1.InvoiceRequestLine{Description: c.Spec.Description, Amount: c.Status.AmountDue}
+		if p := c.Spec.ServicePeriod; p != nil {
+			start, errStart := time.Parse(chargeDateLayout, p.Start)
+			last, errEnd := time.Parse(chargeDateLayout, p.End)
+			if errStart == nil && errEnd == nil {
+				line.Period = &billingv1alpha1.InvoicePeriod{
+					Start: metav1.NewTime(start),
+					End:   metav1.NewTime(last.AddDate(0, 0, 1).Add(-time.Second)),
+				}
+			}
+		}
+		lines = append(lines, line)
+		amounts = append(amounts, c.Status.AmountDue)
+	}
+	total, err := openmeter.AddDecimals(amounts...)
+	if err != nil {
+		return nil, "", fmt.Errorf("held charges' total: %w", err)
+	}
+	return lines, total, nil
 }
 
 // entitlementFor returns the account's BillingEntitlement that isn't being

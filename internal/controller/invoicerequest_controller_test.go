@@ -309,6 +309,41 @@ func TestInvoiceRequest_PreviewAfterTheStart(t *testing.T) {
 		}
 	})
 
+	t.Run("held charges join the charges for later periods", func(t *testing.T) {
+		omc := &fakeInvoicingClient{upcoming: []om.InvoiceLine{
+			flatLine("Dedicated server", "900", time.Date(2026, time.December, 2, 0, 0, 0, 0, time.UTC), time.Date(2027, time.January, 2, 0, 0, 0, 0, time.UTC)),
+		}}
+		charge := func(name string, onInvoice metav1.ConditionStatus, timing billingv1alpha1.ChargeInvoiceTiming) *billingv1alpha1.Charge {
+			c := chargeObj()
+			c.Name, c.Spec.Invoice = name, timing
+			c.Status.Phase = billingv1alpha1.ChargePhaseScheduled
+			c.Status.Conditions = []metav1.Condition{{Type: billingv1alpha1.ChargeConditionOnInvoice, Status: onInvoice, Reason: "Test",
+				LastTransitionTime: metav1.NewTime(invoiceRequestNow)}}
+			return c
+		}
+		r := newInvoiceRequestReconciler(t, omc, usdAccount(), contractOffer(), started,
+			charge("held", metav1.ConditionFalse, billingv1alpha1.ChargeInvoiceNext),
+			// Already on OpenMeter's invoice, so in its upcoming charges.
+			charge("added", metav1.ConditionTrue, billingv1alpha1.ChargeInvoiceNext),
+			charge("now", metav1.ConditionFalse, billingv1alpha1.ChargeInvoiceNow),
+			invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+
+		ir, err := reconcileInvoiceRequest(r)
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
+		if ir.Status.Total != "1350.00" || len(ir.Status.Lines) != 2 {
+			t.Fatalf("status = %+v, want next month's fee and the held charge", ir.Status)
+		}
+		l := ir.Status.Lines[1]
+		if l.Description != "Cross-connect install" || l.Amount != "450.00" || l.Period == nil ||
+			!l.Period.Start.Time.Equal(time.Date(2026, 12, 15, 0, 0, 0, 0, time.UTC)) ||
+			!l.Period.End.Time.Equal(time.Date(2026, 12, 15, 23, 59, 59, 0, time.UTC)) {
+			t.Errorf("held charge line = %+v", l)
+		}
+	})
+
 	t.Run("nothing waiting, or no contract", func(t *testing.T) {
 		omc := &fakeInvoicingClient{}
 		r := newInvoiceRequestReconciler(t, omc, usdAccount(), invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
