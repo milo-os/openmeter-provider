@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -209,7 +210,7 @@ func TestCreateAndFindChargeLine(t *testing.T) {
 	}
 }
 
-func TestInvoiceChargeLineNow(t *testing.T) {
+func TestInvoiceChargeLinesNow(t *testing.T) {
 	c, s := newChargeTestClient(t)
 	ctx := context.Background()
 	other := testChargeLine()
@@ -221,7 +222,7 @@ func TestInvoiceChargeLineNow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.InvoiceChargeLineNow(ctx, "cust", ref.LineID); err != nil {
+	if err := c.InvoiceChargeLinesNow(ctx, "cust", ref.LineID); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.actions[0].Filters; got == nil || got.LineIds == nil || len(*got.LineIds) != 1 || (*got.LineIds)[0] != ref.LineID {
@@ -234,5 +235,37 @@ func TestInvoiceChargeLineNow(t *testing.T) {
 	stillPending, _ := c.FindChargeLine(ctx, "cust", "uid-other")
 	if stillPending == nil || !stillPending.Pending() {
 		t.Fatalf("the other charge moved: %+v", stillPending)
+	}
+}
+
+func TestInvoiceChargeLinesNow_Together(t *testing.T) {
+	c, s := newChargeTestClient(t)
+	ctx := context.Background()
+	var ids []string
+	for _, uid := range []string{"uid-gpu", "uid-cpu"} {
+		line := testChargeLine()
+		line.ChargeUID = uid
+		ref, err := c.CreateChargeLine(ctx, "cust", line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, ref.LineID)
+	}
+	if err := c.InvoiceChargeLinesNow(ctx, "cust", ids...); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.actions) != 1 {
+		t.Fatalf("actions = %d, want one for both lines", len(s.actions))
+	}
+	if got := s.actions[0].Filters; got == nil || got.LineIds == nil || !slices.Equal(*got.LineIds, ids) {
+		t.Fatalf("action filters = %+v; want both lines", got)
+	}
+	gpu, _ := c.FindChargeLine(ctx, "cust", "uid-gpu")
+	cpu, _ := c.FindChargeLine(ctx, "cust", "uid-cpu")
+	if gpu == nil || cpu == nil || gpu.Pending() || gpu.InvoiceID != cpu.InvoiceID {
+		t.Fatalf("lines = %+v and %+v, want both on one invoice", gpu, cpu)
+	}
+	if err := c.InvoiceChargeLinesNow(ctx, "cust"); !IsPermanent(err) {
+		t.Errorf("no lines: err = %v, want permanent", err)
 	}
 }

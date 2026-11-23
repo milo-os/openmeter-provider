@@ -39,6 +39,7 @@ const (
 	ChargeReasonWaitingForInvoiceWriter = "WaitingForInvoiceWriter"
 	ChargeReasonWaitingForCustomer      = "WaitingForCustomer"
 	ChargeReasonWaitingForAmounts       = "WaitingForAmounts"
+	ChargeReasonWaitingForInvoiceGroup  = "WaitingForInvoiceGroup"
 	ChargeReasonScheduled               = "Scheduled"
 	ChargeReasonInvoiced                = "Invoiced"
 	ChargeReasonRefused                 = "Refused"
@@ -154,6 +155,9 @@ func (r *ChargeReconciler) reconcile(ctx context.Context, req reconcile.Request)
 		return ctrl.Result{}, err
 	}
 	if ref == nil {
+		if waiting, err := r.waitForInvoiceGroup(ctx, &charge); err != nil || waiting {
+			return ctrl.Result{}, err
+		}
 		invoiceAt, err := r.invoiceAt(ctx, &charge, account, customerKey)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -189,7 +193,17 @@ func (r *ChargeReconciler) reconcile(ctx context.Context, req reconcile.Request)
 	}
 
 	if charge.Spec.Invoice == billingv1alpha1.ChargeInvoiceNow && ref.InvoiceStatus == om.InvoiceStatusGathering {
-		if err := r.OpenMeterClient.InvoiceChargeLineNow(ctx, customerID, ref.LineID); err != nil {
+		lineIDs, ready, err := r.invoiceGroupLines(ctx, customerID, &charge, ref)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			// The group's other charges get their lines on their own
+			// reconciles, which bring this one back through the sibling
+			// watch.
+			return ctrl.Result{RequeueAfter: chargeWaitAfter}, nil
+		}
+		if err := r.OpenMeterClient.InvoiceChargeLinesNow(ctx, customerID, lineIDs...); err != nil {
 			return ctrl.Result{}, err
 		}
 		if ref, err = r.OpenMeterClient.FindChargeLine(ctx, customerID, string(charge.UID)); err != nil {
@@ -204,6 +218,84 @@ func (r *ChargeReconciler) reconcile(ctx context.Context, req reconcile.Request)
 		return ctrl.Result{RequeueAfter: chargeRecheckAfter}, r.setScheduled(ctx, &charge, ref.InvoiceAt)
 	}
 	return r.setInvoiced(ctx, &charge, ref.InvoiceID)
+}
+
+// invoiceGroupMembers returns the other charges of charge's billing account
+// in its invoice group, leaving out any being removed.
+func (r *ChargeReconciler) invoiceGroupMembers(ctx context.Context, charge *billingv1alpha1.Charge) ([]billingv1alpha1.Charge, error) {
+	group := charge.Spec.InvoiceGroup
+	if group == nil || charge.Spec.Invoice != billingv1alpha1.ChargeInvoiceNow {
+		return nil, nil
+	}
+	var list billingv1alpha1.ChargeList
+	if err := r.List(ctx, &list, client.InNamespace(charge.Namespace)); err != nil {
+		return nil, err
+	}
+	var members []billingv1alpha1.Charge
+	for _, m := range list.Items {
+		if m.UID == charge.UID || !m.DeletionTimestamp.IsZero() ||
+			m.Spec.BillingAccountRef.Name != charge.Spec.BillingAccountRef.Name ||
+			m.Spec.InvoiceGroup == nil || m.Spec.InvoiceGroup.Name != group.Name {
+			continue
+		}
+		members = append(members, m)
+	}
+	return members, nil
+}
+
+// waitForInvoiceGroup holds a charge in an invoice group, Pending, until
+// all the group's charges are added, so none goes on an invoice without
+// the rest. A group stays closed once any of its charges is on its way to
+// the invoice, so a charge removed after that doesn't hold up the others.
+func (r *ChargeReconciler) waitForInvoiceGroup(ctx context.Context, charge *billingv1alpha1.Charge) (bool, error) {
+	group := charge.Spec.InvoiceGroup
+	members, err := r.invoiceGroupMembers(ctx, charge)
+	if err != nil || group == nil || charge.Spec.Invoice != billingv1alpha1.ChargeInvoiceNow {
+		return false, err
+	}
+	added := int32(len(members)) + 1
+	if added >= group.Size {
+		return false, nil
+	}
+	for i := range members {
+		if apimeta.IsStatusConditionTrue(members[i].Status.Conditions, billingv1alpha1.ChargeConditionOnInvoice) ||
+			members[i].Status.Phase == billingv1alpha1.ChargePhaseInvoiced {
+			return false, nil
+		}
+	}
+	return true, r.setPending(ctx, charge, ChargeReasonWaitingForInvoiceGroup, fmt.Sprintf(
+		"Waiting for the rest of invoice group %q: %d of its %d charges are added", group.Name, added, group.Size))
+}
+
+// invoiceGroupLines returns the lines to invoice now with charge's line
+// ref: just its own, or, in an invoice group, the pending lines of all the
+// group's charges once each has one. ready is false while one of them is
+// still getting its line. A charge OpenMeter refused is left out, so the
+// rest, which can no longer be removed, still go out together.
+func (r *ChargeReconciler) invoiceGroupLines(ctx context.Context, customerID openmeter.CustomerID,
+	charge *billingv1alpha1.Charge, ref *openmeter.ChargeLineRef) (lineIDs []string, ready bool, err error) {
+	lineIDs = []string{ref.LineID}
+	members, err := r.invoiceGroupMembers(ctx, charge)
+	if err != nil {
+		return nil, false, err
+	}
+	for i := range members {
+		m := &members[i]
+		if m.Status.Phase == billingv1alpha1.ChargePhaseFailed {
+			continue
+		}
+		mref, err := r.OpenMeterClient.FindChargeLine(ctx, customerID, string(m.UID))
+		if err != nil {
+			return nil, false, err
+		}
+		switch {
+		case mref == nil:
+			return nil, false, nil
+		case mref.InvoiceStatus == om.InvoiceStatusGathering:
+			lineIDs = append(lineIDs, mref.LineID)
+		}
+	}
+	return lineIDs, true, nil
 }
 
 // accountFor reads the charge's billing account, or nil when it's gone.
@@ -535,6 +627,8 @@ func (r *ChargeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&billingv1alpha1.BillingAccount{}, handler.EnqueueRequestsFromMapFunc(r.chargesOfAccount)).
 		// An issued invoice's projection marks its charges invoiced.
 		Watches(&billingv1alpha1.Invoice{}, handler.EnqueueRequestsFromMapFunc(r.openChargesInNamespace)).
+		// A charge joining or moving on in an invoice group wakes the rest.
+		Watches(&billingv1alpha1.Charge{}, handler.EnqueueRequestsFromMapFunc(r.invoiceGroupSiblings)).
 		Complete(r)
 }
 
@@ -549,6 +643,24 @@ func (r *ChargeReconciler) chargesOfAccount(ctx context.Context, obj client.Obje
 		if c.Spec.BillingAccountRef.Name == obj.GetName() {
 			reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&c)})
 		}
+	}
+	return reqs
+}
+
+// invoiceGroupSiblings maps a charge in an invoice group to the group's
+// other charges.
+func (r *ChargeReconciler) invoiceGroupSiblings(ctx context.Context, obj client.Object) []reconcile.Request {
+	charge, ok := obj.(*billingv1alpha1.Charge)
+	if !ok || charge.Spec.InvoiceGroup == nil {
+		return nil
+	}
+	members, err := r.invoiceGroupMembers(ctx, charge)
+	if err != nil {
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(members))
+	for i := range members {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&members[i])})
 	}
 	return reqs
 }

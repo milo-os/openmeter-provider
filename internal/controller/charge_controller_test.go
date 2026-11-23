@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ import (
 var chargeNow = time.Date(2026, time.November, 22, 15, 0, 0, 0, time.UTC)
 
 // fakeChargeClient serves the OpenMeter calls the Charge controller makes,
-// holding at most one line.
+// holding at most one line, or one per charge when byUID is set.
 type fakeChargeClient struct {
 	openmeter.Client // unimplemented methods panic if used
 
@@ -39,8 +40,11 @@ type fakeChargeClient struct {
 	createErr  error
 
 	line     *openmeter.ChargeLineRef
+	byUID    map[string]*openmeter.ChargeLineRef
 	created  []openmeter.ChargeLine
 	invoiced []string
+	// invoiceCalls is each InvoiceChargeLinesNow call's lines.
+	invoiceCalls [][]string
 }
 
 func (f *fakeChargeClient) GetCustomer(_ context.Context, key openmeter.CustomerKey) (om.Customer, error) {
@@ -50,7 +54,14 @@ func (f *fakeChargeClient) GetCustomer(_ context.Context, key openmeter.Customer
 	return om.Customer{Id: "01JCUSTOMER", Key: (*string)(&key)}, nil
 }
 
-func (f *fakeChargeClient) FindChargeLine(context.Context, openmeter.CustomerID, string) (*openmeter.ChargeLineRef, error) {
+func (f *fakeChargeClient) FindChargeLine(_ context.Context, _ openmeter.CustomerID, uid string) (*openmeter.ChargeLineRef, error) {
+	if f.byUID != nil {
+		if ref := f.byUID[uid]; ref != nil {
+			found := *ref
+			return &found, nil
+		}
+		return nil, nil
+	}
 	if f.line == nil {
 		return nil, nil
 	}
@@ -63,12 +74,26 @@ func (f *fakeChargeClient) CreateChargeLine(_ context.Context, _ openmeter.Custo
 		return openmeter.ChargeLineRef{}, f.createErr
 	}
 	f.created = append(f.created, line)
+	if f.byUID != nil {
+		ref := &openmeter.ChargeLineRef{LineID: "line-" + line.ChargeUID, InvoiceID: "01JGATHER", InvoiceStatus: om.InvoiceStatusGathering, InvoiceAt: line.InvoiceAt}
+		f.byUID[line.ChargeUID] = ref
+		return *ref, nil
+	}
 	f.line = &openmeter.ChargeLineRef{LineID: "01JLINE", InvoiceID: "01JGATHER", InvoiceStatus: om.InvoiceStatusGathering, InvoiceAt: line.InvoiceAt}
 	return *f.line, nil
 }
 
-func (f *fakeChargeClient) InvoiceChargeLineNow(_ context.Context, _ openmeter.CustomerID, lineID string) error {
-	f.invoiced = append(f.invoiced, lineID)
+func (f *fakeChargeClient) InvoiceChargeLinesNow(_ context.Context, _ openmeter.CustomerID, lineIDs ...string) error {
+	f.invoiced = append(f.invoiced, lineIDs...)
+	f.invoiceCalls = append(f.invoiceCalls, lineIDs)
+	if f.byUID != nil {
+		for _, ref := range f.byUID {
+			if slices.Contains(lineIDs, ref.LineID) {
+				ref.InvoiceID, ref.InvoiceStatus = "01JNOW", om.InvoiceStatusIssued
+			}
+		}
+		return nil
+	}
 	f.line.InvoiceID, f.line.InvoiceStatus = "01JNOW", om.InvoiceStatusIssued
 	return nil
 }
@@ -346,6 +371,94 @@ func TestChargeInvoicedNow(t *testing.T) {
 	if got.Status.Phase != billingv1alpha1.ChargePhaseInvoiced || got.Status.InvoiceRef == nil ||
 		got.Status.InvoiceRef.Name != "acct-2026-11-abc" {
 		t.Fatalf("status = %+v", got.Status)
+	}
+}
+
+// groupCharge is a charge invoiced now in an invoice group of size.
+func groupCharge(name string, size int32) *billingv1alpha1.Charge {
+	c := chargeObj()
+	c.Name, c.UID = name, types.UID(name+"-uid")
+	c.Spec.Invoice = billingv1alpha1.ChargeInvoiceNow
+	c.Spec.InvoiceGroup = &billingv1alpha1.ChargeInvoiceGroup{Name: "test-period", Size: size}
+	return c
+}
+
+func reconcileNamed(t *testing.T, r *ChargeReconciler, name string) (*billingv1alpha1.Charge, reconcile.Result) {
+	t.Helper()
+	key := types.NamespacedName{Namespace: testNamespace, Name: name}
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: key})
+	if err != nil {
+		t.Fatalf("Reconcile %s: %v", name, err)
+	}
+	var got billingv1alpha1.Charge
+	if err := r.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get %s: %v", name, err)
+	}
+	return &got, res
+}
+
+func TestChargeInvoiceGroupGoesOutTogether(t *testing.T) {
+	omc := &fakeChargeClient{byUID: map[string]*openmeter.ChargeLineRef{}}
+	gpu := groupCharge("gpu", 2)
+	r := newChargeReconciler(t, omc, chargeAccount(true), gpu)
+
+	got, _ := reconcileNamed(t, r, "gpu")
+	if got.Status.Phase != billingv1alpha1.ChargePhasePending || chargeReadyReason(got) != ChargeReasonWaitingForInvoiceGroup {
+		t.Fatalf("alone: phase %s, reason %s", got.Status.Phase, chargeReadyReason(got))
+	}
+	if cond := apimeta.FindStatusCondition(got.Status.Conditions, billingv1alpha1.ChargeConditionReady); !strings.Contains(cond.Message, "1 of its 2 charges") {
+		t.Errorf("message = %q", cond.Message)
+	}
+	if len(omc.created) != 0 {
+		t.Fatalf("a line was added before the group was complete: %+v", omc.created)
+	}
+
+	if err := r.Create(context.Background(), groupCharge("cpu", 2)); err != nil {
+		t.Fatal(err)
+	}
+	if reqs := r.invoiceGroupSiblings(context.Background(), groupCharge("cpu", 2)); len(reqs) != 1 || reqs[0].Name != "gpu" {
+		t.Errorf("siblings of cpu = %v, want gpu", reqs)
+	}
+	// gpu gets its line, then waits for cpu's.
+	_, res := reconcileNamed(t, r, "gpu")
+	if len(omc.created) != 1 || len(omc.invoiceCalls) != 0 || res.RequeueAfter == 0 {
+		t.Fatalf("gpu: created %d, invoiced %v, requeue %s", len(omc.created), omc.invoiceCalls, res.RequeueAfter)
+	}
+	// cpu gets its line, and both go on one invoice.
+	reconcileNamed(t, r, "cpu")
+	if len(omc.invoiceCalls) != 1 || !slices.Equal(omc.invoiceCalls[0], []string{"line-cpu-uid", "line-gpu-uid"}) {
+		t.Fatalf("invoice calls = %v, want one with both lines", omc.invoiceCalls)
+	}
+	reconcileNamed(t, r, "gpu")
+	if len(omc.invoiceCalls) != 1 {
+		t.Fatalf("gpu invoiced again: %v", omc.invoiceCalls)
+	}
+}
+
+func TestChargeInvoiceGroupLeavesOutARefusedCharge(t *testing.T) {
+	omc := &fakeChargeClient{byUID: map[string]*openmeter.ChargeLineRef{}}
+	refused := groupCharge("cpu", 2)
+	refused.Status.Phase = billingv1alpha1.ChargePhaseFailed
+	r := newChargeReconciler(t, omc, chargeAccount(true), groupCharge("gpu", 2), refused)
+
+	reconcileNamed(t, r, "gpu")
+	if len(omc.invoiceCalls) != 1 || !slices.Equal(omc.invoiceCalls[0], []string{"line-gpu-uid"}) {
+		t.Fatalf("invoice calls = %v, want gpu's line without the refused charge", omc.invoiceCalls)
+	}
+}
+
+func TestChargeInvoiceGroupStaysClosedOnceSending(t *testing.T) {
+	omc := &fakeChargeClient{byUID: map[string]*openmeter.ChargeLineRef{
+		"gpu-uid": {LineID: "line-gpu-uid", InvoiceID: "01JGATHER", InvoiceStatus: om.InvoiceStatusGathering},
+	}}
+	// Three were added; one was removed after gpu got its line.
+	sending := groupCharge("gpu", 3)
+	sending.Status.Conditions = []metav1.Condition{{Type: billingv1alpha1.ChargeConditionOnInvoice, Status: metav1.ConditionTrue, Reason: ChargeReasonAdding}}
+	r := newChargeReconciler(t, omc, chargeAccount(true), sending, groupCharge("cpu", 3))
+
+	reconcileNamed(t, r, "cpu")
+	if len(omc.invoiceCalls) != 1 || !slices.Equal(omc.invoiceCalls[0], []string{"line-cpu-uid", "line-gpu-uid"}) {
+		t.Fatalf("invoice calls = %v, want the two left on one invoice", omc.invoiceCalls)
 	}
 }
 
