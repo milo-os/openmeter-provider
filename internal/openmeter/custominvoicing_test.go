@@ -72,7 +72,14 @@ func (f *fakeCustomInvoicing) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			f.calls = map[string]string{}
 		}
 		f.calls[r.URL.Path] = string(body)
-		_, _ = w.Write([]byte(`{}`))
+		if strings.Contains(r.URL.Path, "/refused/") {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"type":"about:blank","title":"Bad Request","status":400,"detail":"invalid state transition"}`))
+			return
+		}
+		// As OpenMeter does: the updated invoice, whose status is text.
+		_, _ = w.Write([]byte(`{"id":"inv_1","status":"issuing","statusDetails":{"extendedStatus":"issuing.syncing"}}`))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -153,6 +160,10 @@ func TestCustomInvoicingSyncCalls(t *testing.T) {
 	}
 	if got := f.calls["/api/v1/apps/custom-invoicing/inv_1/payment/status"]; !strings.Contains(got, `"paid"`) {
 		t.Errorf("payment status body = %s", got)
+	}
+
+	if err := c.UpdatePaymentStatus(ctx, "refused", PaymentTriggerVoid); !IsPermanent(err) {
+		t.Errorf("a refused payment status = %v, want a permanent error", err)
 	}
 
 	if err := c.IssuingSynchronized(ctx, "inv_2", "", "in_stripe", nil); !IsPermanent(err) {

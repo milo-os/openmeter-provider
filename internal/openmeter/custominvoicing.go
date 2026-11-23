@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
@@ -182,16 +184,13 @@ func (c *client) DraftSynchronized(ctx context.Context, invoiceID, externalID st
 	for _, l := range lines {
 		mapping = append(mapping, om.CustomInvoicingLineExternalIdMapping{LineId: l.LineID, ExternalId: l.ExternalID})
 	}
-	resp, err := c.api.AppCustomInvoicingDraftSynchronizedWithResponse(ctx, invoiceID, om.CustomInvoicingDraftSynchronizedRequest{
+	err := syncCall(c.api.AppCustomInvoicingDraftSynchronized(ctx, invoiceID, om.CustomInvoicingDraftSynchronizedRequest{
 		Invoicing: &om.CustomInvoicingSyncResult{
 			ExternalId:      ptr(externalID),
 			LineExternalIds: &mapping,
 		},
-	})
+	}))
 	if err != nil {
-		return classify(nil, nil, err)
-	}
-	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
 		return fmt.Errorf("draft synchronized for invoice %s: %w", invoiceID, err)
 	}
 	return nil
@@ -204,17 +203,14 @@ func (c *client) IssuingSynchronized(ctx context.Context, invoiceID, number, pay
 	if number == "" {
 		return &PermanentError{Err: fmt.Errorf("issuing synchronized for invoice %s: no invoice number", invoiceID)}
 	}
-	resp, err := c.api.AppCustomInvoicingIssuingSynchronizedWithResponse(ctx, invoiceID, om.CustomInvoicingFinalizedRequest{
+	err := syncCall(c.api.AppCustomInvoicingIssuingSynchronized(ctx, invoiceID, om.CustomInvoicingFinalizedRequest{
 		Invoicing: &om.CustomInvoicingFinalizedInvoicingRequest{
 			InvoiceNumber:    ptr(om.InvoiceNumber(number)),
 			SentToCustomerAt: sentAt,
 		},
 		Payment: &om.CustomInvoicingFinalizedPaymentRequest{ExternalId: ptr(paymentID)},
-	})
+	}))
 	if err != nil {
-		return classify(nil, nil, err)
-	}
-	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
 		return fmt.Errorf("issuing synchronized for invoice %s: %w", invoiceID, err)
 	}
 	return nil
@@ -223,15 +219,29 @@ func (c *client) IssuingSynchronized(ctx context.Context, invoiceID, number, pay
 // UpdatePaymentStatus tells Custom Invoicing what happened to the
 // invoice's payment.
 func (c *client) UpdatePaymentStatus(ctx context.Context, invoiceID string, trigger PaymentTrigger) error {
-	resp, err := c.api.AppCustomInvoicingUpdatePaymentStatusWithResponse(ctx, invoiceID,
-		om.CustomInvoicingUpdatePaymentStatusRequest{Trigger: trigger})
+	err := syncCall(c.api.AppCustomInvoicingUpdatePaymentStatus(ctx, invoiceID,
+		om.CustomInvoicingUpdatePaymentStatusRequest{Trigger: trigger}))
 	if err != nil {
-		return classify(nil, nil, err)
-	}
-	if err := classify(resp.HTTPResponse, resp.Body, nil); err != nil {
 		return fmt.Errorf("payment status %s for invoice %s: %w", trigger, invoiceID, err)
 	}
 	return nil
+}
+
+// syncCall classifies a Custom Invoicing call by its HTTP status alone.
+// beta.236's generated parsers for these three calls have no case for
+// success: they read the updated invoice that OpenMeter answers with as a
+// problem document, and fail on its string status, so every call that
+// worked came back as an error.
+func syncCall(resp *http.Response, err error) error {
+	if err != nil {
+		return classify(nil, nil, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil && resp.StatusCode >= 300 {
+		return classify(resp, nil, nil)
+	}
+	return classify(resp, body, nil)
 }
 
 // DeleteInvoice deletes an invoice that hasn't been issued, such as a
