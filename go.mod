@@ -14,7 +14,7 @@ require (
 	github.com/prometheus/client_model v0.6.3
 	github.com/shopspring/decimal v1.4.0
 	github.com/spf13/cobra v1.10.2
-	go.miloapis.com/billing v0.11.2-0.20261122203142-7db868eb6fd4
+	go.miloapis.com/billing v0.12.1-0.20261123092720-afbe3ed7e359
 	go.miloapis.com/instrumentation v0.6.0
 	go.miloapis.com/stripe-provider v0.0.0-00010101000000-000000000000
 	go.uber.org/zap v1.28.0
