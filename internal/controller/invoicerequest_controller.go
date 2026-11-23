@@ -66,6 +66,10 @@ type InvoiceRequestReconciler struct {
 	// served, so first-invoice previews are worked out by Stripe, with tax.
 	// SetupWithManager sets it.
 	StripeInvoices bool
+	// CustomChargePricing is the ServicePricing, in milo-system, a charge
+	// draft's line without a catalog item is previewed under, as the
+	// invoice writer bills it (invoiceWriter.customChargePricing).
+	CustomChargePricing string
 }
 
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoicerequests,verbs=get;list;watch
@@ -75,6 +79,7 @@ type InvoiceRequestReconciler struct {
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=offers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=servicepricings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=charges,verbs=get;list;watch
+// +kubebuilder:rbac:groups=billing.miloapis.com,resources=chargedrafts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripeinvoices,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=stripe.billing.miloapis.com,resources=stripecustomers,verbs=get;list;watch
 
@@ -118,6 +123,9 @@ func (r *InvoiceRequestReconciler) Reconcile(ctx context.Context, req reconcile.
 
 	if ir.Spec.ContractDraft != nil {
 		return r.previewContractDraft(ctx, &ir, &account)
+	}
+	if ir.Spec.ChargeDraftRef != nil {
+		return r.previewChargeDraft(ctx, &ir, &account)
 	}
 
 	be, err := r.entitlementFor(ctx, &account)
@@ -306,8 +314,13 @@ type firstCharge struct {
 	// quantity and amount, or, for a prorated first period, 1 and the
 	// prorated amount.
 	quantity, unitAmount, amountBeforeDiscount string
-	discountPercent                          int32
-	start, end                               time.Time
+	// discount is the percentage off, as a decimal string, or empty.
+	discount   string
+	start, end time.Time
+	// tax overrides the pricing's tax code, for a charge that gives its own.
+	tax *stripev1alpha1.StripeInvoiceLineTax
+	// note is for staff, kept on the Stripe line's metadata.
+	note string
 }
 
 // firstInvoiceCharges are the charges a contract starting at startsAt is
@@ -359,7 +372,10 @@ func firstInvoiceCharges(offer *billingv1alpha1.Offer, startsAt time.Time, invoi
 		c := firstCharge{
 			pricing: sp.Name, name: lineName(sp),
 			quantity: fmt.Sprint(quantity), unitAmount: sp.Spec.Amount,
-			discountPercent: percentage, start: startsAt, end: startsAt,
+			start: startsAt, end: startsAt,
+		}
+		if percentage > 0 {
+			c.discount = fmt.Sprint(percentage)
 		}
 		if period != nil {
 			c.end = period.End.Time

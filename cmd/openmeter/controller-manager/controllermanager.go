@@ -168,9 +168,13 @@ func newControllerManagerCommand(info BuildInfo) *cobra.Command {
 				}).SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("creating BillingEntitlement controller: %w", err)
 				}
-				if err = (&controller.InvoiceRequestReconciler{
+				invoiceRequests := &controller.InvoiceRequestReconciler{
 					OpenMeterClient: openMeterClient,
-				}).SetupWithManager(mgr); err != nil {
+				}
+				if invoiceWriter != nil {
+					invoiceRequests.CustomChargePricing = invoiceWriter.CustomChargePricing
+				}
+				if err = invoiceRequests.SetupWithManager(mgr); err != nil {
 					return fmt.Errorf("creating InvoiceRequest controller: %w", err)
 				}
 				if err = (&controller.ChargeReconciler{
