@@ -10,8 +10,9 @@ spec:
     controller keeps exactly one live subscription of that customer on the
     plan's active version:
 
-      - no payment method yet: OpenMeter refuses to bill the customer, the
-        entitlement waits (CustomerBillingNotReady);
+      - no payment method yet: billing doesn't report the account
+        PaymentReady, so no subscription is created and the entitlement
+        waits (CustomerBillingNotReady);
       - payment method attached: subscribed, with traceable metadata;
       - Offer re-published as plan v2 (display-name change): migrated
         immediately (never via a scheduled subscription: OpenMeter keeps
@@ -83,11 +84,11 @@ spec:
 
     - name: entitlement waits until the account can be invoiced
       description: |
-        The account has no payment method, so its customer has no Stripe app
-        data and OpenMeter refuses the subscription (409 "invalid billing
-        setup"). The entitlement reports CustomerBillingNotReady instead of
-        failing hard. Skipped against a Sandbox billing app, which performs
-        no such check (see expect-billing-gate.sh).
+        The account has no payment method, so billing doesn't report it
+        PaymentReady and the provider creates no subscription, whatever app
+        invoices the customer (a Custom Invoicing or Sandbox app invoices
+        anyone). The entitlement reports CustomerBillingNotReady instead of
+        failing hard.
       try:
         - apply:
             file: billingaccount.yaml
@@ -111,7 +112,10 @@ spec:
                 (finalizers[?@ == 'openmeter.miloapis.com/subscription']): ['openmeter.miloapis.com/subscription']
         - script:
             timeout: 100s
-            content: bash expect-billing-gate.sh
+            content: bash expect-condition.sh False CustomerBillingNotReady "default payment method or payment terms"
+        - script:
+            timeout: 30s
+            content: bash expect-subscriptions.sh 'length == 0' "no subscription while the account can't pay"
 
     - name: attaching a payment method subscribes the account to Offer A
       try:
@@ -139,7 +143,7 @@ spec:
             file: billingaccount-payment-method-ready.yaml
             subresource: status
         - script:
-            # The entitlement retries a refused subscription every 30s.
+            # The account's status patch requeues the waiting entitlement.
             timeout: 100s
             content: bash expect-condition.sh True Synced "version 1 is active"
         - script:

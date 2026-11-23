@@ -118,7 +118,7 @@ spec:
         - apply:
             file: entitlement.yaml
         - assert:
-            # The entitlement retries a refused subscription every 30s.
+            # The account's status patch requeues the waiting entitlement.
             timeout: 120s
             resource:
               apiVersion: billing.miloapis.com/v1alpha1

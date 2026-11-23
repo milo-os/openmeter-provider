@@ -1364,6 +1364,36 @@ func TestEnsureSubscription_RestoresExternallyCanceled(t *testing.T) {
 	}
 }
 
+func TestEnsureSubscription_PaymentNotReady(t *testing.T) {
+	c, f := newTestClient(t)
+	f.seedCustomer("cust")
+	f.seedPlanVersion("p", 1, omv3.BillingPlanStatusActive)
+	desired := desiredSub("p")
+	desired.PaymentNotReady = true
+
+	_, err := c.EnsureSubscription(context.Background(), desired)
+	if !errors.Is(err, ErrCustomerBillingNotReady) || !IsPermanent(err) {
+		t.Fatalf("err = %v, want a permanent ErrCustomerBillingNotReady", err)
+	}
+	if f.subscriptionWrites != 0 || len(f.subsByStatus("cust")) != 0 {
+		t.Fatalf("subscribed an account that can't pay: %d writes, %v", f.subscriptionWrites, f.subsByStatus("cust"))
+	}
+
+	// An account that could pay when it subscribed keeps its subscription
+	// up to date after it can't.
+	if _, err := c.EnsureSubscription(context.Background(), desiredSub("p")); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	f.publishPlanVersion("p", 2)
+	state, err := c.EnsureSubscription(context.Background(), desired)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if state.Current.Plan.Version != 2 {
+		t.Errorf("current = v%d, want v2", state.Current.Plan.Version)
+	}
+}
+
 func TestEnsureSubscription_Errors(t *testing.T) {
 	tests := []struct {
 		name    string

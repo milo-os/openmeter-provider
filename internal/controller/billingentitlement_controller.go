@@ -114,9 +114,9 @@ const (
 )
 
 const (
-	// customerBillingNotReadyRequeueAfter paces retries while the account
-	// has no payment method. The BillingAccount watch usually wins; the
-	// Stripe app data it syncs does not change the account object, though.
+	// customerBillingNotReadyRequeueAfter paces retries while OpenMeter's
+	// Stripe app refuses an account billing says can pay: the Stripe app
+	// data it's waiting for doesn't change the account object.
 	customerBillingNotReadyRequeueAfter = 30 * time.Second
 	// subscriptionResyncAfter re-checks a converged subscription, which can
 	// be changed in OpenMeter directly.
@@ -238,7 +238,8 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 			subscriptionMetadataBillingAccount: account.Name,
 			subscriptionMetadataOffer:          offer.Name,
 		},
-		Now: now,
+		Now:             now,
+		PaymentNotReady: !accountCanPay(&account, &be),
 	}
 	contractStarted := false
 	if contract := be.Spec.Contract; contract != nil {
@@ -281,6 +282,11 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		case errors.Is(err, openmeter.ErrPlanNotPublished):
 			logger.Info("waiting for the Offer's OpenMeter plan")
 			return r.syncWaiting(ctx, &be, conditionReasonPlanNotPublished, planNotPublishedError(&offer), transientRequeueAfter)
+		case errors.Is(err, openmeter.ErrCustomerBillingNotReady) && desired.PaymentNotReady:
+			// Billing updates the account when it can pay, which requeues
+			// this through the BillingAccount watch.
+			logger.Info("billing account can't pay yet")
+			return r.syncWaiting(ctx, &be, conditionReasonCustomerBillingNotReady, paymentNotReadyError(&account), 0)
 		case errors.Is(err, openmeter.ErrCustomerBillingNotReady):
 			logger.Info("customer cannot be invoiced yet", "err", err.Error())
 			return r.syncWaiting(ctx, &be, conditionReasonCustomerBillingNotReady,
@@ -737,6 +743,44 @@ func (r *BillingEntitlementReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Watches(&billingv1alpha1.Offer{}, handler.EnqueueRequestsFromMapFunc(r.entitlementsForOffer)).
 		Watches(&billingv1alpha1.BillingAccount{}, handler.EnqueueRequestsFromMapFunc(r.entitlementsForAccount)).
 		Complete(r)
+}
+
+// paymentReadyReasonArrangementScheduled is billing's PaymentReady reason
+// for an account whose payment terms haven't started yet.
+const paymentReadyReasonArrangementScheduled = "ArrangementScheduled"
+
+// accountCanPay reports whether the account can be subscribed: billing
+// reports it PaymentReady (a usable default payment method, or payment
+// terms), or it has payment terms. Terms count as soon as billing
+// publishes them on status.paymentArrangement. A contract's terms also
+// count while they're scheduled: a contract usually starts with its
+// terms, and waiting for billing to see them start could start the
+// contract late.
+func accountCanPay(account *billingv1alpha1.BillingAccount, be *billingv1alpha1.BillingEntitlement) bool {
+	if hasInvoiceArrangement(account) {
+		return true
+	}
+	cond := apimeta.FindStatusCondition(account.Status.Conditions, billingv1alpha1.BillingAccountConditionPaymentReady)
+	if cond == nil {
+		return false
+	}
+	if cond.Status == metav1.ConditionTrue {
+		return true
+	}
+	return be.Spec.Contract != nil && cond.Status == metav1.ConditionFalse && cond.Reason == paymentReadyReasonArrangementScheduled
+}
+
+// paymentNotReadyError says why an account that can't pay isn't
+// subscribed, with billing's reason from its PaymentReady condition.
+func paymentNotReadyError(account *billingv1alpha1.BillingAccount) error {
+	why := "billing hasn't reported whether it can pay"
+	if cond := apimeta.FindStatusCondition(account.Status.Conditions, billingv1alpha1.BillingAccountConditionPaymentReady); cond != nil {
+		why = fmt.Sprintf("PaymentReady is %s (%s)", cond.Status, cond.Reason)
+		if cond.Message != "" {
+			why += ": " + cond.Message
+		}
+	}
+	return fmt.Errorf("BillingAccount %q is subscribed once it has a default payment method or payment terms; %s", account.Name, why)
 }
 
 // contractBillsOnInvoiceDay reports whether a contract bills on the
