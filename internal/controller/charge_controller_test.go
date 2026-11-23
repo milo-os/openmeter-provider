@@ -10,12 +10,15 @@ import (
 	"time"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -35,11 +38,9 @@ type fakeChargeClient struct {
 	periodEnd  *time.Time
 	createErr  error
 
-	line      *openmeter.ChargeLineRef
-	created   []openmeter.ChargeLine
-	invoiced  []string
-	removed   []string
-	removeErr error
+	line     *openmeter.ChargeLineRef
+	created  []openmeter.ChargeLine
+	invoiced []string
 }
 
 func (f *fakeChargeClient) GetCustomer(_ context.Context, key openmeter.CustomerKey) (om.Customer, error) {
@@ -69,15 +70,6 @@ func (f *fakeChargeClient) CreateChargeLine(_ context.Context, _ openmeter.Custo
 func (f *fakeChargeClient) InvoiceChargeLineNow(_ context.Context, _ openmeter.CustomerID, lineID string) error {
 	f.invoiced = append(f.invoiced, lineID)
 	f.line.InvoiceID, f.line.InvoiceStatus = "01JNOW", om.InvoiceStatusIssued
-	return nil
-}
-
-func (f *fakeChargeClient) RemoveChargeLine(_ context.Context, _, lineID string) error {
-	if f.removeErr != nil {
-		return f.removeErr
-	}
-	f.removed = append(f.removed, lineID)
-	f.line = nil
 	return nil
 }
 
@@ -189,10 +181,44 @@ func TestChargeWaitsForCustomerAndAmounts(t *testing.T) {
 	}
 }
 
-func TestChargeIsScheduledOnTheNextInvoice(t *testing.T) {
+func chargeOnInvoice(c *billingv1alpha1.Charge) *metav1.Condition {
+	return apimeta.FindStatusCondition(c.Status.Conditions, billingv1alpha1.ChargeConditionOnInvoice)
+}
+
+func TestChargeIsHeldUntilShortlyBeforeItsInvoice(t *testing.T) {
 	periodEnd := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
 	omc := &fakeChargeClient{periodEnd: &periodEnd}
 	r := newChargeReconciler(t, omc, chargeAccount(true), chargeObj())
+	got, res := reconcileCharge(t, r)
+
+	if len(omc.created) != 0 {
+		t.Fatalf("created a line %s before its invoice", periodEnd.Sub(chargeNow))
+	}
+	until := periodEnd.Add(-DefaultChargeHold)
+	if got.Status.Phase != billingv1alpha1.ChargePhaseScheduled || chargeReadyReason(got) != ChargeReasonScheduled ||
+		got.Status.InvoiceAt == nil || !got.Status.InvoiceAt.Time.Equal(periodEnd) ||
+		got.Status.RemovableUntil == nil || !got.Status.RemovableUntil.Time.Equal(until) {
+		t.Fatalf("status = %+v", got.Status)
+	}
+	if c := chargeOnInvoice(got); c == nil || c.Status != metav1.ConditionFalse || c.Reason != ChargeReasonHeld {
+		t.Fatalf("OnInvoice = %+v", c)
+	}
+	if res.RequeueAfter != chargeRecheckAfter {
+		t.Errorf("requeue = %s; want the hourly recheck, as the hold ends later", res.RequeueAfter)
+	}
+
+	// Close to the end of the hold, it wakes when the hold ends.
+	r.Now = func() time.Time { return until.Add(-10 * time.Minute) }
+	if _, res = reconcileCharge(t, r); res.RequeueAfter != 10*time.Minute || len(omc.created) != 0 {
+		t.Fatalf("requeue = %s, created %d", res.RequeueAfter, len(omc.created))
+	}
+}
+
+func TestChargeGoesOnItsInvoiceWhenTheHoldEnds(t *testing.T) {
+	periodEnd := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	omc := &fakeChargeClient{periodEnd: &periodEnd}
+	r := newChargeReconciler(t, omc, chargeAccount(true), chargeObj())
+	r.Now = func() time.Time { return periodEnd.Add(-DefaultChargeHold) }
 	got, res := reconcileCharge(t, r)
 
 	if len(omc.created) != 1 {
@@ -208,9 +234,12 @@ func TestChargeIsScheduledOnTheNextInvoice(t *testing.T) {
 	if line != want {
 		t.Fatalf("line =\n%+v\nwant\n%+v", line, want)
 	}
-	if got.Status.Phase != billingv1alpha1.ChargePhaseScheduled || chargeReadyReason(got) != ChargeReasonScheduled ||
+	if got.Status.Phase != billingv1alpha1.ChargePhaseScheduled || got.Status.RemovableUntil != nil ||
 		got.Status.InvoiceAt == nil || !got.Status.InvoiceAt.Time.Equal(periodEnd) {
 		t.Fatalf("status = %+v", got.Status)
+	}
+	if c := chargeOnInvoice(got); c == nil || c.Status != metav1.ConditionTrue || c.Reason != ChargeReasonAdded {
+		t.Fatalf("OnInvoice = %+v", c)
 	}
 	if res.RequeueAfter != chargeRecheckAfter {
 		t.Errorf("requeue = %s", res.RequeueAfter)
@@ -223,6 +252,49 @@ func TestChargeIsScheduledOnTheNextInvoice(t *testing.T) {
 	}
 }
 
+func TestChargeAddedInsideTheHoldGoesOnStraightAway(t *testing.T) {
+	periodEnd := chargeNow.Add(3 * time.Hour)
+	omc := &fakeChargeClient{periodEnd: &periodEnd}
+	r := newChargeReconciler(t, omc, chargeAccount(true), chargeObj())
+	got, _ := reconcileCharge(t, r)
+	if len(omc.created) != 1 {
+		t.Fatalf("created %d lines", len(omc.created))
+	}
+	if c := chargeOnInvoice(got); c == nil || c.Status != metav1.ConditionTrue {
+		t.Fatalf("OnInvoice = %+v", c)
+	}
+}
+
+func TestChargeIsNotAddedWhenItsRemovalWins(t *testing.T) {
+	periodEnd := chargeNow.Add(3 * time.Hour)
+	omc := &fakeChargeClient{periodEnd: &periodEnd}
+	charge := chargeObj()
+	charge.Finalizers = []string{ChargeFinalizer}
+	k8s := fake.NewClientBuilder().
+		WithScheme(newOfferScheme(t)).
+		WithObjects(chargeAccount(true), charge).
+		WithStatusSubresource(&billingv1alpha1.Charge{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				// The charge was removed after it was read: its removal
+				// changed it, so the optimistic write conflicts.
+				return apierrors.NewConflict(schema.GroupResource{Group: "billing.miloapis.com", Resource: "charges"}, obj.GetName(), errors.New("changed"))
+			},
+		}).
+		Build()
+	r := &ChargeReconciler{Client: k8s, OpenMeterClient: omc, Recorder: record.NewFakeRecorder(20), Now: func() time.Time { return chargeNow }}
+	res, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: "install"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(omc.created) != 0 {
+		t.Fatal("added a line although marking the charge failed")
+	}
+	if !res.Requeue {
+		t.Error("didn't start over")
+	}
+}
+
 func TestChargeWithoutASubscriptionUsesTheBillingDay(t *testing.T) {
 	omc := &fakeChargeClient{}
 	account := chargeAccount(true)
@@ -230,9 +302,9 @@ func TestChargeWithoutASubscriptionUsesTheBillingDay(t *testing.T) {
 		StartsAt: metav1.NewTime(time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)), BillingDayOfMonth: 30,
 	}
 	r := newChargeReconciler(t, omc, account, chargeObj())
-	reconcileCharge(t, r)
-	if want := time.Date(2026, 11, 30, 0, 0, 0, 0, time.UTC); !omc.created[0].InvoiceAt.Equal(want) {
-		t.Fatalf("invoiceAt = %s, want %s", omc.created[0].InvoiceAt, want)
+	got, _ := reconcileCharge(t, r)
+	if want := time.Date(2026, 11, 30, 0, 0, 0, 0, time.UTC); got.Status.InvoiceAt == nil || !got.Status.InvoiceAt.Time.Equal(want) {
+		t.Fatalf("invoiceAt = %v, want %s", got.Status.InvoiceAt, want)
 	}
 }
 
@@ -288,10 +360,16 @@ func TestChargeWaitsForItsInvoiceProjection(t *testing.T) {
 
 func TestChargeRefusedByOpenMeter(t *testing.T) {
 	omc := &fakeChargeClient{createErr: &openmeter.PermanentError{Err: errors.New("invalid period")}}
-	r := newChargeReconciler(t, omc, chargeAccount(true), chargeObj())
+	charge := chargeObj()
+	charge.Spec.Invoice = billingv1alpha1.ChargeInvoiceNow
+	r := newChargeReconciler(t, omc, chargeAccount(true), charge)
 	got, _ := reconcileCharge(t, r)
 	if got.Status.Phase != billingv1alpha1.ChargePhaseFailed || chargeReadyReason(got) != ChargeReasonRefused {
 		t.Fatalf("status = %+v", got.Status)
+	}
+	// Not on an invoice, so staff can remove it.
+	if c := chargeOnInvoice(got); c == nil || c.Status != metav1.ConditionFalse {
+		t.Fatalf("OnInvoice = %+v", c)
 	}
 }
 
@@ -303,25 +381,33 @@ func deletingCharge() *billingv1alpha1.Charge {
 	return c
 }
 
-func TestRemovingAScheduledCharge(t *testing.T) {
-	omc := &fakeChargeClient{line: &openmeter.ChargeLineRef{LineID: "01JLINE", InvoiceID: "01JGATHER", InvoiceStatus: om.InvoiceStatusGathering}}
-	r := newChargeReconciler(t, omc, chargeAccount(true), deletingCharge())
+func TestRemovingAHeldCharge(t *testing.T) {
+	omc := &fakeChargeClient{}
+	charge := deletingCharge()
+	charge.Status.Phase = billingv1alpha1.ChargePhaseScheduled
+	charge.Status.Conditions = []metav1.Condition{{Type: billingv1alpha1.ChargeConditionOnInvoice, Status: metav1.ConditionFalse, Reason: ChargeReasonHeld}}
+	r := newChargeReconciler(t, omc, chargeAccount(true), charge)
 	if got, _ := reconcileCharge(t, r); got != nil {
 		t.Fatalf("charge still there: %+v", got.Finalizers)
 	}
-	if len(omc.removed) != 1 {
-		t.Fatalf("removed %v", omc.removed)
+	if len(omc.created) != 0 || chargeHasEvent(r, EventReasonChargeAlreadyInvoiced) {
+		t.Fatal("a held charge's removal touched OpenMeter or warned")
 	}
 }
 
-func TestRemovingAnInvoicedChargeLeavesTheInvoice(t *testing.T) {
-	omc := &fakeChargeClient{line: &openmeter.ChargeLineRef{LineID: "01JLINE", InvoiceID: "01JISSUED", InvoiceStatus: om.InvoiceStatusIssued}}
-	r := newChargeReconciler(t, omc, chargeAccount(true), deletingCharge())
+func TestRemovingAChargeOnItsInvoiceLeavesTheLine(t *testing.T) {
+	// Only reachable when billing's webhook lets it through: the
+	// namespace is going while the account isn't yet.
+	omc := &fakeChargeClient{line: &openmeter.ChargeLineRef{LineID: "01JLINE", InvoiceID: "01JGATHER", InvoiceStatus: om.InvoiceStatusGathering}}
+	charge := deletingCharge()
+	charge.Status.Phase = billingv1alpha1.ChargePhaseScheduled
+	charge.Status.Conditions = []metav1.Condition{{Type: billingv1alpha1.ChargeConditionOnInvoice, Status: metav1.ConditionTrue, Reason: ChargeReasonAdded}}
+	r := newChargeReconciler(t, omc, chargeAccount(true), charge)
 	if got, _ := reconcileCharge(t, r); got != nil {
 		t.Fatal("charge still there")
 	}
-	if len(omc.removed) != 0 {
-		t.Fatal("tried to remove a line from an issued invoice")
+	if omc.line == nil {
+		t.Fatal("the line went")
 	}
 	if !chargeHasEvent(r, EventReasonChargeAlreadyInvoiced) {
 		t.Error("no ChargeAlreadyInvoiced event")
@@ -329,21 +415,38 @@ func TestRemovingAnInvoicedChargeLeavesTheInvoice(t *testing.T) {
 }
 
 func TestRemovingAChargeWithItsAccount(t *testing.T) {
-	omc := &fakeChargeClient{line: &openmeter.ChargeLineRef{LineID: "01JLINE", InvoiceID: "01JGATHER", InvoiceStatus: om.InvoiceStatusGathering}}
 	account := chargeAccount(true)
 	now := metav1.NewTime(chargeNow)
 	account.DeletionTimestamp = &now
 	account.Finalizers = []string{"test"}
-	r := newChargeReconciler(t, omc, account, deletingCharge())
-	if got, _ := reconcileCharge(t, r); got != nil {
-		t.Fatal("charge still there")
-	}
-	if len(omc.removed) != 0 {
-		t.Fatal("removed the line; the account's final invoice should bill it")
-	}
-	if !chargeHasEvent(r, EventReasonChargeNotBilled) {
-		t.Error("a pending charge went without a ChargeNotBilled event")
-	}
+
+	t.Run("on its invoice: billed on the final invoice", func(t *testing.T) {
+		omc := &fakeChargeClient{line: &openmeter.ChargeLineRef{LineID: "01JLINE", InvoiceID: "01JGATHER", InvoiceStatus: om.InvoiceStatusGathering}}
+		charge := deletingCharge()
+		charge.Status.Phase = billingv1alpha1.ChargePhaseScheduled
+		charge.Status.Conditions = []metav1.Condition{{Type: billingv1alpha1.ChargeConditionOnInvoice, Status: metav1.ConditionTrue, Reason: ChargeReasonAdded}}
+		r := newChargeReconciler(t, omc, account.DeepCopy(), charge)
+		if got, _ := reconcileCharge(t, r); got != nil {
+			t.Fatal("charge still there")
+		}
+		if omc.line == nil || chargeHasEvent(r, EventReasonChargeNotBilled) {
+			t.Fatal("the line went, or it said the charge wasn't billed")
+		}
+	})
+
+	t.Run("held: not billed, and says so", func(t *testing.T) {
+		omc := &fakeChargeClient{}
+		charge := deletingCharge()
+		charge.Status.Phase = billingv1alpha1.ChargePhaseScheduled
+		charge.Status.Conditions = []metav1.Condition{{Type: billingv1alpha1.ChargeConditionOnInvoice, Status: metav1.ConditionFalse, Reason: ChargeReasonHeld}}
+		r := newChargeReconciler(t, omc, account.DeepCopy(), charge)
+		if got, _ := reconcileCharge(t, r); got != nil {
+			t.Fatal("charge still there")
+		}
+		if !chargeHasEvent(r, EventReasonChargeNotBilled) {
+			t.Error("no ChargeNotBilled event")
+		}
+	})
 }
 
 func chargeHasEvent(r *ChargeReconciler, reason string) bool {

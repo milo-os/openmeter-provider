@@ -17,7 +17,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	om "github.com/openmeterio/openmeter/api/client/go"
@@ -27,8 +26,8 @@ import (
 )
 
 const (
-	// ChargeFinalizer holds a Charge until its line is off OpenMeter's
-	// invoice, or the charge has been billed.
+	// ChargeFinalizer holds a Charge until the provider has seen it go, so
+	// a removed charge that was already on an invoice is reported.
 	ChargeFinalizer = "openmeter.billing.miloapis.com/charge"
 
 	chargeControllerName = "charge"
@@ -43,9 +42,13 @@ const (
 	ChargeReasonScheduled               = "Scheduled"
 	ChargeReasonInvoiced                = "Invoiced"
 	ChargeReasonRefused                 = "Refused"
-	EventReasonChargeInvoiced           = "ChargeInvoiced"
-	EventReasonChargeAlreadyInvoiced    = "ChargeAlreadyInvoiced"
-	EventReasonChargeNotBilled          = "ChargeNotBilled"
+	// Reasons on a Charge's OnInvoice condition.
+	ChargeReasonHeld                 = "Held"
+	ChargeReasonAdding               = "Adding"
+	ChargeReasonAdded                = "Added"
+	EventReasonChargeInvoiced        = "ChargeInvoiced"
+	EventReasonChargeAlreadyInvoiced = "ChargeAlreadyInvoiced"
+	EventReasonChargeNotBilled       = "ChargeNotBilled"
 
 	// chargeRecheckAfter is how often a scheduled charge is looked at for
 	// being invoiced, besides whenever an Invoice in its namespace changes.
@@ -53,6 +56,13 @@ const (
 	// chargeWaitAfter is how soon a charge waiting on something that
 	// doesn't trigger a reconcile of its own is looked at again.
 	chargeWaitAfter = time.Minute
+	// DefaultChargeHold is how long before its invoice date a next-invoice
+	// charge is put on OpenMeter's invoice. Until then it's held in billing
+	// alone, where removing it is just a delete: OpenMeter can only take a
+	// line off an invoice by replacing the whole invoice, which can drop a
+	// line subscription sync adds at the same time. A day leaves room to
+	// retry before OpenMeter cuts the period's invoice.
+	DefaultChargeHold = 24 * time.Hour
 )
 
 // ChargeReconciler puts each billing Charge on its account's OpenMeter
@@ -70,6 +80,9 @@ type ChargeReconciler struct {
 	Recorder        record.EventRecorder
 	// Now returns the current time; time.Now when unset.
 	Now func() time.Time
+	// Hold is how long before its invoice date a next-invoice charge goes
+	// on OpenMeter's invoice; DefaultChargeHold when zero.
+	Hold time.Duration
 }
 
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=charges,verbs=get;list;watch;update;patch
@@ -78,8 +91,17 @@ type ChargeReconciler struct {
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=billingaccounts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=billing.miloapis.com,resources=invoices,verbs=get;list;watch
 
-// Reconcile schedules, follows and removes one Charge.
+// Reconcile holds, schedules, follows and lets go of one Charge. A status
+// write that lost to another change starts over from a fresh read.
 func (r *ChargeReconciler) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
+	res, err := r.reconcile(ctx, req)
+	if apierrors.IsConflict(err) {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return res, err
+}
+
+func (r *ChargeReconciler) reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
 	var charge billingv1alpha1.Charge
 	if err := r.Get(ctx, req.NamespacedName, &charge); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -132,9 +154,29 @@ func (r *ChargeReconciler) Reconcile(ctx context.Context, req reconcile.Request)
 		return ctrl.Result{}, err
 	}
 	if ref == nil {
-		line, err := r.chargeLine(ctx, &charge, account, customerKey)
+		invoiceAt, err := r.invoiceAt(ctx, &charge, account, customerKey)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		now := r.now()
+		if charge.Spec.Invoice != billingv1alpha1.ChargeInvoiceNow {
+			if until := invoiceAt.Add(-r.hold()); now.Before(until) {
+				// Held: worked out again each time, as the billing period
+				// can move, and woken in time to add it.
+				return ctrl.Result{RequeueAfter: min(until.Sub(now), chargeRecheckAfter)},
+					r.setHeld(ctx, &charge, invoiceAt, until)
+			}
+		}
+		line, err := r.chargeLine(&charge, invoiceAt)
 		if err != nil {
 			return ctrl.Result{}, r.fail(ctx, &charge, err.Error())
+		}
+		// Marked first, with an optimistic write: from here the webhook
+		// refuses to remove the charge, and a removal already under way
+		// makes this write conflict, so the line is never added for a
+		// charge that's going.
+		if err := r.setAdding(ctx, &charge); err != nil {
+			return ctrl.Result{}, err
 		}
 		created, err := r.OpenMeterClient.CreateChargeLine(ctx, customerID, line)
 		if err != nil {
@@ -177,9 +219,34 @@ func (r *ChargeReconciler) accountFor(ctx context.Context, charge *billingv1alph
 	return &account, nil
 }
 
-// chargeLine is the pending line for charge.
-func (r *ChargeReconciler) chargeLine(ctx context.Context, charge *billingv1alpha1.Charge,
-	account *billingv1alpha1.BillingAccount, customerKey openmeter.CustomerKey) (openmeter.ChargeLine, error) {
+// invoiceAt is when charge is invoiced: now for an invoice-now charge,
+// otherwise the end of the subscription's current billing period, or the
+// account's next billing day when there's no subscription.
+func (r *ChargeReconciler) invoiceAt(ctx context.Context, charge *billingv1alpha1.Charge,
+	account *billingv1alpha1.BillingAccount, customerKey openmeter.CustomerKey) (time.Time, error) {
+	now := r.now()
+	if charge.Spec.Invoice == billingv1alpha1.ChargeInvoiceNow {
+		return now, nil
+	}
+	end, ok, err := r.OpenMeterClient.CurrentBillingPeriodEnd(ctx, customerKey)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !ok {
+		end = nextBillingDay(account, now)
+	}
+	return end, nil
+}
+
+func (r *ChargeReconciler) hold() time.Duration {
+	if r.Hold > 0 {
+		return r.Hold
+	}
+	return DefaultChargeHold
+}
+
+// chargeLine is the pending line for charge, invoiced at invoiceAt.
+func (r *ChargeReconciler) chargeLine(charge *billingv1alpha1.Charge, invoiceAt time.Time) (openmeter.ChargeLine, error) {
 	if charge.Spec.ServicePeriod == nil {
 		return openmeter.ChargeLine{}, errors.New("the charge has no service period")
 	}
@@ -190,19 +257,6 @@ func (r *ChargeReconciler) chargeLine(ctx context.Context, charge *billingv1alph
 	last, err := time.Parse(chargeDateLayout, charge.Spec.ServicePeriod.End)
 	if err != nil {
 		return openmeter.ChargeLine{}, fmt.Errorf("service period end: %w", err)
-	}
-
-	now := r.now()
-	invoiceAt := now
-	if charge.Spec.Invoice != billingv1alpha1.ChargeInvoiceNow {
-		end, ok, err := r.OpenMeterClient.CurrentBillingPeriodEnd(ctx, customerKey)
-		if err != nil {
-			return openmeter.ChargeLine{}, err
-		}
-		if !ok {
-			end = nextBillingDay(account, now)
-		}
-		invoiceAt = end
 	}
 
 	taxCode := ""
@@ -257,23 +311,27 @@ func nextBillingDay(account *billingv1alpha1.BillingAccount, now time.Time) time
 	}
 }
 
-// reconcileDelete takes the charge's line off OpenMeter's invoice before
-// letting the charge go. When the account itself is being deleted, the
-// line is left: the account's finalizer invoices pending lines before it
-// deletes the customer, so a scheduled charge is billed, not lost.
+// reconcileDelete lets a removed charge go. It never takes a line off an
+// OpenMeter invoice: billing's webhook only lets a charge be removed before
+// its line is added (OnInvoice), or when its account or namespace is going.
+// When the account itself is being deleted, a line already added is left
+// for the account's final invoice, which its finalizer issues before it
+// deletes the customer; a charge still held isn't billed, and says so.
 func (r *ChargeReconciler) reconcileDelete(ctx context.Context, charge *billingv1alpha1.Charge, account *billingv1alpha1.BillingAccount) error {
 	if !controllerutil.ContainsFinalizer(charge, ChargeFinalizer) {
 		return nil
 	}
-	logger := log.FromContext(ctx)
+	onInvoice := apimeta.IsStatusConditionTrue(charge.Status.Conditions, billingv1alpha1.ChargeConditionOnInvoice)
 
 	switch {
 	case account == nil || !account.DeletionTimestamp.IsZero():
-		if charge.Status.Phase == "" || charge.Status.Phase == billingv1alpha1.ChargePhasePending {
+		if !onInvoice && charge.Status.Phase != billingv1alpha1.ChargePhaseInvoiced {
 			r.event(charge, "Warning", EventReasonChargeNotBilled,
 				"The charge wasn't billed: its billing account was deleted before the charge reached an invoice")
 		}
-	default:
+	case onInvoice:
+		// The webhook refuses this, so it's a charge whose namespace is
+		// going while its account isn't yet. Say where it's billed.
 		customer, err := r.OpenMeterClient.GetCustomer(ctx, openmeter.CustomerKey(account.UID))
 		if err != nil && !errors.Is(err, openmeter.ErrCustomerNotFound) {
 			return err
@@ -284,19 +342,8 @@ func (r *ChargeReconciler) reconcileDelete(ctx context.Context, charge *billingv
 				return err
 			}
 			if ref != nil {
-				err := openmeter.ErrLineInvoiced
-				if ref.Pending() {
-					err = r.OpenMeterClient.RemoveChargeLine(ctx, ref.InvoiceID, ref.LineID)
-				}
-				switch {
-				case errors.Is(err, openmeter.ErrLineInvoiced):
-					r.event(charge, "Warning", EventReasonChargeAlreadyInvoiced,
-						fmt.Sprintf("The charge was removed after it was invoiced on OpenMeter invoice %s; correct the invoice with a credit note", ref.InvoiceID))
-				case err != nil:
-					return err
-				default:
-					logger.Info("removed charge line", "invoice", ref.InvoiceID, "line", ref.LineID)
-				}
+				r.event(charge, "Warning", EventReasonChargeAlreadyInvoiced,
+					fmt.Sprintf("The charge was removed after it was put on OpenMeter invoice %s, so it's still billed; correct the invoice with a credit note once it's issued", ref.InvoiceID))
 			}
 		}
 	}
@@ -310,7 +357,33 @@ func (r *ChargeReconciler) reconcileDelete(ctx context.Context, charge *billingv
 func (r *ChargeReconciler) setPending(ctx context.Context, charge *billingv1alpha1.Charge, reason, msg string) error {
 	return r.patchStatus(ctx, charge, func(s *billingv1alpha1.ChargeStatus) {
 		s.Phase = billingv1alpha1.ChargePhasePending
+		s.RemovableUntil = nil
 		r.setReady(charge, s, metav1.ConditionFalse, reason, msg)
+	})
+}
+
+// setHeld records that the charge is due on the invoice at invoiceAt, and
+// is held in billing until it goes on it, at until.
+func (r *ChargeReconciler) setHeld(ctx context.Context, charge *billingv1alpha1.Charge, invoiceAt, until time.Time) error {
+	return r.patchStatus(ctx, charge, func(s *billingv1alpha1.ChargeStatus) {
+		s.Phase = billingv1alpha1.ChargePhaseScheduled
+		at := metav1.NewTime(invoiceAt.UTC().Truncate(time.Second))
+		removable := metav1.NewTime(until.UTC().Truncate(time.Second))
+		s.InvoiceAt, s.RemovableUntil = &at, &removable
+		r.setReady(charge, s, metav1.ConditionTrue, ChargeReasonScheduled,
+			fmt.Sprintf("Due on the invoice OpenMeter issues on %s", at.UTC().Format(time.RFC3339)))
+		r.setOnInvoice(charge, s, metav1.ConditionFalse, ChargeReasonHeld,
+			fmt.Sprintf("Held in billing, and can be removed, until it goes on the invoice at %s", removable.UTC().Format(time.RFC3339)))
+	})
+}
+
+// setAdding records that the charge's line is about to be added. The
+// write is what makes the charge unremovable, so it must land before the
+// line is created: it's optimistic, and fails if the charge changed.
+func (r *ChargeReconciler) setAdding(ctx context.Context, charge *billingv1alpha1.Charge) error {
+	return r.patchStatus(ctx, charge, func(s *billingv1alpha1.ChargeStatus) {
+		s.RemovableUntil = nil
+		r.setOnInvoice(charge, s, metav1.ConditionTrue, ChargeReasonAdding, "Being put on its invoice in OpenMeter")
 	})
 }
 
@@ -319,9 +392,10 @@ func (r *ChargeReconciler) setScheduled(ctx context.Context, charge *billingv1al
 	return r.patchStatus(ctx, charge, func(s *billingv1alpha1.ChargeStatus) {
 		s.Phase = billingv1alpha1.ChargePhaseScheduled
 		at := metav1.NewTime(invoiceAt.UTC().Truncate(time.Second))
-		s.InvoiceAt = &at
+		s.InvoiceAt, s.RemovableUntil = &at, nil
 		r.setReady(charge, s, metav1.ConditionTrue, ChargeReasonScheduled,
 			fmt.Sprintf("On the invoice OpenMeter issues on %s", at.UTC().Format(time.RFC3339)))
+		r.setOnInvoice(charge, s, metav1.ConditionTrue, ChargeReasonAdded, "On its invoice in OpenMeter")
 	})
 }
 
@@ -347,6 +421,8 @@ func (r *ChargeReconciler) setInvoiced(ctx context.Context, charge *billingv1alp
 	err := r.patchStatus(ctx, charge, func(s *billingv1alpha1.ChargeStatus) {
 		s.Phase = billingv1alpha1.ChargePhaseInvoiced
 		s.InvoiceRef = &billingv1alpha1.ChargeInvoiceRef{Name: name}
+		s.RemovableUntil = nil
+		r.setOnInvoice(charge, s, metav1.ConditionTrue, ChargeReasonAdded, "On its invoice in OpenMeter")
 		r.setReady(charge, s, metav1.ConditionTrue, ChargeReasonInvoiced, fmt.Sprintf("Invoiced on %s", name))
 	})
 	if err == nil {
@@ -355,12 +431,26 @@ func (r *ChargeReconciler) setInvoiced(ctx context.Context, charge *billingv1alp
 	return ctrl.Result{}, err
 }
 
-// fail records that the charge can't be billed as it is.
+// fail records that the charge can't be billed as it is. It isn't on an
+// invoice, so staff can remove it.
 func (r *ChargeReconciler) fail(ctx context.Context, charge *billingv1alpha1.Charge, msg string) error {
 	r.event(charge, "Warning", ChargeReasonRefused, msg)
 	return r.patchStatus(ctx, charge, func(s *billingv1alpha1.ChargeStatus) {
 		s.Phase = billingv1alpha1.ChargePhaseFailed
+		s.RemovableUntil = nil
 		r.setReady(charge, s, metav1.ConditionFalse, ChargeReasonRefused, msg)
+		r.setOnInvoice(charge, s, metav1.ConditionFalse, ChargeReasonRefused, "Not on an invoice: OpenMeter refused it")
+	})
+}
+
+func (r *ChargeReconciler) setOnInvoice(charge *billingv1alpha1.Charge, s *billingv1alpha1.ChargeStatus,
+	status metav1.ConditionStatus, reason, msg string) {
+	apimeta.SetStatusCondition(&s.Conditions, metav1.Condition{
+		Type:               billingv1alpha1.ChargeConditionOnInvoice,
+		Status:             status,
+		Reason:             reason,
+		Message:            msg,
+		ObservedGeneration: charge.Generation,
 	})
 }
 
@@ -377,28 +467,35 @@ func (r *ChargeReconciler) setReady(charge *billingv1alpha1.Charge, s *billingv1
 
 // patchStatus applies change to the charge's status and writes it, unless
 // nothing changed. It writes only the fields this provider owns; billing
-// writes the amounts.
+// writes the amounts. The write is optimistic: billing's webhook decides
+// whether a charge can be removed from OnInvoice, so a write from a stale
+// copy mustn't undo it, and adding a line mustn't race a removal.
 func (r *ChargeReconciler) patchStatus(ctx context.Context, charge *billingv1alpha1.Charge, change func(*billingv1alpha1.ChargeStatus)) error {
 	before := charge.DeepCopy()
 	change(&charge.Status)
 	if chargeStatusUnchanged(&before.Status, &charge.Status) {
 		return nil
 	}
-	return r.Status().Patch(ctx, charge, client.MergeFrom(before))
+	return r.Status().Patch(ctx, charge, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{}))
 }
 
 func chargeStatusUnchanged(a, b *billingv1alpha1.ChargeStatus) bool {
-	if a.Phase != b.Phase || !a.InvoiceAt.Equal(b.InvoiceAt) ||
+	if a.Phase != b.Phase || !a.InvoiceAt.Equal(b.InvoiceAt) || !a.RemovableUntil.Equal(b.RemovableUntil) ||
 		(a.InvoiceRef == nil) != (b.InvoiceRef == nil) ||
 		(a.InvoiceRef != nil && a.InvoiceRef.Name != b.InvoiceRef.Name) {
 		return false
 	}
-	x := apimeta.FindStatusCondition(a.Conditions, billingv1alpha1.ChargeConditionReady)
-	y := apimeta.FindStatusCondition(b.Conditions, billingv1alpha1.ChargeConditionReady)
-	if (x == nil) != (y == nil) {
-		return false
+	for _, t := range []string{billingv1alpha1.ChargeConditionReady, billingv1alpha1.ChargeConditionOnInvoice} {
+		x := apimeta.FindStatusCondition(a.Conditions, t)
+		y := apimeta.FindStatusCondition(b.Conditions, t)
+		if (x == nil) != (y == nil) {
+			return false
+		}
+		if x != nil && (x.Status != y.Status || x.Reason != y.Reason || x.Message != y.Message) {
+			return false
+		}
 	}
-	return x == nil || (x.Status == y.Status && x.Reason == y.Reason && x.Message == y.Message)
+	return true
 }
 
 func (r *ChargeReconciler) event(charge *billingv1alpha1.Charge, eventType, reason, msg string) {

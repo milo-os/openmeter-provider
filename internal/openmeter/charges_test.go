@@ -5,7 +5,6 @@ package openmeter
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,17 +25,12 @@ type chargeServer struct {
 	nextID   int
 
 	created     []om.InvoicePendingLineCreateInput
-	replaced    []om.InvoiceReplaceUpdate
 	actions     []om.InvoicePendingLinesActionInput
 	listQueries []string
-	// touchOnGet bumps the invoice's updatedAt on the Nth GET of it, as
-	// subscription sync would between a read and a write.
-	touchOnGet map[string]int
-	gets       map[string]int
 }
 
 func newChargeServer() *chargeServer {
-	return &chargeServer{invoices: map[string]*om.Invoice{}, touchOnGet: map[string]int{}, gets: map[string]int{}}
+	return &chargeServer{invoices: map[string]*om.Invoice{}}
 }
 
 func (s *chargeServer) id(prefix string) string {
@@ -125,27 +119,12 @@ func (s *chargeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		switch r.Method {
-		case http.MethodGet:
-			s.gets[id]++
-			if n := s.touchOnGet[id]; n > 0 && s.gets[id] == n {
-				inv.UpdatedAt = inv.UpdatedAt.Add(time.Second)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(inv)
-		case http.MethodPut:
-			var in om.InvoiceReplaceUpdate
-			_ = json.NewDecoder(r.Body).Decode(&in)
-			s.replaced = append(s.replaced, in)
-			var lines []om.InvoiceLine
-			for _, l := range in.Lines {
-				lines = append(lines, om.InvoiceLine{Id: *l.Id, Name: l.Name, Period: l.Period, Metadata: l.Metadata})
-			}
-			inv.Lines = &lines
-			inv.UpdatedAt = inv.UpdatedAt.Add(time.Second)
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(inv)
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
 		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(inv)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -158,14 +137,6 @@ func contains(list []string, v string) bool {
 		}
 	}
 	return false
-}
-
-func keys(m map[string]any) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }
 
 func newChargeTestClient(t *testing.T) (Client, *chargeServer) {
@@ -264,128 +235,4 @@ func TestInvoiceChargeLineNow(t *testing.T) {
 	if stillPending == nil || !stillPending.Pending() {
 		t.Fatalf("the other charge moved: %+v", stillPending)
 	}
-}
-
-func TestRemoveChargeLine(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("keeps every other line", func(t *testing.T) {
-		c, s := newChargeTestClient(t)
-		s.add(om.Invoice{Id: "gather", Status: om.InvoiceStatusGathering, Lines: &[]om.InvoiceLine{
-			{Id: "sub-line", Name: "Monthly fee", ManagedBy: om.InvoiceLineManagedBySubscription},
-		}})
-		ref, err := c.CreateChargeLine(ctx, "cust", testChargeLine())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := c.RemoveChargeLine(ctx, ref.InvoiceID, ref.LineID); err != nil {
-			t.Fatal(err)
-		}
-		lines := s.replaced[len(s.replaced)-1].Lines
-		if len(lines) != 1 || *lines[0].Id != "sub-line" {
-			t.Fatalf("replaced lines = %+v; want only the subscription's", lines)
-		}
-		if found, _ := c.FindChargeLine(ctx, "cust", "uid-1"); found != nil {
-			t.Fatalf("line still there: %+v", found)
-		}
-		// Removing it again is a no-op.
-		if err := c.RemoveChargeLine(ctx, ref.InvoiceID, ref.LineID); err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	// OpenMeter only marks a line it is sent back as hand-managed when one of
-	// its fields differs from what it holds (billing's diffInvoiceLine), so
-	// every other line has to go back exactly as it was read for subscription
-	// sync to keep owning it.
-	t.Run("sends every other line back unchanged", func(t *testing.T) {
-		c, s := newChargeTestClient(t)
-		raw := `{
-			"id": "usage-line", "name": "Egress", "description": "Data out",
-			"featureKey": "egress",
-			"invoiceAt": "2027-01-01T00:00:00Z",
-			"period": {"from": "2026-12-01T00:00:00Z", "to": "2027-01-01T00:00:00Z"},
-			"metadata": {"datum_project": "p-1"},
-			"rateCard": {
-				"featureKey": "egress",
-				"price": {"type": "unit", "amount": "0.05"},
-				"discounts": {"percentage": {"percentage": 100, "correlationId": "01KABC"}},
-				"taxConfig": {"behavior": "exclusive", "stripe": {"code": "txcd_10000000"}}
-			}
-		}`
-		var usage om.InvoiceLine
-		if err := json.Unmarshal([]byte(raw), &usage); err != nil {
-			t.Fatal(err)
-		}
-		usage.ManagedBy = om.InvoiceLineManagedBySubscription
-		s.add(om.Invoice{Id: "gather", Status: om.InvoiceStatusGathering, Lines: &[]om.InvoiceLine{usage}})
-		ref, err := c.CreateChargeLine(ctx, "cust", testChargeLine())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := c.RemoveChargeLine(ctx, ref.InvoiceID, ref.LineID); err != nil {
-			t.Fatal(err)
-		}
-		lines := s.replaced[len(s.replaced)-1].Lines
-		if len(lines) != 1 {
-			t.Fatalf("replaced lines = %+v; want only the usage line", lines)
-		}
-		var sent, read map[string]any
-		got, _ := json.Marshal(lines[0])
-		_ = json.Unmarshal(got, &sent)
-		_ = json.Unmarshal([]byte(raw), &read)
-		if len(sent) != len(read) {
-			t.Fatalf("sent fields %v; want exactly %v", keys(sent), keys(read))
-		}
-		for k, v := range read {
-			want, _ := json.Marshal(v)
-			have, _ := json.Marshal(sent[k])
-			if string(want) != string(have) {
-				t.Errorf("%s sent back as %s; read as %s", k, have, want)
-			}
-		}
-	})
-
-	t.Run("starts over when the invoice changes under it", func(t *testing.T) {
-		c, s := newChargeTestClient(t)
-		ref, err := c.CreateChargeLine(ctx, "cust", testChargeLine())
-		if err != nil {
-			t.Fatal(err)
-		}
-		s.touchOnGet[ref.InvoiceID] = 2 // the re-read before writing sees a change
-		if err := c.RemoveChargeLine(ctx, ref.InvoiceID, ref.LineID); err != nil {
-			t.Fatal(err)
-		}
-		if len(s.replaced) != 1 {
-			t.Fatalf("replaced %d times; want once, after starting over", len(s.replaced))
-		}
-		if s.gets[ref.InvoiceID] != 4 {
-			t.Fatalf("read the invoice %d times; want 4 (two attempts)", s.gets[ref.InvoiceID])
-		}
-	})
-
-	t.Run("refuses a line on an issued invoice", func(t *testing.T) {
-		c, s := newChargeTestClient(t)
-		ref, err := c.CreateChargeLine(ctx, "cust", testChargeLine())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := c.InvoiceChargeLineNow(ctx, "cust", ref.LineID); err != nil {
-			t.Fatal(err)
-		}
-		found, _ := c.FindChargeLine(ctx, "cust", "uid-1")
-		if err := c.RemoveChargeLine(ctx, found.InvoiceID, found.LineID); !errors.Is(err, ErrLineInvoiced) {
-			t.Fatalf("err = %v, want ErrLineInvoiced", err)
-		}
-		if len(s.replaced) != 0 {
-			t.Fatal("an issued invoice was replaced")
-		}
-	})
-
-	t.Run("a gone invoice is success", func(t *testing.T) {
-		c, _ := newChargeTestClient(t)
-		if err := c.RemoveChargeLine(ctx, "gone", "line"); err != nil {
-			t.Fatal(err)
-		}
-	})
 }

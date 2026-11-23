@@ -273,9 +273,6 @@ type Client interface {
 	// FindChargeLine finds the line for the charge with chargeUID on the
 	// customer's gathering invoice or a recent one, or returns nil.
 	FindChargeLine(ctx context.Context, customerID CustomerID, chargeUID string) (*ChargeLineRef, error)
-	// RemoveChargeLine takes a line off the gathering invoice or a draft;
-	// ErrLineInvoiced when it's on an issued invoice.
-	RemoveChargeLine(ctx context.Context, invoiceID, lineID string) error
 	// InvoiceChargeLineNow invoices one pending line now, on its own.
 	InvoiceChargeLineNow(ctx context.Context, customerID CustomerID, lineID string) error
 	// CurrentBillingPeriodEnd is when the customer's live subscription's
