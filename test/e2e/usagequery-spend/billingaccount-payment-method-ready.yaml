@@ -11,3 +11,8 @@ status:
       reason: PaymentMethodActive
       message: e2e-simulated Active payment method
       lastTransitionTime: "2024-01-01T00:00:00Z"
+    - type: PaymentReady
+      status: "True"
+      reason: PaymentMethodReady
+      message: e2e-simulated default payment method
+      lastTransitionTime: "2024-01-01T00:00:00Z"

@@ -59,6 +59,31 @@ account's `InvoiceWriterReady` condition to True. billing only accepts
 charges from staff on accounts where it is. An account moved back gets
 `InvoiceWriterReady=False`.
 
+### Accounts That Can't Pay
+
+OpenMeter's Stripe app refuses to subscribe a customer with no Stripe
+details, which held back every account without a card or payment terms.
+The Custom Invoicing app subscribes anyone. So the provider makes the
+check itself, whatever app invoices the account: it subscribes an account
+once it has a usable default card or payment terms.
+
+- A card counts once billing reports the account `PaymentReady`.
+- Payment terms count as soon as billing publishes the active
+  arrangement on `status.paymentArrangement`, card or no card.
+- Terms that haven't started yet count for a contract, which usually
+  starts with its terms, so the contract isn't started late waiting for
+  billing to see them start. Without a contract the account waits for
+  its terms to start.
+
+Until then the account's entitlement reports
+`OpenMeterSubscriptionSynced=False` with reason `CustomerBillingNotReady`
+and billing's reason, and it's subscribed as soon as billing updates the
+account.
+
+An account that's already subscribed keeps its subscription when it
+can't pay any more, for example when its card expires. Its plan changes
+and migrations still go through, as they did under the Stripe app.
+
 ## An Invoice, Step by Step
 
 With both hooks on, an OpenMeter invoice stops twice on its way to being

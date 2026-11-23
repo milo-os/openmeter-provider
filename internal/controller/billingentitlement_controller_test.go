@@ -88,6 +88,15 @@ func testAccount() *billingv1alpha1.BillingAccount {
 	}
 }
 
+// payingAccount is testAccount with billing reporting it can pay.
+func payingAccount() *billingv1alpha1.BillingAccount {
+	a := testAccount()
+	a.Status.Conditions = []metav1.Condition{{
+		Type: billingv1alpha1.BillingAccountConditionPaymentReady, Status: metav1.ConditionTrue, Reason: "PaymentMethodReady",
+	}}
+	return a
+}
+
 func deletingAccount() *billingv1alpha1.BillingAccount {
 	a := testAccount()
 	now := metav1.Now()
@@ -427,6 +436,76 @@ func TestBillingEntitlement_PendingMigration(t *testing.T) {
 	}
 }
 
+// accountWithPaymentReady is testAccount with billing's PaymentReady
+// condition at status and reason.
+func accountWithPaymentReady(status metav1.ConditionStatus, reason, message string) *billingv1alpha1.BillingAccount {
+	a := testAccount()
+	a.Status.Conditions = []metav1.Condition{{
+		Type: billingv1alpha1.BillingAccountConditionPaymentReady, Status: status, Reason: reason, Message: message,
+	}}
+	return a
+}
+
+func TestBillingEntitlement_PaymentNotReadyFollowsBilling(t *testing.T) {
+	expired := accountWithPaymentReady(metav1.ConditionFalse, "PaymentMethodDegraded", "the card has expired")
+	terms := accountWithPaymentReady(metav1.ConditionTrue, "InvoiceTerms", "Billed by invoice.")
+	// Terms published before PaymentReady catches up, or with no card
+	// while billing can't read the default payment method.
+	termsUnknown := accountWithPaymentReady(metav1.ConditionUnknown, "Unknown", "")
+	termsUnknown.Status.PaymentArrangement = &billingv1alpha1.BillingAccountPaymentArrangement{
+		Name: "terms", Type: billingv1alpha1.BillingArrangementTypeInvoice,
+	}
+	termsNoCondition := testAccount()
+	termsNoCondition.Status.PaymentArrangement = termsUnknown.Status.PaymentArrangement
+	scheduled := accountWithPaymentReady(metav1.ConditionFalse, "ArrangementScheduled", "Payment terms start later.")
+	applied := accountWithPaymentReady(metav1.ConditionFalse, "ApplicationPending", "awaiting review")
+	ended := accountWithPaymentReady(metav1.ConditionFalse, "ArrangementEnded", "terms ended")
+	unknown := accountWithPaymentReady(metav1.ConditionUnknown, "Unknown", "")
+
+	contract := &billingv1alpha1.BillingContract{StartsAt: metav1.NewTime(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))}
+	for _, tc := range []struct {
+		name     string
+		account  *billingv1alpha1.BillingAccount
+		contract *billingv1alpha1.BillingContract
+		want     bool
+	}{
+		{"no PaymentReady condition", testAccount(), nil, true},
+		{"card expired", expired, nil, true},
+		{"PaymentReady unknown", unknown, nil, true},
+		{"terms applied for, not granted", applied, nil, true},
+		{"terms ended", ended, nil, true},
+		{"card ready", payingAccount(), nil, false},
+		{"active terms", terms, nil, false},
+		{"active terms, PaymentReady unknown", termsUnknown, nil, false},
+		{"active terms, no PaymentReady yet", termsNoCondition, nil, false},
+		{"active terms on a contract", terms, contract, false},
+		{"terms scheduled, no contract", scheduled, nil, true},
+		{"terms scheduled for a contract", scheduled, contract, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			be := testEntitlement(testBEName, "test-offer")
+			be.Spec.Contract = tc.contract
+			r, omc, _ := newEntitlementReconciler(t, be, tc.account, cpuOffer())
+			r.Now = func() time.Time { return time.Date(2026, 3, 1, 0, 0, 1, 0, time.UTC) }
+			var desired openmeter.DesiredSubscription
+			omc.ensureFn = func(d openmeter.DesiredSubscription) (openmeter.SubscriptionState, error) {
+				desired = d
+				return openmeter.SubscriptionState{}, &openmeter.PermanentError{Err: openmeter.ErrCustomerBillingNotReady}
+			}
+			_, _ = reconcileEntitlementErr(r, testBEName)
+			if desired.PaymentNotReady != tc.want {
+				t.Errorf("PaymentNotReady = %v, want %v", desired.PaymentNotReady, tc.want)
+			}
+			if tc.account == expired {
+				c := assertCondition(t, r, metav1.ConditionFalse, conditionReasonCustomerBillingNotReady)
+				if !strings.Contains(c.Message, "PaymentReady is False (PaymentMethodDegraded): the card has expired") {
+					t.Errorf("message = %q, want billing's reason", c.Message)
+				}
+			}
+		})
+	}
+}
+
 func TestBillingEntitlement_EnsureFailures(t *testing.T) {
 	failedOffer := cpuOffer()
 	failedOffer.Status.Conditions = []metav1.Condition{{
@@ -437,6 +516,7 @@ func TestBillingEntitlement_EnsureFailures(t *testing.T) {
 	tests := []struct {
 		name        string
 		offer       *billingv1alpha1.Offer
+		account     *billingv1alpha1.BillingAccount
 		err         error
 		wantReason  string
 		wantRequeue time.Duration
@@ -465,11 +545,19 @@ func TestBillingEntitlement_EnsureFailures(t *testing.T) {
 			wantMessage: "InvalidPricing: rates overlap",
 		},
 		{
-			name:        "customer cannot be invoiced",
+			name:        "OpenMeter refuses an account billing says can pay",
+			account:     payingAccount(),
 			err:         &openmeter.PermanentError{Err: fmt.Errorf("%w: no stripe data", openmeter.ErrCustomerBillingNotReady), StatusCode: 409},
 			wantReason:  conditionReasonCustomerBillingNotReady,
 			wantRequeue: customerBillingNotReadyRequeueAfter,
 			wantMessage: "default payment method",
+		},
+		{
+			// The BillingAccount watch requeues it once billing says it can pay.
+			name:        "account can't pay yet",
+			err:         &openmeter.PermanentError{Err: fmt.Errorf("%w: no payment method", openmeter.ErrCustomerBillingNotReady)},
+			wantReason:  conditionReasonCustomerBillingNotReady,
+			wantMessage: "once it has a default payment method or payment terms; billing hasn't reported whether it can pay",
 		},
 		{
 			name:        "permanent OpenMeter error",
@@ -492,7 +580,11 @@ func TestBillingEntitlement_EnsureFailures(t *testing.T) {
 			if offer == nil {
 				offer = cpuOffer()
 			}
-			r, omc, rec := newEntitlementReconciler(t, testEntitlement(testBEName, "test-offer"), testAccount(), offer)
+			account := tt.account
+			if account == nil {
+				account = testAccount()
+			}
+			r, omc, rec := newEntitlementReconciler(t, testEntitlement(testBEName, "test-offer"), account, offer)
 			omc.ensureFn = func(openmeter.DesiredSubscription) (openmeter.SubscriptionState, error) {
 				return openmeter.SubscriptionState{}, tt.err
 			}

@@ -21,10 +21,10 @@ import (
 // sync failed).
 var ErrPlanNotPublished = errors.New("openmeter: plan has no active version")
 
-// ErrCustomerBillingNotReady is returned by EnsureSubscription when OpenMeter
-// refuses the subscription because the customer cannot be invoiced yet —
-// typically no Stripe app data, because the BillingAccount has no default
-// payment method. OpenMeter only checks this for plans with priced items.
+// ErrCustomerBillingNotReady is returned by EnsureSubscription when the
+// customer cannot be invoiced yet: DesiredSubscription.PaymentNotReady is
+// set, or OpenMeter's Stripe app refuses a customer with no Stripe app data
+// (it only checks plans with priced items).
 var ErrCustomerBillingNotReady = errors.New("openmeter: customer billing setup is incomplete")
 
 // subscriptionListPageSize is the page size used when listing a customer's
@@ -99,6 +99,13 @@ type DesiredSubscription struct {
 	// subscription early on one. Otherwise, or later, the subscription
 	// starts now and its first period is prorated.
 	StartsAt *time.Time
+	// PaymentNotReady says the account has no way to pay yet: no usable
+	// default payment method and no payment terms. EnsureSubscription then
+	// creates no subscription and returns ErrCustomerBillingNotReady, as
+	// OpenMeter's Stripe app does for a customer without Stripe data; a
+	// Custom Invoicing app invoices anyone. A subscription the customer
+	// already has is still restored, changed and migrated.
+	PaymentNotReady bool
 	// Now is the current time; time.Now when zero.
 	Now time.Time
 }
@@ -286,6 +293,10 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 		step := nextSubscriptionStep(subs, desired.PlanKey, activeVersion)
 		if step.kind == stepNone {
 			return SubscriptionState{Current: *step.current, Pending: step.pending, PlanVersion: activeVersion, Changed: changed}, nil
+		}
+		if step.kind == stepCreate && desired.PaymentNotReady {
+			return SubscriptionState{}, &PermanentError{Err: fmt.Errorf(
+				"%w: the billing account has no payment method or payment terms", ErrCustomerBillingNotReady)}
 		}
 		if step.kind == stepChange && desired.ChangeAtPeriodEnd {
 			period, err := c.currentBillingPeriod(ctx, step.target.Id)
