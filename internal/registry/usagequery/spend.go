@@ -69,7 +69,7 @@ type pricedRange struct {
 type meterSpendTotal struct {
 	priced     bool
 	currencies map[string]bool
-	amount     alpacadecimal.Decimal
+	cost       openmeter.UsageCost
 	errs       []string
 }
 
@@ -102,13 +102,13 @@ func (c *spendCalculator) run(ctx context.Context, plans []meterPlan) []spendRes
 	g.SetLimit(meterQueries)
 	for _, r := range ranges {
 		g.Go(func() error {
-			amount, err := c.priceRange(gctx, plans[r.plan], r)
+			cost, err := c.priceRange(gctx, plans[r.plan], r)
 			if err != nil {
 				fail(r.plan, err)
 				return nil
 			}
 			mu.Lock()
-			totals[r.plan].amount = totals[r.plan].amount.Add(amount)
+			totals[r.plan].cost = totals[r.plan].cost.Add(cost)
 			mu.Unlock()
 			return nil
 		})
@@ -127,7 +127,12 @@ func (c *spendCalculator) run(ctx context.Context, plans []meterPlan) []spendRes
 				strings.Join(slices.Sorted(maps.Keys(t.currencies)), ", "))
 		default:
 			currency := slices.Collect(maps.Keys(t.currencies))[0]
-			results[i].spend = &usagev1alpha1.UsageSpend{Amount: t.amount.String(), Currency: currency}
+			results[i].spend = &usagev1alpha1.UsageSpend{
+				Amount:                t.cost.Amount.String(),
+				AmountBeforeDiscounts: t.cost.BeforeDiscounts.String(),
+				DiscountAmount:        t.cost.Discount.String(),
+				Currency:              currency,
+			}
 		}
 	}
 	return results
@@ -287,21 +292,21 @@ func cardRanges(sub om.Subscription, card openmeter.UsageRateCard, planBySlug ma
 
 // priceRange queries the usage r covers, and the usage earlier in its billing
 // period when the price needs it, and prices it.
-func (c *spendCalculator) priceRange(ctx context.Context, plan meterPlan, r pricedRange) (alpacadecimal.Decimal, error) {
+func (c *spendCalculator) priceRange(ctx context.Context, plan meterPlan, r pricedRange) (openmeter.UsageCost, error) {
 	quantity, err := c.usage(ctx, plan, r, r.from, r.to)
 	if err != nil {
-		return alpacadecimal.Zero, err
+		return openmeter.UsageCost{}, err
 	}
 	if quantity.IsZero() {
-		return alpacadecimal.Zero, nil
+		return openmeter.UsageCost{}, nil
 	}
 	earlier := alpacadecimal.Zero
 	if openmeter.PriceNeedsEarlierUsage(r.price) && r.earlierFrom.Before(r.from) {
 		if earlier, err = c.usage(ctx, plan, r, r.earlierFrom, r.from); err != nil {
-			return alpacadecimal.Zero, err
+			return openmeter.UsageCost{}, err
 		}
 	}
-	amount, err := openmeter.PriceUsage(openmeter.UsageToPrice{
+	cost, err := openmeter.PriceUsage(openmeter.UsageToPrice{
 		Price:                 r.price,
 		UnitConfig:            r.unitConfig,
 		Discounts:             r.discounts,
@@ -312,9 +317,9 @@ func (c *spendCalculator) priceRange(ctx context.Context, plan meterPlan, r pric
 		PreLinePeriodQuantity: earlier,
 	})
 	if err != nil {
-		return alpacadecimal.Zero, fmt.Errorf("meter %s: %w", plan.definition.Name, err)
+		return openmeter.UsageCost{}, fmt.Errorf("meter %s: %w", plan.definition.Name, err)
 	}
-	return amount, nil
+	return cost, nil
 }
 
 // usage is the meter's usage between from and to that r's rate card covers:
@@ -363,11 +368,14 @@ func latest(first time.Time, rest ...time.Time) time.Time {
 // totalSpend adds up the meters' spend. It returns an error message instead
 // when any meter's usage or spend could not be read, or the meters are billed
 // in different currencies, so a partial total is never shown as the whole.
-// Meters no plan prices add nothing; with none priced there is no total.
+// Meters no plan prices add nothing; with none priced there is no total. The
+// amount before discounts and the discount are added up only when every
+// priced meter has them.
 func totalSpend(meters []usagev1alpha1.MeterUsage) (*usagev1alpha1.UsageSpend, string) {
 	var unreadable []string
 	currencies := map[string]bool{}
-	total := alpacadecimal.Zero
+	var total openmeter.UsageCost
+	withBreakdown := true
 	for _, m := range meters {
 		if m.Error != "" || m.SpendError != "" {
 			unreadable = append(unreadable, m.MeterDefinition)
@@ -376,13 +384,14 @@ func totalSpend(meters []usagev1alpha1.MeterUsage) (*usagev1alpha1.UsageSpend, s
 		if m.Spend == nil {
 			continue
 		}
-		amount, err := alpacadecimal.NewFromString(m.Spend.Amount)
+		cost, breakdown, err := spendCost(m.Spend)
 		if err != nil {
 			unreadable = append(unreadable, m.MeterDefinition)
 			continue
 		}
 		currencies[m.Spend.Currency] = true
-		total = total.Add(amount)
+		total = total.Add(cost)
+		withBreakdown = withBreakdown && breakdown
 	}
 	switch {
 	case len(unreadable) > 0:
@@ -393,5 +402,28 @@ func totalSpend(meters []usagev1alpha1.MeterUsage) (*usagev1alpha1.UsageSpend, s
 	case len(currencies) == 0:
 		return nil, ""
 	}
-	return &usagev1alpha1.UsageSpend{Amount: total.String(), Currency: slices.Collect(maps.Keys(currencies))[0]}, ""
+	out := &usagev1alpha1.UsageSpend{Amount: total.Amount.String(), Currency: slices.Collect(maps.Keys(currencies))[0]}
+	if withBreakdown {
+		out.AmountBeforeDiscounts = total.BeforeDiscounts.String()
+		out.DiscountAmount = total.Discount.String()
+	}
+	return out, ""
+}
+
+// spendCost parses a meter's spend. breakdown reports whether it has the
+// amount before discounts and the discount.
+func spendCost(s *usagev1alpha1.UsageSpend) (cost openmeter.UsageCost, breakdown bool, err error) {
+	if cost.Amount, err = alpacadecimal.NewFromString(s.Amount); err != nil {
+		return cost, false, err
+	}
+	if s.AmountBeforeDiscounts == "" || s.DiscountAmount == "" {
+		return cost, false, nil
+	}
+	if cost.BeforeDiscounts, err = alpacadecimal.NewFromString(s.AmountBeforeDiscounts); err != nil {
+		return cost, false, err
+	}
+	if cost.Discount, err = alpacadecimal.NewFromString(s.DiscountAmount); err != nil {
+		return cost, false, err
+	}
+	return cost, true, nil
 }

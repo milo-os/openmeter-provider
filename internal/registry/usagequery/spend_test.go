@@ -413,6 +413,9 @@ func TestTotalSpend(t *testing.T) {
 	usd := func(amount string) *usagev1alpha1.UsageSpend {
 		return &usagev1alpha1.UsageSpend{Amount: amount, Currency: "USD"}
 	}
+	discounted := func(amount, before, discount string) *usagev1alpha1.UsageSpend {
+		return &usagev1alpha1.UsageSpend{Amount: amount, AmountBeforeDiscounts: before, DiscountAmount: discount, Currency: "USD"}
+	}
 	tests := []struct {
 		name    string
 		meters  []usagev1alpha1.MeterUsage
@@ -423,6 +426,22 @@ func TestTotalSpend(t *testing.T) {
 			name:   "adds up every meter",
 			meters: []usagev1alpha1.MeterUsage{{MeterDefinition: "a", Spend: usd("5.5")}, {MeterDefinition: "b", Spend: usd("19")}},
 			want:   usd("24.5"),
+		},
+		{
+			name: "adds up the amounts before discounts and the discounts",
+			meters: []usagev1alpha1.MeterUsage{
+				{MeterDefinition: "a", Spend: discounted("0", "12", "12")},
+				{MeterDefinition: "b", Spend: discounted("17", "20", "3")},
+			},
+			want: discounted("17", "32", "15"),
+		},
+		{
+			name: "a meter without them leaves them out of the total",
+			meters: []usagev1alpha1.MeterUsage{
+				{MeterDefinition: "a", Spend: discounted("0", "12", "12")},
+				{MeterDefinition: "b", Spend: usd("5")},
+			},
+			want: usd("5"),
 		},
 		{
 			name:   "a meter no plan prices adds nothing",
@@ -491,8 +510,10 @@ func TestSpend_TotalOfEveryMeter(t *testing.T) {
 	}
 	wantSpend(t, meterResult(t, got, "cpu-hours"), "20", "USD")
 	wantSpend(t, meterResult(t, got, "peak-storage"), "12", "USD")
-	if s := got.Status.Spend; s == nil || s.Amount != "32" || s.Currency != "USD" || got.Status.SpendError != "" {
-		t.Errorf("status.spend = %+v, spendError %q; want 32 USD", s, got.Status.SpendError)
+	// Nothing is discounted: the amount before discounts is the amount.
+	wantTotal := usagev1alpha1.UsageSpend{Amount: "32", AmountBeforeDiscounts: "32", DiscountAmount: "0", Currency: "USD"}
+	if s := got.Status.Spend; s == nil || *s != wantTotal || got.Status.SpendError != "" {
+		t.Errorf("status.spend = %+v, spendError %q; want %+v", s, got.Status.SpendError, wantTotal)
 	}
 }
 
@@ -525,9 +546,18 @@ func TestSpend_WithDiscounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantSpend(t, meterResult(t, got, "cpu-hours"), "17", "USD")
-	wantSpend(t, meterResult(t, got, "peak-storage"), "0", "USD")
-	if s := got.Status.Spend; s == nil || s.Amount != "17" || s.Currency != "USD" || got.Status.SpendError != "" {
-		t.Errorf("status.spend = %+v, spendError %q; want 17 USD", s, got.Status.SpendError)
+	want := map[string]usagev1alpha1.UsageSpend{
+		"cpu-hours":    {Amount: "17", AmountBeforeDiscounts: "20", DiscountAmount: "3", Currency: "USD"},
+		"peak-storage": {Amount: "0", AmountBeforeDiscounts: "12", DiscountAmount: "12", Currency: "USD"},
+	}
+	for meter, w := range want {
+		m := meterResult(t, got, meter)
+		if m.Spend == nil || *m.Spend != w || m.SpendError != "" {
+			t.Errorf("%s: spend = %+v, spendError %q; want %+v", meter, m.Spend, m.SpendError, w)
+		}
+	}
+	wantTotal := usagev1alpha1.UsageSpend{Amount: "17", AmountBeforeDiscounts: "32", DiscountAmount: "15", Currency: "USD"}
+	if s := got.Status.Spend; s == nil || *s != wantTotal || got.Status.SpendError != "" {
+		t.Errorf("status.spend = %+v, spendError %q; want %+v", s, got.Status.SpendError, wantTotal)
 	}
 }
