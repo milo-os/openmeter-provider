@@ -851,3 +851,50 @@ func TestSubscriptionChangedPredicate(t *testing.T) {
 		t.Errorf("mapEntitlementToAccount = %v, want org-a/acme-account", reqs)
 	}
 }
+
+// TestChargeInvoicedNowPredicate checks the account wakes when an
+// invoice-now charge goes on its invoice, and not on a charge's other
+// updates or on next-invoice charges.
+func TestChargeInvoicedNowPredicate(t *testing.T) {
+	charge := func(invoice billingv1alpha1.ChargeInvoiceTiming, reason string) *billingv1alpha1.Charge {
+		c := &billingv1alpha1.Charge{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "org-a", Name: "setup"},
+			Spec: billingv1alpha1.ChargeSpec{
+				BillingAccountRef: billingv1alpha1.BillingAccountRef{Name: "acme-account"},
+				Invoice:           invoice,
+			},
+		}
+		if reason != "" {
+			c.Status.Conditions = []metav1.Condition{{
+				Type: billingv1alpha1.ChargeConditionOnInvoice, Status: metav1.ConditionTrue, Reason: reason,
+			}}
+		}
+		return c
+	}
+	now, next := billingv1alpha1.ChargeInvoiceNow, billingv1alpha1.ChargeInvoiceNext
+	p := chargeInvoicedNowPredicate()
+	cases := []struct {
+		name     string
+		old, new *billingv1alpha1.Charge
+		want     bool
+	}{
+		{"invoiced now", charge(now, ChargeReasonAdding), charge(now, ChargeReasonAdded), true},
+		{"invoiced now, from no condition", charge(now, ""), charge(now, ChargeReasonAdded), true},
+		{"being added", charge(now, ""), charge(now, ChargeReasonAdding), false},
+		{"already added", charge(now, ChargeReasonAdded), charge(now, ChargeReasonAdded), false},
+		{"next invoice", charge(next, ChargeReasonAdding), charge(next, ChargeReasonAdded), false},
+	}
+	for _, tc := range cases {
+		if got := p.Update(event.UpdateEvent{ObjectOld: tc.old, ObjectNew: tc.new}); got != tc.want {
+			t.Errorf("%s: passed = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if p.Create(event.CreateEvent{Object: charge(now, ChargeReasonAdded)}) {
+		t.Error("create passed")
+	}
+
+	reqs := mapChargeToAccount(context.Background(), charge(now, ""))
+	if len(reqs) != 1 || reqs[0].Namespace != "org-a" || reqs[0].Name != "acme-account" {
+		t.Errorf("mapChargeToAccount = %v, want org-a/acme-account", reqs)
+	}
+}

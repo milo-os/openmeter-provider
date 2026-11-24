@@ -90,7 +90,9 @@ and migrations still go through, as they did under the Stripe app.
 With both hooks on, an OpenMeter invoice stops twice on its way to being
 issued. The provider lists a covered account's invoices in either stop on
 every reconcile. That is every minute while one is waiting, and again
-whenever stripe-provider updates one of the account's `StripeInvoice`s.
+whenever stripe-provider updates one of the account's `StripeInvoice`s or
+one of its charges goes on an invoice now, so a charge's invoice is picked
+up as soon as OpenMeter makes it.
 
 | OpenMeter | The provider | stripe-provider |
 |---|---|---|
