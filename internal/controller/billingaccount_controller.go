@@ -727,6 +727,21 @@ func (r *BillingAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	case r.InvoiceWriter != nil:
 		return fmt.Errorf("invoiceWriter is set, but stripe-provider's %s API isn't served", sigvk)
 	}
+
+	// A charge invoiced now has OpenMeter make its invoice at once, and the
+	// invoice writer should pick it up straight away rather than at the
+	// account's next syncedRequeueAfter. Watched only where billing serves
+	// Charge, as the charge controller is.
+	if r.InvoiceWriter != nil {
+		cgvk := billingv1alpha1.GroupVersion.WithKind("Charge")
+		switch _, err := mgr.GetRESTMapper().RESTMapping(cgvk.GroupKind(), cgvk.Version); {
+		case err == nil:
+			b = b.Watches(&billingv1alpha1.Charge{}, handler.EnqueueRequestsFromMapFunc(mapChargeToAccount),
+				builder.WithPredicates(chargeInvoicedNowPredicate()))
+		case !apimeta.IsNoMatchError(err):
+			return fmt.Errorf("look up %s: %w", cgvk, err)
+		}
+	}
 	return b.Complete(r)
 }
 
