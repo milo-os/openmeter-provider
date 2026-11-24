@@ -18,20 +18,6 @@ jobs:
       platforms: linux/amd64,linux/arm64
     secrets: inherit
 
-  publish-ui-image:
-    permissions:
-      id-token: write
-      contents: read
-      packages: write
-    uses: datum-cloud/actions/.github/workflows/publish-docker.yaml@v1.28.0
-    with:
-      image-name: openmeter-provider-ui
-      registry-organization: milo-os
-      platforms: linux/amd64,linux/arm64
-      dockerfile-path: ui/Dockerfile
-      context: ui
-    secrets: inherit
-
   # The bundle pins the image tag built by publish-container-image, and Flux
   # deploys it as soon as it lands, so it must not be pushed before the image.
   publish-kustomize-bundles:
