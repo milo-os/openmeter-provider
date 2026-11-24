@@ -28,7 +28,8 @@ invoiceWriter:
   accountSelector:
     matchLabels:
       billing.miloapis.com/invoice-writer: "true"
-  # The ServicePricing a charge staff add without a catalog item is billed under.
+  # The ServicePricing a charge staff add without a catalog item is billed
+  # under, and a charge draft's preview prices such a line under.
   customChargePricing: custom-charge
   # appName: Datum invoice writer
 ```

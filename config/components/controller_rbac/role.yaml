@@ -51,6 +51,7 @@ rules:
 - apiGroups:
   - billing.miloapis.com
   resources:
+  - chargedrafts
   - invoicerequests
   - paymentmethods
   - servicepricings

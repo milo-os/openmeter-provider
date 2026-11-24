@@ -135,9 +135,9 @@ func (r *InvoiceRequestReconciler) stripeInvoiceFor(
 			},
 			Metadata: map[string]string{"service_pricing": c.pricing},
 		}
-		if c.discountPercent > 0 {
-			line.DiscountPercent = fmt.Sprint(c.discountPercent)
-		}
+		line.DiscountPercent = c.discount
+		line.Tax = c.tax
+		line.Note = c.note
 		invoice.Spec.Lines = append(invoice.Spec.Lines, line)
 	}
 	if err := controllerutil.SetControllerReference(ir, invoice, r.Scheme()); err != nil {
