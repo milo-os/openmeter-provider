@@ -22,7 +22,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterProviderPodCrashLooping",alertstate="firing"}
         eval_time: 5m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterProviderPodCrashLooping",alertstate="firing",container="manager",expected_no_match="true",job="kube-state-metrics",namespace="openmeter-system",pod="openmeter-provider-manager-abcd-1234",reason="CrashLoopBackOff",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterProviderPodCrashLooping",alertstate="firing",container="manager",expected_no_match="true",job="kube-state-metrics",namespace="openmeter-system",pod="openmeter-provider-manager-abcd-1234",reason="CrashLoopBackOff",service="billing",severity="critical",team="billing"}'
             value: 1
 
   - name: Deployment unavailable replicas alert fires after 5m for both deployments
@@ -51,11 +51,11 @@ tests:
       - expr: ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing"}
         eval_time: 5m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="openmeter-provider-manager",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="openmeter-provider-manager",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
-          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="submission-consumer",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="submission-consumer",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
-          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="openmeter-usage-apiserver",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterProviderDeploymentUnavailable",alertstate="firing",deployment="openmeter-usage-apiserver",job="kube-state-metrics",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
 
   # A rolling update surges a new pod that cannot start (here, its image is
@@ -88,7 +88,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterProviderMetricsScrapeFailing",alertstate="firing"}
         eval_time: 10m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterProviderMetricsScrapeFailing",alertstate="firing",instance="10.0.0.1:8443",job="openmeter-provider-metrics",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterProviderMetricsScrapeFailing",alertstate="firing",instance="10.0.0.1:8443",job="openmeter-provider-metrics",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   - name: Metrics absent alert fires when a scrape target disappears
@@ -103,7 +103,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterProviderMetricsAbsent",alertstate="firing"}
         eval_time: 15m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterProviderMetricsAbsent",alertstate="firing",job="submission-consumer-metrics",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterProviderMetricsAbsent",alertstate="firing",job="submission-consumer-metrics",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ tests:
       - expr: ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing"}
         eval_time: 8m
         exp_samples:
-          - labels: 'ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="SubmissionConsumerPipelineStalled",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   - name: Submission pipeline stays quiet under steady traffic with short-lived batches
@@ -146,7 +146,7 @@ tests:
       - expr: ALERTS{alertname="SubmissionConsumerEventsDropped",alertstate="firing"}
         eval_time: 4m
         exp_samples:
-          - labels: 'ALERTS{alertname="SubmissionConsumerEventsDropped",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="SubmissionConsumerEventsDropped",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
       - expr: ALERTS{alertname="SubmissionConsumerEventsDropped",alertstate="firing"}
         eval_time: 11m
@@ -166,7 +166,7 @@ tests:
       - expr: ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing"}
         eval_time: 15m
         exp_samples:
-          - labels: 'ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   - name: Submission pipeline returns to healthy when age is 0
@@ -195,7 +195,7 @@ tests:
       - expr: ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing"}
         eval_time: 15m
         exp_samples:
-          - labels: 'ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="SubmissionConsumerHighErrorRate",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   - name: Submission consumer error rate stays quiet when errors are below 10%
@@ -224,7 +224,7 @@ tests:
       - expr: ALERTS{alertname="SubmissionConsumerPermanentFailures",alertstate="firing"}
         eval_time: 10m
         exp_samples:
-          - labels: 'ALERTS{alertname="SubmissionConsumerPermanentFailures",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="SubmissionConsumerPermanentFailures",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
 
   - name: Config error 401/403/404 triggers alert after 5m
@@ -239,7 +239,7 @@ tests:
       - expr: ALERTS{alertname="SubmissionConsumerConfigError",alertstate="firing"}
         eval_time: 10m
         exp_samples:
-          - labels: 'ALERTS{alertname="SubmissionConsumerConfigError",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="SubmissionConsumerConfigError",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
 
   # ---------------------------------------------------------------------------
@@ -261,12 +261,12 @@ tests:
       - expr: ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing"}
         eval_time: 40m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing",controller="offer",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing",controller="offer",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
       - expr: ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing"}
         eval_time: 85m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing",controller="offer",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterProviderReconcileFailing",alertstate="firing",controller="offer",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   - name: Reconcile failing alert stays quiet for a one-off failure that recovers on retry
@@ -294,7 +294,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterBillingAccountSyncFailing",alertstate="firing"}
         eval_time: 40m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterBillingAccountSyncFailing",alertstate="firing",controller="billingaccount",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterBillingAccountSyncFailing",alertstate="firing",controller="billingaccount",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
       - expr: ALERTS{alertname="OpenMeterProviderReconcileFailing"}
         eval_time: 40m
@@ -312,7 +312,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterProviderReconcilePanic",alertstate="firing"}
         eval_time: 4m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterProviderReconcilePanic",alertstate="firing",controller="meterdefinition",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterProviderReconcilePanic",alertstate="firing",controller="meterdefinition",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
       - expr: ALERTS{alertname="OpenMeterProviderReconcilePanic",alertstate="firing"}
         eval_time: 20m
@@ -335,7 +335,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing"}
         eval_time: 30m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing",cronjob="openmeter-billing-advance-invoices",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterCronJobFailed",alertstate="firing",cronjob="openmeter-billing-advance-invoices",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   - name: OpenMeter CronJob failed alert clears once a later run succeeds
@@ -366,7 +366,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterCronJobStale",alertstate="firing"}
         eval_time: 2h20m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterCronJobStale",alertstate="firing",cronjob="openmeter-subscription-sync",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterCronJobStale",alertstate="firing",cronjob="openmeter-subscription-sync",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
 
   # ---------------------------------------------------------------------------
@@ -386,7 +386,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterPostgresWALArchiveFailing",alertstate="firing"}
         eval_time: 15m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterPostgresWALArchiveFailing",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterPostgresWALArchiveFailing",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
 
   - name: CNPG WAL archiving stays quiet when archive time is newer than failed time
@@ -413,7 +413,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
         eval_time: 27h
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   - name: CNPG backup stale alert stays quiet while a fresh backup exists
@@ -441,7 +441,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
         eval_time: 27h
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   - name: CNPG backup stale alert stays quiet while a plugin-only cluster has a fresh backup
@@ -484,7 +484,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing"}
         eval_time: 27h
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterPostgresBackupStale",alertstate="firing",component="openmeter-database",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   # ---------------------------------------------------------------------------
@@ -504,7 +504,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterUsageAPIErrors",alertstate="firing"}
         eval_time: 15m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterUsageAPIErrors",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPIErrors",alertstate="firing",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
 
   - name: UsageQuery caller errors (4xx) do not fire the error alert
@@ -539,7 +539,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterUsageAPILatencyHigh",alertstate="firing"}
         eval_time: 20m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterUsageAPILatencyHigh",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPILatencyHigh",alertstate="firing",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   - name: UsageQuery latency alert stays quiet for fast queries
@@ -573,7 +573,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterUsageAPIUnreachableFromMilo",alertstate="firing"}
         eval_time: 7m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterUsageAPIUnreachableFromMilo",alertstate="firing",group="usage.billing.miloapis.com",namespace="openmeter-system",service="billing",severity="critical"}'
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPIUnreachableFromMilo",alertstate="firing",group="usage.billing.miloapis.com",namespace="openmeter-system",service="billing",severity="critical",team="billing"}'
             value: 1
 
   - name: Usage API unreachable from Milo stays quiet without routing failures
@@ -598,7 +598,7 @@ tests:
       - expr: ALERTS{alertname="OpenMeterUsageAPIScrapeFailing",alertstate="firing"}
         eval_time: 10m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterUsageAPIScrapeFailing",alertstate="firing",instance="10.0.0.3:8443",job="openmeter-usage-apiserver",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPIScrapeFailing",alertstate="firing",instance="10.0.0.3:8443",job="openmeter-usage-apiserver",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
 
   - name: Usage API metrics absent fires after 15m without a scrape target
@@ -613,5 +613,5 @@ tests:
       - expr: ALERTS{alertname="OpenMeterUsageAPIMetricsAbsent",alertstate="firing"}
         eval_time: 15m
         exp_samples:
-          - labels: 'ALERTS{alertname="OpenMeterUsageAPIMetricsAbsent",alertstate="firing",job="openmeter-usage-apiserver",namespace="openmeter-system",service="billing",severity="warning"}'
+          - labels: 'ALERTS{alertname="OpenMeterUsageAPIMetricsAbsent",alertstate="firing",job="openmeter-usage-apiserver",namespace="openmeter-system",service="billing",severity="warning",team="billing"}'
             value: 1
