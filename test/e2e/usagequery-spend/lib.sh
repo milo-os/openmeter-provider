@@ -50,6 +50,7 @@ TIMES_FILE=/tmp/e2e-usagequery-spend-times.env
 # Discount on the invoice lines (whole subscription): storage 2.5, backup 8
 #
 # Total (status.spend):  whole subscription 34.5, from W 20
+# Before discounts:      whole subscription 45 (10.5 off), from W 27.5 (7.5 off)
 
 # spend_spec START END — a spec reading every meter's totals with spend.
 spend_spec() {
@@ -88,4 +89,19 @@ expect_total() {
     fail "$3: total spend is '$got', want $2 USD" "$(echo "$1" | jq -c '.status | {spend, spendError}')"
   fi
   echo "OK: $3: total spend $amount USD"
+}
+
+# expect_breakdown RESPONSE METER BEFORE DISCOUNT WHAT — fail unless METER's
+# spend before discounts is BEFORE and its discount DISCOUNT. METER "" checks
+# status.spend, every meter's spend together.
+expect_breakdown() {
+  local got before discount
+  got=$(echo "$1" | jq -r --arg m "$2" '
+    (if $m == "" then .status.spend else (.status.meters[] | select(.meterDefinition == $m) | .spend) end) as $s |
+    if $s then "\($s.amountBeforeDiscounts // "none") \($s.discountAmount // "none")" else "none none" end')
+  read -r before discount <<<"$got"
+  if ! num_eq "$before" "$3" || ! num_eq "$discount" "$4"; then
+    fail "$5: ${2:-total} spend before discounts and discount are '$got', want $3 and $4" "$(echo "$1" | jq -c '.status')"
+  fi
+  echo "OK: $5: ${2:-total} spend $before before a $discount discount"
 }

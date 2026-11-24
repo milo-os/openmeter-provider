@@ -74,9 +74,7 @@ func TestPriceUsage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !got.Equal(alpacadecimal.RequireFromString(tt.want)) {
-				t.Errorf("got %s, want %s", got, tt.want)
-			}
+			wantCost(t, got, tt.want, tt.want, "0")
 		})
 	}
 }
@@ -117,9 +115,7 @@ func TestPriceUsage_ConvertsUsage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !got.Equal(alpacadecimal.RequireFromString(tt.want)) {
-				t.Errorf("got %s, want %s", got, tt.want)
-			}
+			wantCost(t, got, tt.want, tt.want, "0")
 		})
 	}
 }
@@ -136,8 +132,8 @@ func TestPriceUsage_RoundsToTheCurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 1.234 USD is invoiced as 1.23.
-	if got.String() != "1.23" {
-		t.Errorf("got %s, want 1.23", got)
+	if got.Amount.String() != "1.23" || got.BeforeDiscounts.String() != "1.23" {
+		t.Errorf("got %+v, want 1.23", got)
 	}
 }
 
@@ -165,6 +161,8 @@ func TestPriceUsage_Discounts(t *testing.T) {
 		quantity  string
 		discounts *productcatalog.Discounts
 		want      string
+		before    string
+		discount  string
 	}{
 		{
 			name:      "unit price 15% discount",
@@ -172,6 +170,8 @@ func TestPriceUsage_Discounts(t *testing.T) {
 			quantity:  "10", // 10 * 1 = 10, net 15% discount = 8.5
 			discounts: pctDiscount(15),
 			want:      "8.5",
+			before:    "10",
+			discount:  "1.5",
 		},
 		{
 			name:      "unit price 100% discount",
@@ -179,6 +179,8 @@ func TestPriceUsage_Discounts(t *testing.T) {
 			quantity:  "10", // 10 * 1 = 10, net 100% discount = 0
 			discounts: pctDiscount(100),
 			want:      "0",
+			before:    "10",
+			discount:  "10",
 		},
 		{
 			name:      "unit price 0% discount",
@@ -186,6 +188,8 @@ func TestPriceUsage_Discounts(t *testing.T) {
 			quantity:  "10",
 			discounts: pctDiscount(0),
 			want:      "10",
+			before:    "10",
+			discount:  "0",
 		},
 		{
 			name:      "graduated price 15% discount",
@@ -193,6 +197,8 @@ func TestPriceUsage_Discounts(t *testing.T) {
 			quantity:  "150", // 100*1 + 50*0.5 = 125, 125 * 0.85 = 106.25
 			discounts: pctDiscount(15),
 			want:      "106.25",
+			before:    "125",
+			discount:  "18.75",
 		},
 		{
 			name:      "graduated price 100% discount",
@@ -200,6 +206,8 @@ func TestPriceUsage_Discounts(t *testing.T) {
 			quantity:  "150",
 			discounts: pctDiscount(100),
 			want:      "0",
+			before:    "125",
+			discount:  "125",
 		},
 	}
 	for _, tt := range tests {
@@ -215,9 +223,7 @@ func TestPriceUsage_Discounts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !got.Equal(alpacadecimal.RequireFromString(tt.want)) {
-				t.Errorf("got %s, want %s", got, tt.want)
-			}
+			wantCost(t, got, tt.want, tt.before, tt.discount)
 		})
 	}
 }
@@ -245,16 +251,18 @@ func TestPriceUsage_DiscountsWithEarlierUsage(t *testing.T) {
 		earlier   int64
 		discounts *productcatalog.Discounts
 		want      string
+		before    string
+		discount  string
 	}{
 		// 10 x 1 + 5 x 0.5 = 12.5, less 20%.
-		{"graduated 20% from the start", storage, 15, 0, pct(20), "10"},
+		{"graduated 20% from the start", storage, 15, 0, pct(20), "10", "12.5", "2.5"},
 		// Continues after 5 units: 5 x 1 + 5 x 0.5 = 7.5, less 20%.
-		{"graduated 20% continuing after earlier usage", storage, 10, 5, pct(20), "6"},
+		{"graduated 20% continuing after earlier usage", storage, 10, 5, pct(20), "6", "7.5", "1.5"},
 		// The same usage without the discount, for the list price.
-		{"graduated list price continuing after earlier usage", storage, 10, 5, nil, "7.5"},
+		{"graduated list price continuing after earlier usage", storage, 10, 5, nil, "7.5", "7.5", "0"},
 		// 40 x 0.2 = 8 and 30 x 0.2 = 6, less 100%.
-		{"flat 100% whole", backup, 40, 0, pct(100), "0"},
-		{"flat 100% from W", backup, 30, 10, pct(100), "0"},
+		{"flat 100% whole", backup, 40, 0, pct(100), "0", "8", "8"},
+		{"flat 100% from W", backup, 30, 10, pct(100), "0", "6", "6"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -270,9 +278,18 @@ func TestPriceUsage_DiscountsWithEarlierUsage(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !got.Equal(alpacadecimal.RequireFromString(tt.want)) {
-				t.Errorf("got %s, want %s", got, tt.want)
-			}
+			wantCost(t, got, tt.want, tt.before, tt.discount)
 		})
+	}
+}
+
+// wantCost checks a UsageCost's amount, amount before discounts and discount.
+func wantCost(t *testing.T, got UsageCost, amount, before, discount string) {
+	t.Helper()
+	if !got.Amount.Equal(alpacadecimal.RequireFromString(amount)) ||
+		!got.BeforeDiscounts.Equal(alpacadecimal.RequireFromString(before)) ||
+		!got.Discount.Equal(alpacadecimal.RequireFromString(discount)) {
+		t.Errorf("got amount %s, before discounts %s, discount %s; want %s, %s, %s",
+			got.Amount, got.BeforeDiscounts, got.Discount, amount, before, discount)
 	}
 }

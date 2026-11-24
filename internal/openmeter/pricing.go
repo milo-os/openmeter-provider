@@ -213,16 +213,37 @@ type UsageToPrice struct {
 // lines, unit conversion included. It needs no backend.
 var usageRater = ratingservice.New(ratingservice.Config{UnitConfigEnabled: true})
 
+// UsageCost is what usage costs, before taxes and credits.
+type UsageCost struct {
+	// Amount is what is charged: BeforeDiscounts less Discount.
+	Amount alpacadecimal.Decimal
+	// BeforeDiscounts is the amount at the rate card's price, before its
+	// discount: the invoice line's amount.
+	BeforeDiscounts alpacadecimal.Decimal
+	// Discount is what the rate card's discount takes off BeforeDiscounts.
+	Discount alpacadecimal.Decimal
+}
+
+// Add returns the sum of c and o.
+func (c UsageCost) Add(o UsageCost) UsageCost {
+	return UsageCost{
+		Amount:          c.Amount.Add(o.Amount),
+		BeforeDiscounts: c.BeforeDiscounts.Add(o.BeforeDiscounts),
+		Discount:        c.Discount.Add(o.Discount),
+	}
+}
+
 // PriceUsage returns what u costs, the way OpenMeter prices it on an invoice
-// line, before taxes and credits, net of the rate card's discount. A minimum
-// commitment is not applied: u may cover only part of a billing period.
+// line, before taxes and credits: the line's amount, the rate card's
+// discount, and what is left. A minimum commitment is not applied: u may
+// cover only part of a billing period.
 //
 // OpenMeter's SimulateInvoice endpoint would do the same, but in
 // v1.0.0-beta.232 it creates lines without a line engine and prices every
 // line at 0 (`invalid line engine type`).
-func PriceUsage(u UsageToPrice) (alpacadecimal.Decimal, error) {
+func PriceUsage(u UsageToPrice) (UsageCost, error) {
 	if u.Price == nil {
-		return alpacadecimal.Zero, errors.New("rate card has no price")
+		return UsageCost{}, errors.New("rate card has no price")
 	}
 
 	var rateCardDiscounts billing.Discounts
@@ -252,10 +273,15 @@ func PriceUsage(u UsageToPrice) (alpacadecimal.Decimal, error) {
 		rating.WithMinimumCommitmentIgnored(),
 		rating.WithCreditsMutatorDisabled())
 	if err != nil {
-		return alpacadecimal.Zero, fmt.Errorf("rate usage: %w", err)
+		return UsageCost{}, fmt.Errorf("rate usage: %w", err)
 	}
 	t := result.Totals
-	return t.Amount.Add(t.ChargesTotal).Sub(t.DiscountsTotal), nil
+	before := t.Amount.Add(t.ChargesTotal)
+	return UsageCost{
+		Amount:          before.Sub(t.DiscountsTotal),
+		BeforeDiscounts: before,
+		Discount:        t.DiscountsTotal,
+	}, nil
 }
 
 // PriceNeedsEarlierUsage reports whether a price depends on the usage
