@@ -371,7 +371,7 @@ func (f *fakeServer) serveSubscriptions(w http.ResponseWriter, r *http.Request) 
 // on plan then, recording a custom time in changesAt.
 func (f *fakeServer) changeSubscription(sub *om.Subscription, plan omv3.BillingPlan, at time.Time, metadata *om.Metadata) om.Subscription {
 	f.endSubscription(sub, false)
-	start := time.Now()
+	start := f.now()
 	if !at.IsZero() {
 		f.changesAt[sub.Id] = at
 		sub.ActiveTo = &at
@@ -441,6 +441,14 @@ func (f *fakeServer) newSubscription(customerID string, plan omv3.BillingPlan, s
 	return sub
 }
 
+// now is the fake's clock: clock when set, else the time now.
+func (f *fakeServer) now() time.Time {
+	if !f.clock.IsZero() {
+		return f.clock
+	}
+	return time.Now()
+}
+
 func (f *fakeServer) setAnchor(id string, anchor time.Time) om.Subscription {
 	sub := f.subscriptions[id]
 	sub.BillingAnchor = anchor
@@ -450,7 +458,7 @@ func (f *fakeServer) setAnchor(id string, anchor time.Time) om.Subscription {
 
 func (f *fakeServer) endSubscription(sub *om.Subscription, nextCycle bool) {
 	f.subscriptionWrites++
-	end := time.Now()
+	end := f.now()
 	sub.Status = om.SubscriptionStatusInactive
 	if nextCycle {
 		end = end.Add(30 * 24 * time.Hour)

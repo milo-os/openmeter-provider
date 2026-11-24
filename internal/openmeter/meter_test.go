@@ -88,6 +88,10 @@ func (f *fakeServer) serveMeters(w http.ResponseWriter, r *http.Request) bool {
 	if !strings.HasPrefix(r.URL.Path, "/api/v1/meters") {
 		return false
 	}
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/query") {
+		f.serveMeterQuery(w, r)
+		return true
+	}
 	slug := strings.TrimPrefix(r.URL.Path, "/api/v1/meters/")
 	slug = strings.TrimSuffix(slug, "/")
 

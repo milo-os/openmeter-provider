@@ -334,7 +334,12 @@ func (r *BillingEntitlementReconciler) Reconcile(ctx context.Context, req reconc
 		msg += fmt.Sprintf("; changes to Offer %q at the end of its billing period, %s",
 			offer.Name, state.ChangeAt.UTC().Format(time.RFC3339))
 		// Just after the boundary, so OpenMeter is in the new period too.
-		requeueAfter = min(requeueAfter, state.ChangeAt.Sub(now)+changeAtPeriodEndDelay)
+		requeueAfter = min(requeueAfter, untilJustAfter(*state.ChangeAt, now))
+	case state.BridgedUntil != nil:
+		msg += fmt.Sprintf("; its tiered prices continue from the usage earlier in this billing period, "+
+			"and it moves onto the Offer's own plan when the period ends, %s",
+			state.BridgedUntil.UTC().Format(time.RFC3339))
+		requeueAfter = min(requeueAfter, untilJustAfter(*state.BridgedUntil, now))
 	case state.Pending != nil:
 		reason = conditionReasonMigrationScheduled
 	}
@@ -404,6 +409,10 @@ func (r *BillingEntitlementReconciler) subscribedOffer(ctx context.Context, offe
 	if current.Plan == nil || current.Plan.Key == planKeyForOffer(offer) || current.Metadata == nil {
 		return offer, nil
 	}
+	if bridged, ok := openmeter.BridgedPlanKey(current.Plan.Key); ok && bridged == planKeyForOffer(offer) {
+		// A bridge plan is a copy of the Offer's plan.
+		return offer, nil
+	}
 	name := (*current.Metadata)[subscriptionMetadataOffer]
 	if name == "" {
 		return offer, nil
@@ -419,6 +428,13 @@ func (r *BillingEntitlementReconciler) subscribedOffer(ctx context.Context, offe
 		return offer, nil
 	}
 	return &previous, nil
+}
+
+// untilJustAfter is how long from now until just after a billing period
+// boundary at t (changeAtPeriodEndDelay after it), and never less than
+// that delay, so a boundary already passed is retried rather than dropped.
+func untilJustAfter(t, now time.Time) time.Duration {
+	return max(t.Sub(now)+changeAtPeriodEndDelay, changeAtPeriodEndDelay)
 }
 
 // changeAtPeriodEndDelay is how long after a billing period ends the
