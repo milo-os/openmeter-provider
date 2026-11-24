@@ -34,14 +34,6 @@ openmeter-provider/
 │   ├── base/                         # Core resources
 │   ├── components/                   # Optional components
 │   └── overlays/                     # Environment-specific
-├── ui/                               # Remix UI (React + datum-ui)
-│   ├── app/
-│   │   ├── components/AppLayout.tsx  # Sidebar + breadcrumb layout
-│   │   ├── lib/                      # k8s.server, kubeconfig.server, types, format
-│   │   ├── routes/                   # File-based Remix routes
-│   │   └── styles/index.css          # Tailwind + datum-ui theme
-│   ├── Dockerfile
-│   └── package.json
 ├── hack/                             # Scripts and boilerplate
 └── test/e2e/                         # Chainsaw E2E tests
 ```
@@ -83,10 +75,4 @@ task generate                 # Run code generation
 task manifests                # Generate CRD/RBAC/webhook manifests
 task dev:setup                # Bootstrap kind cluster + deploy
 task dev:redeploy             # Rebuild and redeploy
-
-# UI
-task ui:install               # Install UI dependencies (pnpm)
-task ui:dev                   # Start dev server at http://localhost:3000
-task ui:build                 # Production build
-task ui:type-check            # TypeScript check
 ```

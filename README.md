@@ -1,6 +1,6 @@
 # openmeter-provider
 
-A production-ready starting point for building Kubernetes controller services on the Milo platform. Fork this once and you get a working kubebuilder v4 controller, example CRD with reconciler/finalizer/conditions, defaulting and validating webhooks, a full Kustomize deployment tree, a Remix UI, Taskfile-based dev workflow, GitHub Actions CI, and a Claude Code integration that guides you through naming and initialization before you write a single line of code.
+A production-ready starting point for building Kubernetes controller services on the Milo platform. Fork this once and you get a working kubebuilder v4 controller, example CRD with reconciler/finalizer/conditions, defaulting and validating webhooks, a full Kustomize deployment tree, Taskfile-based dev workflow, GitHub Actions CI, and a Claude Code integration that guides you through naming and initialization before you write a single line of code.
 
 This template exists because building all of that from scratch — correctly — takes days. Forking this takes minutes.
 
@@ -28,7 +28,6 @@ Once initialized, Claude Code has full context via `CLAUDE.md` to help you devel
 - Adding new resource types (`kubebuilder create api`)
 - Writing reconciler logic
 - Adding validation rules to webhooks
-- Extending the Remix UI with new routes and components
 - Generating and applying manifests
 
 This is not a one-time scaffold. It's a development partner for the full lifecycle of the service.
@@ -51,7 +50,6 @@ If you want to restart the discovery flow, run:
 | Docker | recent | https://docs.docker.com/get-docker |
 | kind | v0.20+ | `go install sigs.k8s.io/kind@latest` |
 | Task | v3+ | https://taskfile.dev/installation |
-| pnpm | v9+ | `npm install -g pnpm` |
 | kubebuilder | v4 (reference) | https://book.kubebuilder.io/quick-start |
 | gh | any | https://cli.github.com |
 
@@ -123,24 +121,6 @@ task dev:redeploy
 
 This rebuilds the image, loads it into the kind cluster, and cycles the controller pod. Faster than a full `dev:setup`.
 
-Start the Remix UI dev server:
-
-```bash
-task ui:dev   # http://localhost:3000
-```
-
-The UI connects to the Kubernetes API server using environment variables. Copy `ui/.env.example` to `ui/.env` and configure:
-
-```bash
-# Option 1: explicit credentials
-<SERVICE>_API_SERVER_URL=https://your-api-server:6443
-<SERVICE>_API_CA_FILE=/path/to/ca.crt
-<SERVICE>_API_TOKEN_FILE=/path/to/token
-
-# Option 2: local kubeconfig (dev default)
-# Leave the URL unset — falls back to .test-infra/kubeconfig automatically
-```
-
 Run Chainsaw end-to-end tests:
 
 ```bash
@@ -163,9 +143,6 @@ openmeter-provider/
 │   ├── base/                   # Core manifests (CRD, RBAC, webhook, manager)
 │   ├── components/             # Optional overlayable components
 │   └── overlays/               # dev and prod environment overlays
-├── ui/                         # Remix UI (React + datum-ui, Tailwind)
-│   ├── app/routes/             # File-based Remix routes
-│   └── app/lib/                # k8s server client, kubeconfig, types
 ├── test/e2e/                   # Chainsaw test cases
 └── hack/
     └── rename.sh               # One-shot placeholder replacement script
@@ -184,9 +161,6 @@ openmeter-provider/
 | `task manifests` | Generate CRD, RBAC, and webhook manifests |
 | `task dev:setup` | Create kind cluster and deploy controller |
 | `task dev:redeploy` | Rebuild image and cycle the controller pod |
-| `task ui:dev` | Start Remix UI at http://localhost:3000 |
-| `task ui:build` | Production build of the UI |
-| `task ui:type-check` | TypeScript type check |
 | `task e2e` | Run Chainsaw e2e tests |
 
 ---

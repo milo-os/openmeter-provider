@@ -698,46 +698,6 @@ tasks:
           echo "Tool $_NAME is now available at $_SYMLINK_PATH (points to $_VERSIONED_TOOL_PATH)"
         fi
 
-  # UI tasks
-  ui:install:
-    desc: Install UI dependencies
-    dir: ui
-    cmds:
-      - pnpm install
-    silent: true
-
-  ui:dev:
-    desc: Start the UI dev server (http://localhost:3000)
-    dir: ui
-    cmds:
-      - pnpm dev
-    silent: false
-
-  ui:build:
-    desc: Build the UI for production
-    dir: ui
-    cmds:
-      - pnpm build
-    silent: true
-
-  ui:type-check:
-    desc: Run TypeScript type-check on the UI
-    dir: ui
-    cmds:
-      - pnpm type-check
-    silent: false
-
-  ui:docker-build:
-    desc: Build the UI container image
-    cmds:
-      - |
-        set -e
-        GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-        VERSION="v0.0.0-dev+${GIT_COMMIT:0:7}"
-        docker build -t "ghcr.io/milo-os/openmeter-provider-ui:dev" ui/
-        echo "Built ghcr.io/milo-os/openmeter-provider-ui:dev"
-    silent: true
-
   # E2E Testing
   e2e:
     desc: 'Run chainsaw e2e tests. Pass a subdirectory under test/e2e/ to scope the run, e.g. `task e2e -- meterdefinition` or `task e2e -- meterdefinition/aggregations`.'
