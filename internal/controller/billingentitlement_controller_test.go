@@ -1060,3 +1060,62 @@ func hasEventPrefix(rec *record.FakeRecorder, want string) bool {
 		}
 	}
 }
+
+// TestBillingEntitlement_Bridged: an account moved to another Offer in the
+// middle of a billing period is on a bridge of the Offer's plan until the
+// period ends; it's synced, says so, and comes back just after the end.
+func TestBillingEntitlement_Bridged(t *testing.T) {
+	r, omc, _ := newEntitlementReconciler(t, testEntitlement(testBEName, "test-offer"), testAccount(), cpuOffer())
+	now := time.Date(2026, 11, 30, 23, 50, 0, 0, time.UTC)
+	r.Now = func() time.Time { return now }
+	periodEnd := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	omc.ensureFn = func(d openmeter.DesiredSubscription) (openmeter.SubscriptionState, error) {
+		key := openmeter.BridgePlanKey(d.PlanKey, d.CustomerKey, periodEnd.AddDate(0, -1, 0))
+		return openmeter.SubscriptionState{
+			Current:      om.Subscription{Id: "sub-2", Status: om.SubscriptionStatusActive, Plan: &om.PlanReference{Key: key, Version: 1}},
+			PlanVersion:  1,
+			BridgedUntil: &periodEnd,
+			Changed:      true,
+		}, nil
+	}
+
+	res := reconcileEntitlement(t, r, testBEName)
+
+	c := assertCondition(t, r, metav1.ConditionTrue, conditionReasonSynced)
+	if !strings.Contains(c.Message, "continue from the usage earlier in this billing period") ||
+		!strings.Contains(c.Message, "2026-12-01T00:00:00Z") {
+		t.Errorf("message = %q, want the bridge and when it ends", c.Message)
+	}
+	if want := 10*time.Minute + changeAtPeriodEndDelay; res.RequeueAfter != want {
+		t.Errorf("RequeueAfter = %v, want %v (just after the period ends)", res.RequeueAfter, want)
+	}
+
+	// A boundary already passed is retried soon, not dropped.
+	now = periodEnd.Add(time.Minute)
+	if res = reconcileEntitlement(t, r, testBEName); res.RequeueAfter != changeAtPeriodEndDelay {
+		t.Errorf("RequeueAfter = %v after the boundary, want %v", res.RequeueAfter, changeAtPeriodEndDelay)
+	}
+}
+
+func TestSubscribedOffer_Bridge(t *testing.T) {
+	offer := cpuOffer()
+	offer.UID = "11111111-2222-3333-4444-555555555555"
+	previous := cpuOffer()
+	previous.Name, previous.UID = "previous-offer", "66666666-7777-8888-9999-000000000000"
+	r, _, _ := newEntitlementReconciler(t, offer, previous)
+
+	// The subscription's metadata may still name the Offer it was moved
+	// from; on a bridge of offer's plan, offer's terms apply.
+	key := openmeter.BridgePlanKey(planKeyForOffer(offer), "cust", time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC))
+	sub := om.Subscription{
+		Plan:     &om.PlanReference{Key: key, Version: 1},
+		Metadata: &om.Metadata{subscriptionMetadataOffer: previous.Name},
+	}
+	got, err := r.subscribedOffer(context.Background(), offer, sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != offer.Name {
+		t.Errorf("subscribed offer = %s, want %s", got.Name, offer.Name)
+	}
+}

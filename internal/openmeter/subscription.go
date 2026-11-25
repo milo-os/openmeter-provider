@@ -124,6 +124,13 @@ type SubscriptionState struct {
 	// which it isn't on yet: the end of its billing period, for a
 	// DesiredSubscription with ChangeAtPeriodEnd.
 	ChangeAt *time.Time
+	// BridgedUntil, when set, says Current is on a bridge plan of the
+	// desired plan (see BridgePlanKey): the plan's active version with its
+	// graduated tiers continuing from the usage earlier in the billing
+	// period, which a change in the middle of it would otherwise restart.
+	// At BridgedUntil, the end of the period, Current changes onto the
+	// desired plan itself.
+	BridgedUntil *time.Time
 	// Changed reports that this call changed the customer's subscriptions:
 	// created, changed, migrated or restored one, or deleted a scheduled one.
 	// OpenMeter invoices charges billed in advance, such as
@@ -169,6 +176,9 @@ type subscriptionStep struct {
 	target om.Subscription
 	// at, for a change, is when it takes effect; zero means immediately.
 	at time.Time
+	// plan, for a change, is the plan version to change onto, when it isn't
+	// the desired plan's active version: a bridge plan.
+	plan *omv3.BillingPlan
 	// current and pending describe the converged state (kind == stepNone).
 	current *om.Subscription
 	pending *om.Subscription
@@ -183,7 +193,11 @@ type subscriptionStep struct {
 // scheduled (starts in the future). The rules:
 //
 //   - Plan switch (another plan key): change immediately — the customer has
-//     been moved to a different Offer and should be billed by it now.
+//     been moved to a different Offer and should be billed by it now. In
+//     the middle of a billing period, EnsureSubscription changes onto a
+//     bridge of the plan (see BridgePlanKey) so its tiers continue from the
+//     period's earlier usage, and onto the plan itself when the period ends.
+//     A subscription on a bridge of planKey is a plan switch here too.
 //   - New version of the same plan: migrate immediately. Migrating at the
 //     next billing cycle would avoid splitting the period, but it creates a
 //     scheduled subscription, and OpenMeter (v1.0.0-beta.232) keeps counting
@@ -298,7 +312,17 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 			return SubscriptionState{}, &PermanentError{Err: fmt.Errorf(
 				"%w: the billing account has no payment method or payment terms", ErrCustomerBillingNotReady)}
 		}
-		if step.kind == stepChange && desired.ChangeAtPeriodEnd {
+		leavingBridge := step.kind == stepChange && onBridgeOf(step.target, desired.PlanKey)
+		if leavingBridge {
+			// On a bridge of the desired plan: it moves onto the plan itself
+			// at the end of the billing period, whatever else is asked.
+			at, wait := bridgeExitTime(step.target, now)
+			if wait != nil {
+				return SubscriptionState{Current: step.target, PlanVersion: activeVersion, BridgedUntil: wait, Changed: changed}, nil
+			}
+			step.at = at
+		}
+		if step.kind == stepChange && desired.ChangeAtPeriodEnd && !leavingBridge {
 			period, err := c.currentBillingPeriod(ctx, step.target.Id)
 			if err != nil {
 				return SubscriptionState{}, fmt.Errorf("get billing period: %w", err)
@@ -321,10 +345,19 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 			}
 			step.at = at
 		}
+		if step.kind == stepChange {
+			if step.plan, err = c.bridgePlan(ctx, desired, step, *active, subs, now); err != nil {
+				return SubscriptionState{}, fmt.Errorf("bridge the change: %w", err)
+			}
+		}
 		if err := c.applySubscriptionStep(ctx, desired, step, *active); err != nil {
 			return SubscriptionState{}, fmt.Errorf("%s subscription: %w", step.kind, err)
 		}
 		changed = true
+		if step.kind == stepChange && onBridge(step.target) {
+			// Best effort: a bridge plan left behind is harmless.
+			_ = c.deleteBridgePlan(ctx, step.target.Plan.Key)
+		}
 	}
 	return SubscriptionState{}, &TransientError{Err: fmt.Errorf(
 		"subscription for customer %s did not converge after %d steps", desired.CustomerKey, maxSubscriptionSteps)}
@@ -332,8 +365,12 @@ func (c *client) EnsureSubscription(ctx context.Context, desired DesiredSubscrip
 
 func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubscription, step subscriptionStep, active omv3.BillingPlan) error {
 	metadata := om.Metadata(desired.Metadata)
-	if (step.kind == stepChange || step.kind == stepMigrate) && planHasUnitConfig(active) {
-		return c.changeSubscriptionV3(ctx, desired, step, active.Version)
+	target := active
+	if step.plan != nil {
+		target = *step.plan
+	}
+	if (step.kind == stepChange || step.kind == stepMigrate) && planHasUnitConfig(target) {
+		return c.changeSubscriptionV3(ctx, desired, step, target.Key, target.Version)
 	}
 	switch step.kind {
 	case stepCreate:
@@ -390,7 +427,7 @@ func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubsc
 			return &PermanentError{Err: err}
 		}
 		change := om.PlanSubscriptionChange{
-			Plan:     om.PlanReferenceInput{Key: desired.PlanKey},
+			Plan:     om.PlanReferenceInput{Key: target.Key},
 			Timing:   timing,
 			Metadata: &metadata,
 		}
@@ -433,7 +470,7 @@ func (c *client) applySubscriptionStep(ctx context.Context, desired DesiredSubsc
 // or values. Unlike v1, a v3 change without an anchor bills from the moment
 // of the change, so it carries the existing subscription's anchor over
 // (or desired.BillingAnchor, with MoveAnchor).
-func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscription, step subscriptionStep, version int) error {
+func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscription, step subscriptionStep, planKey string, version int) error {
 	target := step.target
 	var timing omv3.BillingSubscriptionEditTiming
 	if step.at.IsZero() {
@@ -458,7 +495,7 @@ func (c *client) changeSubscriptionV3(ctx context.Context, desired DesiredSubscr
 		Id      *omv3.ULID        `json:"id,omitempty"`
 		Key     *omv3.ResourceKey `json:"key,omitempty"`
 		Version *int              `json:"version,omitempty"`
-	}{Key: &desired.PlanKey, Version: &version}
+	}{Key: &planKey, Version: &version}
 	_, err := c.v3.do(ctx, http.MethodPost, "/subscriptions/"+url.PathEscape(target.Id)+"/change", nil, body, nil)
 	return reclassifySubscription(err)
 }
@@ -684,6 +721,10 @@ func (c *client) CancelSubscriptions(ctx context.Context, customerKey CustomerKe
 		}
 		if err := classifySubscription(rsp.HTTPResponse, rsp.Body); err != nil {
 			return fmt.Errorf("cancel subscription %s: %w", s.Id, err)
+		}
+		if onBridge(s) {
+			// Best effort, as when a subscription leaves its bridge.
+			_ = c.deleteBridgePlan(ctx, s.Plan.Key)
 		}
 	}
 	return nil

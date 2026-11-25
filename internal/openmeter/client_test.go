@@ -72,6 +72,13 @@ type fakeServer struct {
 	// invoicesDeleted records deleted invoice ids in order.
 	pendingLinesInvoiced int
 	invoicesDeleted      []string
+	// usage is the metered usage POST /meters/{slug}/query sums.
+	usage []fakeUsage
+	// meterQueries counts meter queries.
+	meterQueries int
+	// clock, when set, is the time subscriptions start and end at instead
+	// of now.
+	clock time.Time
 	// billingNotReady makes subscription creates fail the way OpenMeter does
 	// for a customer without Stripe app data.
 	billingNotReady bool

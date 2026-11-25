@@ -61,7 +61,11 @@ type pricedRange struct {
 	discounts  *productcatalog.Discounts
 	// from and to bound the usage to price; earlierFrom is where the
 	// billing period's usage starts counting for this item, so tiered
-	// prices continue from the usage between earlierFrom and from.
+	// prices continue from the usage between earlierFrom and from. Like
+	// OpenMeter, it reaches back no further than the subscription's start:
+	// a plan changed mid-period continues its tiers on a bridge plan
+	// instead, whose tiers already start further along (see
+	// openmeter.BridgePlanKey).
 	from, to, earlierFrom time.Time
 }
 
