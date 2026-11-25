@@ -181,6 +181,14 @@ only be deleted, and one in `issuing.syncing` can't be voided or deleted.
 So the provider also warns about any invoice that has waited on a hook for
 more than an hour.
 
+The gauges only move while the provider reconciles. Two things keep it
+doing so when its connection to Milo stalls: every reconcile is cancelled
+and retried after 10 minutes, and each replica asks Milo for a namespace
+every 20 seconds and fails its liveness probe once Milo has gone unanswered
+for 2 minutes, so the kubelet restarts it. The leader's Lease is on the
+local cluster, so a replica that has lost Milo would otherwise stay leader
+and write nothing.
+
 ## What Stays the Same
 
 - The `Invoice` projection still matches each OpenMeter invoice to its
