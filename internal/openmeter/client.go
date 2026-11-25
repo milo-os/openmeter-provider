@@ -297,10 +297,10 @@ type client struct {
 }
 
 // requestTimeout bounds every OpenMeter HTTP call. The generated SDK
-// defaults to a bare &http.Client{}, which has NO timeout — and reconcile
-// contexts carry no deadline of their own. With a single worker per
+// defaults to a bare &http.Client{}, which has NO timeout — and a
+// reconcile's own deadline is minutes. With a single worker per
 // controller, one hung connection would otherwise stall every reconcile
-// indefinitely, with nothing logged and no error to retry on. Generous
+// for that long, with nothing logged and no error to retry on. Generous
 // enough for a slow list-and-page walk, short enough that a wedged
 // connection surfaces as a retryable transient failure instead.
 const requestTimeout = 30 * time.Second
