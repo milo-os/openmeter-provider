@@ -17,7 +17,9 @@ vars:
   WAIT_TIMEOUT: "10m"
   CONTROLLER_TOOLS_VERSION: "v0.18.0"
   DEFAULTER_GEN_VERSION: "v0.32.3"
+  # renovate: datasource=github-releases depName=golangci/golangci-lint
   GOLANGCI_LINT_VERSION: "v2.15.0"
+  # renovate: datasource=github-releases depName=kyverno/chainsaw
   CHAINSAW_VERSION: "v0.2.15"
   # Billing repo release to pull the MeterDefinition CRD from. The
   # openmeter-provider reconciles billing's MeterDefinition kind, so its CRD
