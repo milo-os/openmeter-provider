@@ -67,7 +67,7 @@ jobs:
       - name: Install kubectl
         uses: azure/setup-kubectl@v5
         with:
-          version: 'v1.30.0'
+          version: 'v1.30.14'
 
       - name: Install KinD
         uses: helm/kind-action@v1
