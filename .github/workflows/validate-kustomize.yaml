@@ -12,4 +12,6 @@ jobs:
     permissions:
       contents: read
     uses: datum-cloud/actions/.github/workflows/validate-kustomize.yaml@v1.31.0
+    with:
+      runner: ${{ vars.MILO_LINUX_RUNNER || 'ubuntu-latest' }}
     secrets: inherit
