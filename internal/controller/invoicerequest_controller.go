@@ -152,6 +152,13 @@ func (r *InvoiceRequestReconciler) Reconcile(ctx context.Context, req reconcile.
 // previewFirstInvoice works out a contract's first invoice before it
 // starts, from its Offer's flat pricings. Nothing is subscribed yet, so
 // OpenMeter has nothing to show; the charges are flat fees, priced here.
+//
+// Charges staff added that are held for an invoice on the day the contract
+// starts are previewed with them: they're invoiced that day too, contract
+// or not (see ChargeReconciler.invoiceAt). A held charge due on another day
+// goes on a different invoice (before the start, the account's invoice for
+// that period; after it, one the contract's subscription decides once it
+// exists), so it's counted in the message and left out.
 func (r *InvoiceRequestReconciler) previewFirstInvoice(
 	ctx context.Context,
 	ir *billingv1alpha1.InvoiceRequest,
@@ -177,12 +184,79 @@ func (r *InvoiceRequestReconciler) previewFirstInvoice(
 	if err != nil {
 		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
 	}
-	if len(charges) == 0 {
+	fees := len(charges)
+
+	held, err := r.heldChargeList(ctx, account)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	added, elsewhere := 0, 0
+	amounts := []string{total}
+	for i := range held {
+		c := &held[i]
+		if at := c.Status.InvoiceAt; at == nil || at.UTC().Format(time.DateOnly) != starts {
+			elsewhere++
+			continue
+		}
+		charge, _, err := r.chargeDraftCharge(ctx, billingv1alpha1.ChargeDraftLine{
+			ServicePricingRef: c.Spec.ServicePricingRef,
+			Description:       c.Spec.Description,
+			Quantity:          c.Spec.Quantity,
+			UnitAmount:        c.Spec.UnitAmount,
+			Tax:               c.Spec.Tax,
+			DiscountPercent:   c.Spec.DiscountPercent,
+			ServicePeriod:     c.Spec.ServicePeriod,
+			Note:              c.Spec.Note,
+		}, account, r.now())
+		if err != nil {
+			return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed,
+				fmt.Sprintf("charge %q: %v", c.Name, err))
+		}
+		// What billing says is due, as the next-invoice preview shows it.
+		charge.line.Amount = c.Status.AmountDue
+		charges = append(charges, charge)
+		amounts = append(amounts, c.Status.AmountDue)
+		added++
+	}
+	if total, err = openmeter.AddDecimals(amounts...); err != nil {
+		return ctrl.Result{}, r.fail(ctx, ir, billingv1alpha1.InvoiceRequestReasonFailed, err.Error())
+	}
+
+	other := ""
+	if elsewhere > 0 {
+		other = fmt.Sprintf(". %s due on another day %s on a different invoice and not shown",
+			countOf(elsewhere, "added charge", "added charges"), isAre(elsewhere))
+	}
+	switch {
+	case len(charges) == 0:
 		return ctrl.Result{}, r.succeed(ctx, ir, account.Spec.CurrencyCode, nil, "0",
-			fmt.Sprintf("Offer %q has no one-time or recurring charges to invoice when the contract starts on %s", offer.Name, starts))
+			fmt.Sprintf("Offer %q has no one-time or recurring charges to invoice when the contract starts on %s", offer.Name, starts)+other)
+	case fees == 0:
+		return r.previewFirstInvoiceResult(ctx, ir, account, charges, total, fmt.Sprintf(
+			"Offer %q has no one-time or recurring charges of its own; %s to the account %s invoiced when the contract starts on %s",
+			offer.Name, countOf(added, "charge added", "charges added"), isAre(added), starts)+other)
+	case added > 0:
+		return r.previewFirstInvoiceResult(ctx, ir, account, charges, total, fmt.Sprintf(
+			"The first invoice, sent when the contract starts on %s, with %s to the account that %s invoiced the same day",
+			starts, countOf(added, "charge added", "charges added"), isAre(added))+other)
 	}
 	return r.previewFirstInvoiceResult(ctx, ir, account, charges, total,
-		fmt.Sprintf("The first invoice, sent when the contract starts on %s", starts))
+		fmt.Sprintf("The first invoice, sent when the contract starts on %s", starts)+other)
+}
+
+// countOf is "1 charge" or "3 charges".
+func countOf(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
+
+func isAre(n int) string {
+	if n == 1 {
+		return "is"
+	}
+	return "are"
 }
 
 // previewNextInvoice shows the draft invoice waiting to be issued, or else
@@ -242,28 +316,16 @@ func (r *InvoiceRequestReconciler) previewNextInvoice(
 		"One-time and recurring charges waiting for later billing periods")
 }
 
-// heldCharges are the account's next-invoice Charges that the Charge
-// controller is still holding in billing (see DefaultChargeHold), as
-// preview lines with their total. They aren't on OpenMeter's invoice yet,
-// so its upcoming charges don't include them. None where billing doesn't
-// serve the Charge API.
+// heldCharges are the account's held Charges (see heldChargeList) as
+// preview lines with their total.
 func (r *InvoiceRequestReconciler) heldCharges(ctx context.Context, account *billingv1alpha1.BillingAccount) ([]billingv1alpha1.InvoiceRequestLine, string, error) {
-	var charges billingv1alpha1.ChargeList
-	if err := r.List(ctx, &charges, client.InNamespace(account.Namespace)); err != nil {
-		if apimeta.IsNoMatchError(err) {
-			return nil, "0", nil
-		}
-		return nil, "", fmt.Errorf("list charges: %w", err)
+	held, err := r.heldChargeList(ctx, account)
+	if err != nil {
+		return nil, "", err
 	}
 	var lines []billingv1alpha1.InvoiceRequestLine
 	amounts := []string{"0"}
-	for _, c := range charges.Items {
-		if c.Spec.BillingAccountRef.Name != account.Name || !c.DeletionTimestamp.IsZero() ||
-			c.Spec.Invoice == billingv1alpha1.ChargeInvoiceNow ||
-			c.Status.Phase != billingv1alpha1.ChargePhaseScheduled || c.Status.AmountDue == "" ||
-			apimeta.IsStatusConditionTrue(c.Status.Conditions, billingv1alpha1.ChargeConditionOnInvoice) {
-			continue
-		}
+	for _, c := range held {
 		line := billingv1alpha1.InvoiceRequestLine{Description: c.Spec.Description, Amount: c.Status.AmountDue}
 		if p := c.Spec.ServicePeriod; p != nil {
 			start, errStart := time.Parse(chargeDateLayout, p.Start)
@@ -283,6 +345,31 @@ func (r *InvoiceRequestReconciler) heldCharges(ctx context.Context, account *bil
 		return nil, "", fmt.Errorf("held charges' total: %w", err)
 	}
 	return lines, total, nil
+}
+
+// heldChargeList are the account's next-invoice Charges that the Charge
+// controller is still holding in billing (see DefaultChargeHold). They
+// aren't on OpenMeter's invoice yet, so its upcoming charges don't include
+// them. None where billing doesn't serve the Charge API.
+func (r *InvoiceRequestReconciler) heldChargeList(ctx context.Context, account *billingv1alpha1.BillingAccount) ([]billingv1alpha1.Charge, error) {
+	var charges billingv1alpha1.ChargeList
+	if err := r.List(ctx, &charges, client.InNamespace(account.Namespace)); err != nil {
+		if apimeta.IsNoMatchError(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list charges: %w", err)
+	}
+	var held []billingv1alpha1.Charge
+	for _, c := range charges.Items {
+		if c.Spec.BillingAccountRef.Name != account.Name || !c.DeletionTimestamp.IsZero() ||
+			c.Spec.Invoice == billingv1alpha1.ChargeInvoiceNow ||
+			c.Status.Phase != billingv1alpha1.ChargePhaseScheduled || c.Status.AmountDue == "" ||
+			apimeta.IsStatusConditionTrue(c.Status.Conditions, billingv1alpha1.ChargeConditionOnInvoice) {
+			continue
+		}
+		held = append(held, c)
+	}
+	return held, nil
 }
 
 // entitlementFor returns the account's BillingEntitlement that isn't being
