@@ -415,3 +415,97 @@ func TestInvoiceRequest_Failures(t *testing.T) {
 		assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseFailed, billingv1alpha1.InvoiceRequestReasonFailed)
 	})
 }
+
+// usageOnlyOffer is a contract with nothing to invoice when it starts.
+func usageOnlyOffer() *billingv1alpha1.Offer {
+	offer := contractOffer()
+	offer.Spec.ServicePricings = offer.Spec.ServicePricings[2:]
+	return offer
+}
+
+// heldCharge is a next-invoice charge the Charge controller is holding for
+// the invoice at invoiceAt.
+func heldCharge(name string, invoiceAt time.Time) *billingv1alpha1.Charge {
+	c := chargeObj()
+	c.Name = name
+	c.Status.Phase = billingv1alpha1.ChargePhaseScheduled
+	at := metav1.NewTime(invoiceAt)
+	c.Status.InvoiceAt = &at
+	return c
+}
+
+// Charges held for an invoice on the day a contract starts are previewed
+// with its first invoice; ones due another day are counted, not shown.
+func TestInvoiceRequest_PreviewBeforeTheContractStartsShowsHeldCharges(t *testing.T) {
+	otherDay := time.Date(2026, time.December, 1, 0, 0, 0, 0, time.UTC)
+	preview := func(t *testing.T, objs ...client.Object) (*billingv1alpha1.InvoiceRequest, string) {
+		t.Helper()
+		omc := &fakeInvoicingClient{}
+		objs = append(objs, usdAccount(), contractEntitlementFor(contractStart), installPricing(),
+			invoiceRequestObj(billingv1alpha1.InvoiceRequestModePreview))
+		ir, err := reconcileInvoiceRequest(newInvoiceRequestReconciler(t, omc, objs...))
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		c := assertCompleted(t, ir, billingv1alpha1.InvoiceRequestPhaseSucceeded, billingv1alpha1.InvoiceRequestReasonSucceeded)
+		if omc.calls != 0 {
+			t.Errorf("called OpenMeter %d times before anything is subscribed", omc.calls)
+		}
+		return ir, c.Message
+	}
+	assertChargeLine := func(t *testing.T, l billingv1alpha1.InvoiceRequestLine) {
+		t.Helper()
+		if l.Description != "Cross-connect install" || l.Amount != "450.00" || l.Quantity != "2" || l.UnitAmount != "250" ||
+			l.Period == nil || !l.Period.Start.Time.Equal(time.Date(2026, 12, 15, 0, 0, 0, 0, time.UTC)) ||
+			!l.Period.End.Time.Equal(time.Date(2026, 12, 15, 23, 59, 59, 0, time.UTC)) {
+			t.Errorf("held charge line = %+v", l)
+		}
+	}
+
+	t.Run("flat fees and a held charge", func(t *testing.T) {
+		ir, msg := preview(t, contractOffer(), heldCharge("held", contractStart), heldCharge("later", otherDay))
+		if ir.Status.Total != "2850.00" || len(ir.Status.Lines) != 3 {
+			t.Fatalf("status = %+v, want the two fees and the charge, 2850.00", ir.Status)
+		}
+		assertChargeLine(t, ir.Status.Lines[2])
+		if want := "The first invoice, sent when the contract starts on 2026-11-18, with 1 charge added to the account that is invoiced the same day. " +
+			"1 added charge due on another day is on a different invoice and not shown. " +
+			"Tax isn't included: stripe-provider isn't installed"; msg != want {
+			t.Errorf("message = %q", msg)
+		}
+	})
+
+	t.Run("a usage-only contract and a held charge", func(t *testing.T) {
+		ir, msg := preview(t, usageOnlyOffer(), heldCharge("held", contractStart))
+		if ir.Status.Total != "450.00" || ir.Status.CurrencyCode != "USD" || len(ir.Status.Lines) != 1 {
+			t.Fatalf("status = %+v, want the charge alone, 450.00", ir.Status)
+		}
+		assertChargeLine(t, ir.Status.Lines[0])
+		if want := `Offer "acme-bare-metal" has no one-time or recurring charges of its own; ` +
+			"1 charge added to the account is invoiced when the contract starts on 2026-11-18. " +
+			"Tax isn't included: stripe-provider isn't installed"; msg != want {
+			t.Errorf("message = %q", msg)
+		}
+	})
+
+	t.Run("a usage-only contract with nothing", func(t *testing.T) {
+		ir, msg := preview(t, usageOnlyOffer())
+		if ir.Status.Total != "0" || len(ir.Status.Lines) != 0 || ir.Status.CurrencyCode != "USD" {
+			t.Errorf("status = %+v, want an empty preview", ir.Status)
+		}
+		if msg != `Offer "acme-bare-metal" has no one-time or recurring charges to invoice when the contract starts on 2026-11-18` {
+			t.Errorf("message = %q", msg)
+		}
+	})
+
+	t.Run("a usage-only contract and a charge due another day", func(t *testing.T) {
+		ir, msg := preview(t, usageOnlyOffer(), heldCharge("later", otherDay))
+		if ir.Status.Total != "0" || len(ir.Status.Lines) != 0 {
+			t.Errorf("status = %+v, want an empty preview", ir.Status)
+		}
+		if msg != `Offer "acme-bare-metal" has no one-time or recurring charges to invoice when the contract starts on 2026-11-18. `+
+			"1 added charge due on another day is on a different invoice and not shown" {
+			t.Errorf("message = %q", msg)
+		}
+	})
+}
