@@ -1,0 +1,11 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "packageRules": [
+    {
+      "description": "OpenMeter beta.239 removed the credits mutator pricing relies on; hold OpenMeter until pricing is ported (milo-os/openmeter-provider#151)",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["github.com/openmeterio/openmeter"],
+      "allowedVersions": "<=1.0.0-beta.238"
+    }
+  ]
+}
