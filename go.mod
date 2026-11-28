@@ -19,11 +19,11 @@ require (
 	go.miloapis.com/stripe-provider v0.0.0-00010101000000-000000000000
 	go.uber.org/zap v1.28.0
 	golang.org/x/sync v0.25.0
-	k8s.io/api v0.37.2
-	k8s.io/apimachinery v0.37.2
-	k8s.io/apiserver v0.37.2
-	k8s.io/client-go v0.37.2
-	k8s.io/component-base v0.37.2
+	k8s.io/api v0.37.3
+	k8s.io/apimachinery v0.37.3
+	k8s.io/apiserver v0.37.3
+	k8s.io/client-go v0.37.3
+	k8s.io/component-base v0.37.3
 	k8s.io/klog/v2 v2.140.0
 	k8s.io/kube-openapi v0.0.0-20260721132016-d427ff9ee9ad
 	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab
@@ -158,8 +158,8 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apiextensions-apiserver v0.37.2 // indirect
-	k8s.io/kms v0.37.2 // indirect
-	k8s.io/streaming v0.37.2 // indirect
+	k8s.io/kms v0.37.3 // indirect
+	k8s.io/streaming v0.37.3 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.36.0 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
